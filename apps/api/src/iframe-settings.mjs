@@ -71,11 +71,11 @@ export function validateRules(input) {
   }
   return {
     rules: {
-      couponLockZR20ZR25: input.couponLockZR20ZR25 !== false,
+      couponLockTopTiers: input.couponLockTopTiers !== false && input.couponLockZR20ZR25 !== false,
       couponLockMaxRemaining: input.couponLockMaxRemaining !== false,
       highestDiscountWins: input.highestDiscountWins !== false,
-      vatIntegrityINC014: true,
-      postWriteVerifyINC010: input.postWriteVerifyINC010 !== false,
+      vatIntegrity: true,
+      postWriteVerify: input.postWriteVerify !== false && input.postWriteVerifyINC010 !== false,
       brandLimits
     }
   };
@@ -124,28 +124,28 @@ export async function handleAdminSettingsApi(request, env) {
       ORDER BY created_at DESC
     `).bind(shopId).all();
     const defaultRules = {
-      couponLockZR20ZR25: true,
+      couponLockTopTiers: true,
       couponLockMaxRemaining: true,
       highestDiscountWins: true,
-      vatIntegrityINC014: true,
-      postWriteVerifyINC010: true,
+      vatIntegrity: true,
+      postWriteVerify: true,
       brandLimits: { 'MIVARDI': 10, 'HONDA': 0 }
     };
     const rules = { ...defaultRules, ...(config.rules || {}) };
 
-    const okfishTiers = [
-      { name: 'ZR4 (ID 2)', percent: 4, minTurnover: 5000 },
-      { name: 'ZR6 (ID 5)', percent: 6, minTurnover: 12500 },
-      { name: 'ZR8 (ID 8)', percent: 8, minTurnover: 25000 },
-      { name: 'ZR10 (ID 11)', percent: 10, minTurnover: 37500 },
-      { name: 'ZR12 (ID 14)', percent: 12, minTurnover: 62500 },
-      { name: 'ZR14 (ID 17)', percent: 14, minTurnover: 87500 },
-      { name: 'ZR16 (ID 20)', percent: 16, minTurnover: 125000 },
-      { name: 'ZR18 (ID 23)', percent: 18, minTurnover: 175000 },
-      { name: 'ZR20 (ID 26)', percent: 20, minTurnover: 250000 },
-      { name: 'ZR25 (ID 29)', percent: 25, minTurnover: 375000 }
+    const cleanTiers = [
+      { name: 'Věrnostní hladina 4 %', percent: 4, minTurnover: 5000 },
+      { name: 'Věrnostní hladina 6 %', percent: 6, minTurnover: 12500 },
+      { name: 'Věrnostní hladina 8 %', percent: 8, minTurnover: 25000 },
+      { name: 'Věrnostní hladina 10 %', percent: 10, minTurnover: 37500 },
+      { name: 'Věrnostní hladina 12 %', percent: 12, minTurnover: 62500 },
+      { name: 'Věrnostní hladina 14 %', percent: 14, minTurnover: 87500 },
+      { name: 'Věrnostní hladina 16 %', percent: 16, minTurnover: 125000 },
+      { name: 'Věrnostní hladina 18 %', percent: 18, minTurnover: 175000 },
+      { name: 'Věrnostní hladina 20 %', percent: 20, minTurnover: 250000 },
+      { name: 'Věrnostní hladina 25 %', percent: 25, minTurnover: 375000 }
     ];
-    const tiers = Array.isArray(config.tiers) && config.tiers.length > 0 ? config.tiers : okfishTiers;
+    const tiers = Array.isArray(config.tiers) && config.tiers.length > 0 ? config.tiers : cleanTiers;
 
     return jsonRes({
       shopId,
@@ -367,14 +367,14 @@ function renderApp({ shopId, session, mode }) {
   </section>
 
   <section class="panel" id="panel-rules">
-    <div class="section-title">Pravidla výpočtu cen (Okfish Engine)</div>
+    <div class="section-title">Pravidla výpočtu cen</div>
 
     <div class="form-row">
-      <span class="label">Lepší sleva vyhrává (Highest Discount)</span>
+      <span class="label">Výhodnější cena má přednost</span>
       <div>
         <label style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
           <input type="checkbox" id="rule-highest-discount" checked style="width:16px;height:16px;cursor:pointer;">
-          <span>Pokud má produkt akční cenu výhodnější než věrnostní tier, zákazník platí nižší akční cenu; je-li věrnostní sleva vyšší, uplatní se věrnostní cena.</span>
+          <span>Pokud má produkt akční cenu výhodnější než věrnostní hladina, zákazník automaticky platí nižší akční cenu; je-li věrnostní sleva výhodnější, uplatní se věrnostní cena.</span>
         </label>
       </div>
     </div>
@@ -382,45 +382,45 @@ function renderApp({ shopId, session, mode }) {
     <div class="section-title">Kupónové zámky a ochrana marže</div>
 
     <div class="form-row">
-      <span class="label">Zámek kupónů ZR20 a ZR25</span>
+      <span class="label">Zákaz kupónů pro nejvyšší hladiny</span>
       <div>
         <label style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
-          <input type="checkbox" id="rule-coupon-lock-zr20" checked style="width:16px;height:16px;cursor:pointer;">
-          <span><code>discountCoupon: false</code> – zákazníci v tierech ZR20 a ZR25 nesmí v košíku kombinovat věrnostní cenu se slevovými kupóny.</span>
+          <input type="checkbox" id="rule-coupon-lock-top" checked style="width:16px;height:16px;cursor:pointer;">
+          <span>Zákazníci s nejvyššími slevami (20 % a 25 %) nesmí v košíku kombinovat věrnostní cenu se slevovými kupóny.</span>
         </label>
       </div>
     </div>
 
     <div class="form-row">
-      <span class="label">Strop zbývající slevy pro ZR4–ZR18</span>
+      <span class="label">Omezení kumulace kupónu s věrností</span>
       <div>
         <label style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
           <input type="checkbox" id="rule-coupon-min-price-ratio" checked style="width:16px;height:16px;cursor:pointer;">
-          <span><code>minPriceRatio</code> – u tierů ZR4–ZR18 omezit zbývající slevu na kupón tak, aby součet věrnosti a kupónu nepřekročil povolený strop.</span>
+          <span>U nižších hladin omezit zbývající slevu na kupón tak, aby součet věrnostní slevy a kupónu nepřekročil povolený limit marže.</span>
         </label>
       </div>
     </div>
 
-    <div class="section-title">Slevové stropy značek (BRAND_LIMITS)</div>
-    <p class="hint" style="margin:0 0 10px;">Značky s pevným maximálním limitem věrnostní slevy (např. <code>MIVARDI: 10%</code>, <code>HONDA: 0%</code>):</p>
+    <div class="section-title">Maximální povolená sleva pro vybrané značky</div>
+    <p class="hint" style="margin:0 0 10px;">Značky s pevným stropem maximální věrnostní slevy (např. <code>MIVARDI: 10%</code>, <code>HONDA: 0%</code>):</p>
     <div id="brand-limits-container" style="display:flex;flex-direction:column;gap:6px;max-width:480px;margin-bottom:10px;"></div>
     <button class="btn btn-blue" id="btn-add-brand-limit" style="font-size:11px;padding:4px 8px;">+ Přidat značku</button>
 
-    <div class="section-title">Shoptet API Integrity protokoly</div>
+    <div class="section-title">Zabezpečení a kontrola zápisu</div>
 
     <div class="form-row">
-      <span class="label">DPH Integrita (INC-014)</span>
+      <span class="label">Automatická kontrola a výpočet DPH</span>
       <div class="value" style="color:var(--green);font-weight:600;">
-        ✓ Vynuceno (při PATCH /api/pricelists vždy explicitně včetně <code>includingVat: true</code> a <code>vatRate</code>)
+        ✓ Aktivní (všechny ceny se do ceníků zapisují včetně správné sazby DPH)
       </div>
     </div>
 
     <div class="form-row">
-      <span class="label">Post-Write Verifikace (INC-010)</span>
+      <span class="label">Okamžitá kontrola uložení cen</span>
       <div>
         <label style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
           <input type="checkbox" id="rule-post-write-verify" checked style="width:16px;height:16px;cursor:pointer;">
-          <span>U položek bez předchozí ceny provést okamžitý kontrolní GET a při tichém selhání Shoptetu zápis zopakovat.</span>
+          <span>U nově naceněných položek provést okamžitou kontrolu uložení v Shoptetu a při výpadku zápis automaticky zopakovat.</span>
         </label>
       </div>
     </div>
@@ -518,7 +518,7 @@ function renderApp({ shopId, session, mode }) {
     $('ov-tiers').textContent = state.tiers.length ? state.tiers.length + ' hladin (verze ' + state.version + ')' : 'Zatím nenastaveny';
     const r = state.rules || {};
     const blCount = Object.keys(r.brandLimits || {}).length;
-    $('ov-rules').textContent = 'Kupónový zámek ZR20/ZR25, INC-014 DPH, stropy značek: ' + blCount + ' aktivní';
+    $('ov-rules').textContent = 'Kupónový zámek pro nejvyšší hladiny, kontrola DPH, stropy značek: ' + blCount + ' aktivní';
     $('ov-tokens').textContent = String(state.mcpTokens.length);
   }
 
@@ -541,9 +541,9 @@ function renderApp({ shopId, session, mode }) {
   function renderRules() {
     const r = state.rules || {};
     $('rule-highest-discount').checked = r.highestDiscountWins !== false;
-    $('rule-coupon-lock-zr20').checked = r.couponLockZR20ZR25 !== false;
+    $('rule-coupon-lock-top').checked = (r.couponLockTopTiers !== false && r.couponLockZR20ZR25 !== false);
     $('rule-coupon-min-price-ratio').checked = r.couponLockMaxRemaining !== false;
-    $('rule-post-write-verify').checked = r.postWriteVerifyINC010 !== false;
+    $('rule-post-write-verify').checked = (r.postWriteVerify !== false && r.postWriteVerifyINC010 !== false);
 
     const c = $('brand-limits-container');
     c.textContent = '';
@@ -565,9 +565,9 @@ function renderApp({ shopId, session, mode }) {
 
     const rules = {
       highestDiscountWins: $('rule-highest-discount').checked,
-      couponLockZR20ZR25: $('rule-coupon-lock-zr20').checked,
+      couponLockTopTiers: $('rule-coupon-lock-top').checked,
       couponLockMaxRemaining: $('rule-coupon-min-price-ratio').checked,
-      postWriteVerifyINC010: $('rule-post-write-verify').checked,
+      postWriteVerify: $('rule-post-write-verify').checked,
       brandLimits
     };
     const btn = $('rules-save');
@@ -576,7 +576,7 @@ function renderApp({ shopId, session, mode }) {
       const res = await api('/rules', { method: 'PUT', body: JSON.stringify({ rules, version: state.version }) });
       state.rules = res.rules; state.version = res.version;
       renderRules(); renderOverview();
-      flash('Pravidla a slevové stropy Okfish byly uloženy.');
+      flash('Pravidla a slevové stropy byly uloženy.');
     } catch (e) { flash(e.message, 'error'); }
     finally { btn.disabled = false; resize(); }
   });

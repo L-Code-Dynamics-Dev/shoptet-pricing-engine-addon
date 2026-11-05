@@ -126,13 +126,13 @@ test('tier validation', () => {
 
 test('rule validation', () => {
   const v = validateRules({
-    couponLockZR20ZR25: true,
+    couponLockTopTiers: true,
     couponLockMaxRemaining: true,
     highestDiscountWins: true,
-    postWriteVerifyINC010: true,
+    postWriteVerify: true,
     brandLimits: { 'MIVARDI': 10, 'honda': '0' }
   });
-  assert.equal(v.rules.couponLockZR20ZR25, true);
+  assert.equal(v.rules.couponLockTopTiers, true);
   assert.equal(v.rules.highestDiscountWins, true);
   assert.deepEqual(v.rules.brandLimits, { 'MIVARDI': 10, 'HONDA': 0 });
 });
@@ -172,14 +172,14 @@ test('tier save enforces optimistic version and keeps other config', async () =>
 });
 
 test('rule save updates config and increments version', async () => {
-  const db = fakeDb({ config: { tiers: [], rules: { couponLockZR20ZR25: true } }, version: 1 });
+  const db = fakeDb({ config: { tiers: [], rules: { couponLockTopTiers: true } }, version: 1 });
   const env = { DB: db, ADMIN_SESSION_SECRET: SECRET };
   const session = await issueSession('826800', SECRET);
-  const rules = { couponLockZR20ZR25: true, couponLockMaxRemaining: true, highestDiscountWins: true, postWriteVerifyINC010: true, brandLimits: { MIVARDI: 10 } };
+  const rules = { couponLockTopTiers: true, couponLockMaxRemaining: true, highestDiscountWins: true, postWriteVerify: true, brandLimits: { MIVARDI: 10 } };
   const ok = await handleAdminSettingsApi(await apiReq('/rules', { method: 'PUT', session, body: { rules, version: 1 } }), env);
   assert.equal(ok.status, 200);
   assert.equal((await ok.json()).version, 2);
-  assert.equal(db.config.rules.couponLockZR20ZR25, true);
+  assert.equal(db.config.rules.couponLockTopTiers, true);
   assert.deepEqual(db.config.rules.brandLimits, { MIVARDI: 10 });
 });
 
