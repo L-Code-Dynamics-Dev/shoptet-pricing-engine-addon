@@ -1,3 +1,7 @@
+# Update: MCP OAuth/PKCE
+
+[MCP-OAUTH.md](MCP-OAUTH.md) describes the implemented pre-registered public-client authorization flow, signed-admin pairing/consent, PKCE, metadata, resource binding, access/refresh lifecycle, replay-family revocation and client disconnect. Migration 0012 and HTTP/SQLite integration/security tests were added. The original missing-OAuth findings below are superseded for this supported subset. Real-client compatibility, Cloudflare D1/browser staging, dynamic client registration and operational audit/retention remain unverified or unimplemented; no deployment occurred.
+
 # Update: encrypted Shoptet credentials
 
 [TOKEN-VAULT.md](TOKEN-VAULT.md) documents the implemented per-shop AES-GCM vault, key rotation, transactional installation writes and encrypted API-token cache. Migration 0011 and explicit server-only legacy conversion are provided and tested locally; no remote migration or secret provisioning occurred. The previous plaintext-storage finding below is superseded for the new runtime. Trusted installation callback verification, MCP OAuth/PKCE and production staging verification remain outstanding.

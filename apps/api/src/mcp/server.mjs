@@ -182,20 +182,21 @@ export async function authenticate(request, env) {
   if (!token || !env.DB) return null;
   const digest = await hashToken(token);
   const record = await env.DB.prepare(`
-    SELECT c.shop_id, c.scopes_json
+    SELECT c.shop_id, c.scopes_json, c.oauth_grant_id
     FROM mcp_credentials c
     JOIN installations i ON i.shop_id = c.shop_id
     WHERE c.token_sha256 = ?
       AND c.revoked_at IS NULL
       AND (c.expires_at IS NULL OR c.expires_at > CURRENT_TIMESTAMP)
       AND i.state = 'active'
-  `).bind(digest).first();
+      AND (c.oauth_grant_id IS NULL OR EXISTS(SELECT 1 FROM mcp_oauth_grants g WHERE g.grant_id=c.oauth_grant_id AND g.shop_id=c.shop_id AND g.revoked_at IS NULL AND g.resource=?))
+  `).bind(digest, env.MCP_PUBLIC_ORIGIN ? env.MCP_PUBLIC_ORIGIN.replace(/\/$/,'')+'/mcp' : '').first();
 
-  if (!record) return null;
+  if (!record || (record.oauth_grant_id && new URL(request.url).origin !== env.MCP_PUBLIC_ORIGIN?.replace(/\/$/,''))) return null;
   let scopes;
   try { scopes = JSON.parse(record.scopes_json); } catch { return null; }
   if (!Array.isArray(scopes) || !scopes.every(x => typeof x === 'string')) return null;
-  return { shopId: record.shop_id, scopes: new Set(scopes) };
+  return { shopId: record.shop_id, scopes: new Set(scopes), ...(record.oauth_grant_id ? {oauthGrantId:record.oauth_grant_id} : {}) };
 }
 
 function validPreview(a) {

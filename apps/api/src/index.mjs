@@ -1,3 +1,4 @@
+import {handleOAuth} from './oauth/routes.mjs';
 import { handleMerchantMcp } from './mcp/gateway.mjs';
 import { handleMcp, handleMcpSse, handleMcpMessage } from './mcp/server.mjs';
 import { handleAdmin } from './admin.mjs';
@@ -12,6 +13,8 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    if (url.pathname.startsWith('/oauth/') || url.pathname.startsWith('/.well-known/oauth-')) return handleOAuth(request,env);
 
     if (url.pathname === '/mcp') return handleMerchantMcp(request, env);
     if (url.pathname.startsWith('/mcp/')) return json({ error: 'legacy_transport_removed', endpoint: '/mcp' }, 410);

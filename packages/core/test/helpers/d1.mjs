@@ -6,6 +6,7 @@ export function testD1({through=null}={}) {
    if(through && file>through)continue;
    sql.exec(readFileSync(new URL('../../../../migrations/'+file,import.meta.url),'utf8'));
  }
- const db={sql,prepare(query){return {bind(...args){const stmt=sql.prepare(query);return {async first(){return stmt.get(...args)??null;},async all(){return {results:stmt.all(...args)};},async run(){return {meta:{changes:Number(stmt.run(...args).changes)}};}};}};},async batch(statements){sql.exec('BEGIN');try{const results=[];for(const stmt of statements)results.push(await stmt.run());sql.exec('COMMIT');return results;}catch(e){sql.exec('ROLLBACK');throw e;}}};
+ let tail=Promise.resolve();
+ const db={sql,prepare(query){return {bind(...args){const stmt=sql.prepare(query);return {async first(){return stmt.get(...args)??null;},async all(){return {results:stmt.all(...args)};},async run(){return {meta:{changes:Number(stmt.run(...args).changes)}};}};}};},batch(statements){const task=tail.then(async()=>{sql.exec('BEGIN');try{const results=[];for(const stmt of statements)results.push(await stmt.run());sql.exec('COMMIT');return results;}catch(e){sql.exec('ROLLBACK');throw e;}});tail=task.catch(()=>{});return task;}};
  return db;
 }

@@ -1,3 +1,4 @@
+import {testD1} from './helpers/d1.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
@@ -8,12 +9,8 @@ import {handleAdminSettingsApi} from '../../../apps/api/src/iframe-settings.mjs'
 import {issueSession} from '../../../apps/api/src/admin-session.mjs';
 import {hashToken} from '../../../apps/api/src/mcp/server.mjs';
 const proposal={currency:'CZK',tiers:[{name:'První',percent:5,minTurnover:5000},{name:'Druhá',percent:8,minTurnover:15000}],brandCaps:[],salePolicy:'lowest_price',couponPolicy:'no_loyalty_combination'};
-function database(){
- const sql=new DatabaseSync(':memory:');sql.exec('PRAGMA foreign_keys=ON');
- for(const path of ['0001_initial.sql','0002_mcp_credentials.sql','0010_configuration_revisions.sql'])sql.exec(readFileSync(new URL('../../../migrations/'+path,import.meta.url),'utf8'));
- sql.exec("INSERT INTO installations(shop_id,state) VALUES('101','active'),('202','active')");
- return {sql,prepare(query){return {bind(...args){const stmt=sql.prepare(query);return {async first(){return stmt.get(...args)??null;},async all(){return {results:stmt.all(...args)};},async run(){return {meta:{changes:Number(stmt.run(...args).changes)}};}};}};}};
-}
+function database(){const db=testD1();db.sql.exec("INSERT INTO installations(shop_id,state) VALUES('101','active'),('202','active')");return db;}
+
 test('strict domain schema rejects ambiguous tiers and arbitrary patches',()=>{
  assert.throws(()=>proposalSchema.parse({...proposal,shopId:'202'}));
  assert.throws(()=>proposalSchema.parse({...proposal,tiers:[proposal.tiers[0],proposal.tiers[0]]}));

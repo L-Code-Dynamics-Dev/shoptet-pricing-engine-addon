@@ -1,3 +1,4 @@
+import {createMcpOAuth,oauthConfiguration,digest} from '../../../packages/core/src/mcp-oauth.mjs';
 import { createConfigurationService } from '../../../packages/core/src/configuration.mjs';
 /**
  * L-Code Loyalty Pricing Engine — addon settings page embedded in Shoptet administration.
@@ -110,6 +111,22 @@ export async function handleAdminSettingsApi(request, env) {
   const shopId = identity.shopId;
   const route = url.pathname.replace(/^\/admin\/settings\/api/, '');
 
+  if(route.startsWith('/oauth/')){
+    const installed=await env.DB.prepare('SELECT state FROM installations WHERE shop_id=?').bind(shopId).first();
+    if(installed?.state!=='active')return jsonRes({error:'inactive_installation'},403);
+    try{
+      const oauth=createMcpOAuth(env.DB,oauthConfiguration(env));
+      if(route==='/oauth/connections' && request.method==='GET')return jsonRes(await oauth.connections(shopId));
+      if(request.method==='POST'){
+        const body=await request.json();if(!body||Array.isArray(body)||Object.keys(body).length!==1)return jsonRes({error:'invalid_request'},400);
+        if(route==='/oauth/inspect' && /^[a-f0-9]{64}$/.test(body.requestId??''))return jsonRes(await oauth.inspect(body.requestId));
+        if(route==='/oauth/consent' && /^[a-f0-9]{64}$/.test(body.requestId??''))return jsonRes(await oauth.consent(body.requestId,shopId,await digest(bearerFrom(request))));
+        if(route==='/oauth/disconnect' && typeof body.grantId==='string')return jsonRes(await oauth.disconnect(shopId,body.grantId));
+      }
+    }catch{return jsonRes({error:'oauth_action_unavailable'},400);}
+    return jsonRes({error:'not_found'},404);
+  }
+
   if (route.startsWith('/configuration/')) {
     const installed=await env.DB.prepare('SELECT state FROM installations WHERE shop_id=?').bind(shopId).first();
     if(installed?.state!=='active') return jsonRes({error:'inactive_installation'},403);
@@ -221,7 +238,7 @@ export async function handleAdminSettingsApi(request, env) {
   }
 
   if (route === '/mcp-token' && request.method === 'DELETE') {
-    await env.DB.prepare('UPDATE mcp_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE shop_id = ? AND revoked_at IS NULL').bind(shopId).run();
+    await env.DB.prepare('UPDATE mcp_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE shop_id = ? AND revoked_at IS NULL AND oauth_grant_id IS NULL').bind(shopId).run();
     return jsonRes({ revoked: true });
   }
 
@@ -234,7 +251,7 @@ export async function handleAdminSettingsApi(request, env) {
     const token = 'lcode_mcp_' + [...raw].map(b => b.toString(16).padStart(2, '0')).join('');
     const digest = await sha256Hex(token);
     await env.DB.batch([
-      env.DB.prepare('UPDATE mcp_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE shop_id = ? AND revoked_at IS NULL').bind(shopId),
+      env.DB.prepare('UPDATE mcp_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE shop_id = ? AND revoked_at IS NULL AND oauth_grant_id IS NULL').bind(shopId),
       env.DB.prepare("INSERT INTO mcp_credentials (token_sha256, shop_id, scopes_json, expires_at) VALUES (?, ?, ?, datetime('now', '+7 days'))").bind(digest, shopId, JSON.stringify(scopes))
     ]);
     return jsonRes({ token, fingerprint: digest.slice(0, 8), scopes });
@@ -696,6 +713,10 @@ export function renderAdminHtml(eshopId, auth) {
 
     <!-- Tab 3: Přístup k MCP -->
     <section class="panel" id="panel-mcp">
+      <div class="section-heading">OAuth připojení s PKCE</div>
+      <p>Spusťte připojení MCP v podporovaném předregistrovaném klientovi. Z otevřeného autorizačního okna sem vložte jednorázový připojovací kód.</p>
+      <label for="oauth-pair-code">Připojovací kód</label><input id="oauth-pair-code" class="input-text" style="max-width:360px" autocomplete="off">
+      <button type="button" class="btn-secondary" id="oauth-inspect">Zkontrolovat připojení</button><div id="oauth-consent"></div><div id="oauth-connections"></div>
       <p class="tab-intro">Přístup k MCP (Model Context Protocol) pro propojení s vaším asistentem. Umožňuje bezpečně kontrolovat a spravovat věrnostní ceny přirozenou řečí.</p>
 
       <div class="section-heading">Aktivní přístupové klíče pro MCP</div>
@@ -712,7 +733,7 @@ export function renderAdminHtml(eshopId, auth) {
       </table>
 
       <div style="display: flex; gap: 10px; align-items: center; margin: 16px 0;">
-        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odpojit asistenta</button>
+        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odvolat ruční klíče</button>
         <button type="button" class="btn-shoptet-green" id="token-new">Vygenerovat nový klíč pro MCP</button>
         <span style="color: #777777; font-size: 12px;">Vygenerováním se všechny dosavadní klíče automaticky zneplatní.</span>
       </div>
@@ -975,7 +996,7 @@ export function renderAdminHtml(eshopId, auth) {
       $('mcp-snippet').textContent = snippet(null);
     }
 
-    $('token-revoke').addEventListener('click',async()=>{try{await api('/mcp-token',{method:'DELETE'});state.mcpTokens=[];renderTokens();$('token-result').textContent='Připojení odvoláno.';}catch(e){flash(e.message,true);}});
+    $('token-revoke').addEventListener('click',async()=>{try{await api('/mcp-token',{method:'DELETE'});state.mcpTokens=[];renderTokens();$('token-result').textContent='Ruční přístupové klíče byly odvolány.';}catch(e){flash(e.message,true);}});
 
     $('token-new').addEventListener('click', async () => {
       if (state.mcpTokens.length && !confirm('Vygenerovat nový klíč pro MCP? Všechny dosavadní klíče přestanou fungovat.')) return;
@@ -1022,12 +1043,22 @@ export function renderAdminHtml(eshopId, auth) {
       resize();
     }
 
+    async function renderOAuthConnections(){
+      const root=$('oauth-connections');root.textContent='';
+      try{const data=await api('/oauth/connections');for(const grant of data.connections){const row=document.createElement('p');row.textContent=grant.client_id+' — '+(grant.revoked_at?'odpojeno':'povoleno')+' — '+JSON.parse(grant.scopes_json).join(', ')+' — poslední připojení: '+(grant.last_connection_at?new Date(grant.last_connection_at*1000).toLocaleString('cs'):'dosud neověřeno');if(!grant.revoked_at){const revoke=document.createElement('button');revoke.type='button';revoke.textContent='Odpojit';revoke.addEventListener('click',async()=>{await api('/oauth/disconnect',{method:'POST',body:JSON.stringify({grantId:grant.grant_id})});renderOAuthConnections();});row.append(revoke);}root.append(row);}if(!data.connections.length)root.textContent='Žádná OAuth připojení.';}catch{root.textContent='OAuth není nakonfigurované nebo dostupné.';}
+      resize();
+    }
+    $('oauth-inspect').addEventListener('click',async()=>{
+      const root=$('oauth-consent');root.textContent='';
+      try{const requestId=$('oauth-pair-code').value.trim();const info=await api('/oauth/inspect',{method:'POST',body:JSON.stringify({requestId})});const description=document.createElement('p');description.textContent='Klient: '+info.clientName+'; návratová adresa: '+info.redirectUri+'; požadovaná oprávnění: '+info.scopes.join(', ');const approve=document.createElement('button');approve.type='button';approve.className='btn-shoptet-green';approve.textContent='Povolit tato oprávnění tomuto klientovi';approve.addEventListener('click',async()=>{approve.disabled=true;try{await api('/oauth/consent',{method:'POST',body:JSON.stringify({requestId})});root.textContent='Povoleno. Vraťte se do okna AI klienta.';renderOAuthConnections();}catch(e){approve.disabled=false;flash(e.message,true);}});root.append(description,approve);}catch(e){flash(e.message,true);}resize();
+    });
+
     /* Boot */
     (async () => {
       try {
         state = await api('/state');
         $('loading').remove();
-        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals();
+        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections();
       } catch (e) {
         $('loading').textContent = '';
         flash(e.message, true);
