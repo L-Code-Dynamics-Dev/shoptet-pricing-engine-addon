@@ -1,9 +1,22 @@
 {
-  "name": "lcode-shoptet-pricing-addon-staging",
+  "name": "lcode-shoptet-pricing-dev",
   "main": "apps/api/src/index.mjs",
   "compatibility_date": "2026-10-01",
-  "workers_dev": false,
-  "vars": {"SYNC_MODE": "off"},
-  "d1_databases": [{"binding": "DB", "database_name": "lcode-pricing-addon-staging", "database_id": "REPLACE_WITH_STAGING_D1_ID"}],
-  "r2_buckets": [{"binding":"RELEASE_ASSETS","bucket_name":"REPLACE_WITH_PRIVATE_RELEASE_BUCKET"}]
+  "workers_dev": true,
+  "vars": {
+    "SYNC_MODE": "off"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lcode-shoptet-pricing-dev",
+      "database_id": "e30f946d-5e2d-4985-9c3a-fada524d9edf"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RELEASE_ASSETS",
+      "bucket_name": "lcode-shoptet-pricing-releases"
+    }
+  ]
 }
