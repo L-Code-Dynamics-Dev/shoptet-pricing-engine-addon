@@ -9,7 +9,7 @@ export function parseTokenKeys(value) {
 }
 export function createTokenVault(configuration) {
   const config=parseTokenKeys(configuration);
-  function context(shop,purpose,id){if(typeof shop!=='string'||!shop||shop.length>128||!['oauth','api'].includes(purpose))throw Error('Invalid token context');return enc.encode(JSON.stringify([1,shop,purpose,id]));}
+  function context(shop,purpose,id){if(typeof shop!=='string'||!shop||shop.length>128||!['oauth','api','webhook'].includes(purpose))throw Error('Invalid token context');return enc.encode(JSON.stringify([1,shop,purpose,id]));}
   async function key(id){if(!Object.hasOwn(config.keys,id))throw Error('Token unavailable');return crypto.subtle.importKey('raw',Uint8Array.from(config.keys[id].match(/../g),h=>parseInt(h,16)),'AES-GCM',false,['encrypt','decrypt']);}
   return {
     async seal(shop,purpose,token) {

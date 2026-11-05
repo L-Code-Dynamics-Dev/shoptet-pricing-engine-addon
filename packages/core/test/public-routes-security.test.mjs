@@ -4,7 +4,7 @@ import worker from '../../../apps/api/src/index.mjs';
 test('legacy public shop-ID routes cannot inspect or uninstall any tenant',async()=>{
   const env={DB:{prepare(){assert.fail('unauthenticated database access');}}};
   for(const path of ['/shoptet/status','/shoptet/uninstall','/shoptet/api-test']) {
-    const response=await worker.fetch(new Request('https://addon.example'+path+'?shopId=other-shop'),env);
+    const response=await worker.fetch(new Request('https://addon.example'+path+'?shopId=other-shop',{method:path.includes('uninstall')?'POST':'GET'}),env);
     assert.equal(response.status,403);
   }
 });

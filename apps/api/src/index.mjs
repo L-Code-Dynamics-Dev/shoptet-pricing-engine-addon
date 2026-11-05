@@ -1,10 +1,11 @@
+import {handleShoptetLifecycle} from './shoptet-webhooks.mjs';
 import {retryInstallations} from '../../../packages/core/src/installation-verification.mjs';
 import {handleOAuth} from './oauth/routes.mjs';
 import { handleMerchantMcp } from './mcp/gateway.mjs';
 import { handleMcp, handleMcpSse, handleMcpMessage } from './mcp/server.mjs';
 import { handleAdmin } from './admin.mjs';
 import { handleAdminSettingsIframe, handleAdminSettingsApi } from './iframe-settings.mjs';
-import { handleShoptetInstall, handleShoptetUninstall, handleShoptetStatus, handleShoptetApiTest } from './shoptet-routes.mjs';
+import { handleShoptetInstall } from './shoptet-routes.mjs';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
   status,
@@ -49,8 +50,10 @@ export default {
       return handleShoptetInstall(request, env, fetch, ctx);
     }
 
+    if(['/shoptet/uninstall','/shoptet/lifecycle'].includes(url.pathname))return handleShoptetLifecycle(request,env,ctx);
+
     // Unauthenticated legacy shop-ID endpoints cannot manage or inspect tenants.
-    if (['/shoptet/uninstall','/shoptet/status','/shoptet/api-test'].includes(url.pathname)) return json({ error: 'trusted_lifecycle_authentication_required' }, 403);
+    if (['/shoptet/status','/shoptet/api-test'].includes(url.pathname)) return json({ error: 'trusted_lifecycle_authentication_required' }, 403);
 
     if (url.pathname.startsWith('/admin/') || url.pathname.startsWith('/sync/')) {
       return json({ error: 'authentication_not_configured' }, 403);

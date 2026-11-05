@@ -1,5 +1,5 @@
 import {buildSyncPlan,syncSelectionSchema} from './sync-planner.mjs';
-import {digest} from './mcp-oauth.mjs';
+import {digest} from './crypto.mjs';
 export class SyncError extends Error {}
 const now=()=>Math.floor(Date.now()/1000);
 export function createSyncService({db,adapter,assertLiveAllowed=async()=>{throw new SyncError('live_execution_not_activated');}}) {

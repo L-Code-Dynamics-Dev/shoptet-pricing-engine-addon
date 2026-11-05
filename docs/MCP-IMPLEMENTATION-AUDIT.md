@@ -1,3 +1,7 @@
+# Update: signed lifecycle and installation-generation boundaries
+
+[SIGNED-LIFECYCLE.md](SIGNED-LIFECYCLE.md) documents tenant-encrypted signing keys, explicit trusted-admin setup, bounded raw-body HMAC verification, ordered idempotent receipts, suspend/uninstall revocation, independently verified resumption, reinstall fencing and vault-rotation preservation. Migration 0015 and local security tests are implemented. The complete local suite passes 173 tests at this checkpoint. Partner callback settings, actual delivery and Cloudflare runtime verification remain release gates; no deployment occurred. Earlier missing-lifecycle findings below are superseded only for this implementation.
+
 # Update: durable installation verification
 
 [INSTALLATION-ONBOARDING.md](INSTALLATION-ONBOARDING.md) documents callback capture within Shoptet's short timeout, operator-configured partner OAuth origin, encrypted pending tenants, asynchronous identity/permission verification, bounded scheduled recovery and reinstall-generation fencing. Migration 0014 was added and tested locally. Real partner settings, callback latency and sandbox installation remain unverified; unsigned uninstall is still denied pending the signed lifecycle integration.

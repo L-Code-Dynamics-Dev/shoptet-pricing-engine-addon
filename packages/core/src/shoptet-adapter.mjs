@@ -63,8 +63,8 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
     async writePrices(id,rows) {
       positiveId.parse(id);const items=z.array(pricePatchSchema).min(1).max(100).parse(rows);
       if(!authorizeWrite)throw new ShoptetError('write_not_authorized',403);
-      await authorizeWrite({pricelistId:id,items});
-      const token=await getToken();let response;
+      const token=await getToken();
+      await authorizeWrite({pricelistId:id,items});let response;
       // Mutations are never automatically retried: a timeout may mean the server applied them.
       try{response=await fetchImpl('https://api.myshoptet.com/api/price-lists/'+id+'/prices',{method:'PATCH',redirect:'error',signal:AbortSignal.timeout(timeoutMs),headers:{'Shoptet-Access-Token':token,'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({data:items})});}
       catch{return {outcome:'unknown',error:'write_outcome_unknown',requiresReadback:true};}

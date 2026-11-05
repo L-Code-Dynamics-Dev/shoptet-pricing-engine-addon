@@ -1,4 +1,4 @@
-import {digest} from './mcp-oauth.mjs';
+import {digest} from './crypto.mjs';
 import {grossApiPrice,formatApiPrice,shopDate,activeActionMinor} from './pricing-policy.mjs';
 import {SyncError} from './sync-service.mjs';
 export const NATIVE_PRICING_POLICY_VERSION='native-price-policy-v1';

@@ -1,4 +1,4 @@
-import {digest} from './mcp-oauth.mjs';
+import {digest} from './crypto.mjs';
 import { createTokenVault } from './token-vault.mjs';
 export function trustedShopOrigin(value) {
   let url; try { url = new URL(value); } catch { throw Error('Trusted shop URL required'); }
@@ -70,7 +70,7 @@ export async function saveShoptetInstallation({ db, shopId, accessToken, eshopUr
     db.prepare("INSERT INTO installations(shop_id,state,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(shop_id) DO UPDATE SET state=excluded.state,updated_at=CURRENT_TIMESTAMP").bind(shopId,installationState),
     db.prepare("INSERT INTO shoptet_oauth(shop_id,oauth_access_token,eshop_url,contact_email,oauth_envelope) VALUES(?,'',?,?,?) ON CONFLICT(shop_id) DO UPDATE SET oauth_access_token='',cached_api_token=NULL,api_envelope=NULL,api_token_expires_at=NULL,eshop_url=excluded.eshop_url,contact_email=excluded.contact_email,oauth_envelope=excluded.oauth_envelope,updated_at=CURRENT_TIMESTAMP").bind(shopId,origin,contactEmail??null,envelope),
     db.prepare("INSERT INTO shoptet_installations(eshop_id,eshop_url,contact_email,oauth_token,status) VALUES(?,?,?,'',?) ON CONFLICT(eshop_id) DO UPDATE SET eshop_url=excluded.eshop_url,contact_email=excluded.contact_email,oauth_token='',status=excluded.status,updated_at=CURRENT_TIMESTAMP").bind(Number(shopId),origin,contactEmail??null,installationState),
-    db.prepare("INSERT INTO tenant_settings(shop_id,config_json,version) VALUES(?,'{}',0) ON CONFLICT(shop_id) DO NOTHING").bind(shopId)
+    db.prepare("INSERT INTO tenant_settings(shop_id,config_json,version) VALUES(?,'{}',0) ON CONFLICT(shop_id) DO UPDATE SET version=tenant_settings.version+1").bind(shopId)
   ];
   if(callbackHash!==null){
     if(!/^[a-f0-9]{64}$/.test(callbackHash))throw Error('Invalid callback proof');
@@ -78,15 +78,21 @@ export async function saveShoptetInstallation({ db, shopId, accessToken, eshopUr
   }
   if(capabilities!==null)statements.push(db.prepare('INSERT INTO tenant_capability_snapshots(shop_id,verified,capabilities_json,checked_at) VALUES(?,?,?,unixepoch()) ON CONFLICT(shop_id) DO UPDATE SET verified=excluded.verified,capabilities_json=excluded.capabilities_json,checked_at=excluded.checked_at').bind(shopId,capabilities.verified?1:0,JSON.stringify(capabilities)));
   if(installationState==='pending')statements.push(db.prepare("INSERT INTO installation_verification_jobs(shop_id,oauth_sha256,state) VALUES(?,?,'queued') ON CONFLICT(shop_id) DO UPDATE SET oauth_sha256=excluded.oauth_sha256,state='queued',run_id=NULL,attempts=0,error_code=NULL,next_attempt_at=0,updated_at=unixepoch()").bind(shopId,await digest(envelope)));
+  statements.push(db.prepare('UPDATE mcp_credentials SET revoked_at=CURRENT_TIMESTAMP WHERE shop_id=? AND revoked_at IS NULL').bind(shopId));
+  statements.push(db.prepare('UPDATE admin_credentials SET revoked_at=CURRENT_TIMESTAMP WHERE shop_id=? AND revoked_at IS NULL').bind(shopId));
+  statements.push(db.prepare('UPDATE mcp_oauth_grants SET revoked_at=unixepoch() WHERE shop_id=? AND revoked_at IS NULL').bind(shopId));
+  statements.push(db.prepare("UPDATE asset_install_approvals SET state='revoked' WHERE shop_id=? AND state='approved'").bind(shopId));
+  statements.push(db.prepare("UPDATE sync_jobs SET cancel_requested=1 WHERE shop_id=? AND state IN('queued','running')").bind(shopId));
   await db.batch(statements);
   return {success:true,shopId};
 }
 
-export async function getShoptetApiAccessToken({ db, shopId, tokenKeys, fetchImpl = fetch }) {
+export async function getShoptetApiAccessToken({ db, shopId, tokenKeys, fetchImpl = fetch, expectedOAuthEnvelope=null }) {
   const vault=createTokenVault(tokenKeys);
   if(!db || typeof shopId!=='string'||!shopId)throw Error('Invalid installation context');
   const row=await db.prepare("SELECT o.oauth_envelope,o.api_envelope,o.api_token_expires_at,o.eshop_url FROM shoptet_oauth o JOIN installations i ON i.shop_id=o.shop_id WHERE o.shop_id=? AND i.state='active'").bind(shopId).first();
   if(!row?.oauth_envelope)throw Error('Encrypted installation token unavailable; migration required');
+  if(expectedOAuthEnvelope!==null&&row.oauth_envelope!==expectedOAuthEnvelope)throw Error('Installation changed before token use');
   const nowSec=Math.floor(Date.now()/1000);
   if(row.api_envelope && row.api_token_expires_at>nowSec+60)return {apiAccessToken:await vault.open(shopId,'api',row.api_envelope),expiresIn:row.api_token_expires_at-nowSec};
   const oauth=await vault.open(shopId,'oauth',row.oauth_envelope);
@@ -111,10 +117,25 @@ export async function migrateShopTokens({db,shopId,tokenKeys}) {
   const oauth=await vault.seal(shopId,'oauth',token);
   const api=row.api_envelope?await vault.open(shopId,'api',row.api_envelope):row.cached_api_token;
   const encryptedApi=api?await vault.seal(shopId,'api',api):null;
-  const results=await db.batch([
-    db.prepare("UPDATE shoptet_oauth SET oauth_envelope=?,api_envelope=?,oauth_access_token='',cached_api_token=NULL WHERE shop_id=? AND oauth_access_token=? AND oauth_envelope IS ?").bind(oauth,encryptedApi,shopId,row.oauth_access_token,row.oauth_envelope??null),
+  const hasSigning=!!await db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='shop_webhook_credentials'").bind().first();
+  let signing=null,newSigning=null;
+  if(hasSigning){
+    const busy=await db.prepare("SELECT 1 FROM webhook_key_operations WHERE shop_id=? AND state IN('processing','uncertain')").bind(shopId).first();if(busy)throw Error('Webhook mutation must be reconciled before key rotation');
+    signing=await db.prepare('SELECT * FROM shop_webhook_credentials WHERE shop_id=?').bind(shopId).first();
+    if(signing){if(!row.oauth_envelope||signing.oauth_sha256!==await digest(row.oauth_envelope))throw Error('Webhook credential generation mismatch');newSigning=await vault.seal(shopId,'webhook',await vault.open(shopId,'webhook',signing.envelope));}
+  }
+  const guard=signing?' AND EXISTS(SELECT 1 FROM shop_webhook_credentials k WHERE k.shop_id=shoptet_oauth.shop_id AND k.envelope=?)':'';
+  const args=[oauth,encryptedApi,shopId,row.oauth_access_token,row.oauth_envelope??null,...(signing?[signing.envelope]:[])];
+  const statements=[
+    db.prepare("UPDATE shoptet_oauth SET oauth_envelope=?,api_envelope=?,oauth_access_token='',cached_api_token=NULL WHERE shop_id=? AND oauth_access_token=? AND oauth_envelope IS ?"+guard).bind(...args),
     db.prepare("UPDATE shoptet_installations SET oauth_token='' WHERE eshop_id=? AND EXISTS(SELECT 1 FROM shoptet_oauth WHERE shop_id=? AND oauth_envelope=?)").bind(Number(shopId),shopId,oauth)
-  ]);
+  ];
+  if(signing){
+    const newHash=await digest(oauth);
+    statements.push(db.prepare('UPDATE shop_webhook_credentials SET oauth_sha256=?,envelope=? WHERE shop_id=? AND envelope=? AND EXISTS(SELECT 1 FROM shoptet_oauth o WHERE o.shop_id=shop_webhook_credentials.shop_id AND o.oauth_envelope=?)').bind(newHash,newSigning,shopId,signing.envelope,oauth));
+    statements.push(db.prepare('UPDATE shop_lifecycle_state SET oauth_sha256=? WHERE shop_id=? AND oauth_sha256=? AND EXISTS(SELECT 1 FROM shoptet_oauth o WHERE o.shop_id=shop_lifecycle_state.shop_id AND o.oauth_envelope=?)').bind(newHash,shopId,signing.oauth_sha256,oauth));
+  }
+  const results=await db.batch(statements);
   if(!results[0].meta?.changes)throw Error('Concurrent token migration');
   return {shopId,encrypted:true};
 }

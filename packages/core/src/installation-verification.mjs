@@ -1,5 +1,5 @@
 import {createTokenVault} from './token-vault.mjs';
-import {digest} from './mcp-oauth.mjs';
+import {digest} from './crypto.mjs';
 import {trustedShopOrigin} from './shoptet-oauth.mjs';
 export async function verifyInstallation({db,shopId,tokenKeys,fetchImpl=fetch}){
  const runId=crypto.randomUUID(),now=Math.floor(Date.now()/1000);

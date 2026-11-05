@@ -1,8 +1,7 @@
-const enc=new TextEncoder();
+import {randomSecret,digest,pkce} from './crypto.mjs';
+export {randomSecret,digest,pkce} from './crypto.mjs';
+import {lifecycleReady} from './webhooks.mjs';
 export const MCP_SCOPES=['shop:read','catalog:read','pricing:read','pricing:configure','pricing:execute','sync:read','sync:execute','audit:read'];
-export const randomSecret=()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),x=>x.toString(16).padStart(2,'0')).join('');
-export const digest=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(value))),x=>x.toString(16).padStart(2,'0')).join('');
-export const pkce=async value=>btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(value))))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 export class OAuthError extends Error {constructor(code){super(code);this.code=code;}}
 export function oauthConfiguration(env) {
  let origin,clients;try{origin=new URL(env.MCP_PUBLIC_ORIGIN);clients=JSON.parse(env.MCP_OAUTH_CLIENTS);}catch{throw new OAuthError('server_not_configured');}
@@ -28,6 +27,7 @@ export function createMcpOAuth(db,config) {
   async inspect(requestId){const row=await db.prepare('SELECT client_id,redirect_uri,scopes_json,expires_at FROM mcp_authorizations WHERE request_id=? AND shop_id IS NULL AND expires_at>?').bind(requestId,now()).first();if(!row)throw new OAuthError('invalid_request');return {requestId,clientName:client(row.client_id).name,redirectUri:row.redirect_uri,scopes:JSON.parse(row.scopes_json),expiresAt:row.expires_at};},
   async consent(requestId,shopId,sessionHash) {
    if(!/^[a-f0-9]{64}$/.test(sessionHash??''))throw new OAuthError('access_denied');
+   const installation=await db.prepare('SELECT oauth_envelope FROM shoptet_oauth WHERE shop_id=?').bind(shopId).first();if(installation&&!(await lifecycleReady(db,shopId)).ready)throw new OAuthError('signed_lifecycle_required');
    const r=await db.prepare("UPDATE mcp_authorizations SET shop_id=?,approved_by=? WHERE request_id=? AND shop_id IS NULL AND expires_at>? AND EXISTS(SELECT 1 FROM installations WHERE shop_id=? AND state='active')").bind(shopId,sessionHash,requestId,now(),shopId).run();if(!r.meta?.changes)throw new OAuthError('access_denied');return {approved:true};
   },
   async finish(requestId,browserSecret) {

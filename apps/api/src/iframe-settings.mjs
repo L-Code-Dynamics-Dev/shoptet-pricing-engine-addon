@@ -1,8 +1,9 @@
+import {initializeWebhookKey,lifecycleReady} from '../../../packages/core/src/webhooks.mjs';
 import {verifyInstallation} from '../../../packages/core/src/installation-verification.mjs';
 import {createShoptetAdapter} from '../../../packages/core/src/shoptet-adapter.mjs';
 import {getShoptetApiAccessToken} from '../../../packages/core/src/shoptet-oauth.mjs';
 import {syncRuntime} from './sync/runtime.mjs';
-import {createMcpOAuth,oauthConfiguration,digest} from '../../../packages/core/src/mcp-oauth.mjs';
+import {createMcpOAuth,oauthConfiguration,digest,OAuthError} from '../../../packages/core/src/mcp-oauth.mjs';
 import { createConfigurationService } from '../../../packages/core/src/configuration.mjs';
 /**
  * L-Code Loyalty Pricing Engine — addon settings page embedded in Shoptet administration.
@@ -86,9 +87,13 @@ export function validateRules(input) {
 /* ---------------------------------------------------------------- API */
 
 async function requireSession(request, env) {
-  const secret = env.ADMIN_SESSION_SECRET || env.VAULT_MASTER_KEY || env.SHOPTET_CLIENT_SECRET;
+  const secret = env.ADMIN_SESSION_SECRET;
   if (!secret) return null;
-  return verifySession(bearerFrom(request), secret);
+  const identity=await verifySession(bearerFrom(request), secret);if(!identity)return null;
+  const installation=await env.DB.prepare('SELECT i.state,o.oauth_envelope FROM installations i LEFT JOIN shoptet_oauth o ON o.shop_id=i.shop_id WHERE i.shop_id=?').bind(identity.shopId).first();
+  if(!installation||!['active','pending'].includes(installation.state))return null;
+  if(installation.oauth_envelope&&identity.credentialGeneration!==await sha256Hex(installation.oauth_envelope))return null;
+  return identity;
 }
 
 function parseConfig(row) {
@@ -111,6 +116,13 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
   if (!identity) return jsonRes({ error: 'unauthorized' }, 401);
   const shopId = identity.shopId;
   const route = url.pathname.replace(/^\/admin\/settings\/api/, '');
+
+  if(route==='/webhooks/enable'&&request.method==='POST'){
+    let body;try{body=await request.json();}catch{return jsonRes({error:'invalid_request'},400);}
+    if(!body||Object.keys(body).length!==1||body.confirm!=='initialize_installation_webhook_signing')return jsonRes({error:'explicit_confirmation_required'},400);
+    try{return jsonRes(await initializeWebhookKey({db:env.DB,shopId,tokenKeys:env.SHOPTET_TOKEN_KEYS}));}catch{return jsonRes({error:'webhook_setup_requires_attention',message:'Bezpečné notifikace nelze zapnout. Zkontrolujte oprávnění a diagnostiku; neznámý výsledek se automaticky neopakuje.'},409);}
+  }
+  if(route==='/webhooks/status'&&request.method==='GET')return jsonRes(await lifecycleReady(env.DB,shopId));
 
   if(route==='/installation/retry'&&request.method==='POST'){
     const changed=await env.DB.prepare("UPDATE installation_verification_jobs SET state='queued',run_id=NULL,attempts=0,error_code=NULL,next_attempt_at=0,updated_at=unixepoch() WHERE shop_id=? AND state IN('failed','queued') AND EXISTS(SELECT 1 FROM installations WHERE shop_id=? AND state='pending')").bind(shopId,shopId).run();
@@ -157,7 +169,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
         if(route==='/oauth/consent' && /^[a-f0-9]{64}$/.test(body.requestId??''))return jsonRes(await oauth.consent(body.requestId,shopId,await digest(bearerFrom(request))));
         if(route==='/oauth/disconnect' && typeof body.grantId==='string')return jsonRes(await oauth.disconnect(shopId,body.grantId));
       }
-    }catch{return jsonRes({error:'oauth_action_unavailable'},400);}
+    }catch(error){return jsonRes({error:error instanceof OAuthError?error.code:'oauth_action_unavailable',...(error?.code==='signed_lifecycle_required'?{message:'Nejdřív v Přehledu zapněte bezpečná oznámení Shoptetu.'}:{})},400);}
     return jsonRes({error:'not_found'},404);
   }
 
@@ -282,6 +294,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
   }
 
   if (route === '/mcp-token' && request.method === 'POST') {
+    const installed=await env.DB.prepare('SELECT oauth_envelope FROM shoptet_oauth WHERE shop_id=?').bind(shopId).first();if(installed&&!(await lifecycleReady(env.DB,shopId)).ready)return jsonRes({error:'signed_lifecycle_required',message:'Nejdřív v Přehledu zapněte bezpečná oznámení Shoptetu.'},409);
     let body;try{body=await request.json();}catch{return jsonRes({error:'invalid_json'},400);}
     if(!body || Array.isArray(body) || Object.keys(body).some(k=>k!=='permissions') || (body.permissions!==undefined && (!Array.isArray(body.permissions)||body.permissions.some(k=>!['pricing:configure','pricing:execute','sync:execute','audit:read'].includes(k)))))return jsonRes({error:'invalid_permissions'},400);
     const scopes=[...MCP_UI_SCOPES,...new Set(body.permissions||[])];
@@ -788,7 +801,7 @@ export function renderAdminHtml(eshopId, auth) {
     </section>
 
     <!-- Tab 4: Přehled -->
-    <section class="panel" id="panel-overview"><p id="onboarding-status" role="status"></p><button type="button" id="onboarding-retry" hidden>Zopakovat ověření připojení</button>
+    <section class="panel" id="panel-overview"><p id="onboarding-status" role="status"></p><p id="webhook-status" role="status"></p><label><input type="checkbox" id="webhook-confirm"> Souhlasím s vytvořením podpisového klíče bezpečných oznámení pro tuto instalaci doplňku.</label><button type="button" id="webhook-enable">Zapnout bezpečná oznámení Shoptetu</button><button type="button" id="onboarding-retry" hidden>Zopakovat ověření připojení</button>
       <p class="tab-intro">Základní přehled o stavu propojení věrnostního systému s vaším e-shopem.</p>
 
       <div class="section-heading">Stav propojení s e-shopem</div>
@@ -1122,12 +1135,15 @@ export function renderAdminHtml(eshopId, auth) {
 
     $('onboarding-retry').addEventListener('click',async()=>{try{await api('/installation/retry',{method:'POST',body:'{}'});state=await api('/state');renderOverview();}catch(e){flash(e.message,true);}});
 
+    async function renderWebhookStatus(){try{const result=await api('/webhooks/status');$('webhook-status').textContent=result.ready?'Podpisový klíč je nastaven. Doručení oznámení je třeba ověřit.':'Bezpečná oznámení nejsou nastavená.';$('webhook-enable').disabled=result.ready||state.installation?.state!=='active';if(!result.ready)$('token-new').disabled=true;}catch{$('webhook-status').textContent='Stav bezpečných oznámení nelze načíst.';}}
+    $('webhook-enable').addEventListener('click',async()=>{if(!$('webhook-confirm').checked){flash('Potvrďte vytvoření podpisového klíče pro tuto instalaci.',true);return;}try{await api('/webhooks/enable',{method:'POST',body:JSON.stringify({confirm:'initialize_installation_webhook_signing'})});await renderWebhookStatus();}catch(e){flash(e.message,true);}});
+
     /* Boot */
     (async () => {
       try {
         state = await api('/state');
         $('loading').remove();
-        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals();
+        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals(); renderWebhookStatus();
       } catch (e) {
         $('loading').textContent = '';
         flash(e.message, true);

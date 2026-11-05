@@ -1,7 +1,7 @@
 import {z} from 'zod';
 import {proposalSchema} from './configuration.mjs';
 import {evaluatePricing,grossApiPrice,activeActionMinor,formatApiPrice,shopDate} from './pricing-policy.mjs';
-export const syncSelectionSchema=z.object({revisionId:z.string().uuid(),tierName:z.string().min(1).max(60),targetPricelistId:z.number().int().positive(),products:z.array(z.object({guid:z.string().uuid(),codes:z.array(z.string().min(1).max(128)).min(1).max(20)}).strict()).min(1).max(25)}).strict();
+export const syncSelectionSchema=z.object({revisionId:z.string().uuid(),tierName:z.string().min(1).max(60),targetPricelistId:z.number().int().positive(),products:z.array(z.object({guid:z.string().uuid(),codes:z.array(z.string().min(1).max(128)).min(1).max(20)}).strict()).min(1).max(25)}).strict().superRefine((v,c)=>{if(v.products.reduce((n,p)=>n+p.codes.length,0)>100)c.addIssue({code:'custom',path:['products'],message:'Maximum 100 variants per plan'});});
 export async function buildSyncPlan({adapter,proposal,selection,instant=new Date()}) {
  const policy=proposalSchema.parse(proposal),selected=syncSelectionSchema.parse(selection);
  const tier=policy.tiers.find(t=>t.name===selected.tierName);if(!tier)throw Error('tier_not_found');if(tier.pricelistId!=null && tier.pricelistId!==selected.targetPricelistId)throw Error('tier_pricelist_mapping_mismatch');

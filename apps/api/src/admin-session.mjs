@@ -1,3 +1,4 @@
+import {digest as credentialDigest} from '../../../packages/core/src/crypto.mjs';
 /**
  * Admin iframe authentication for the Shoptet addon settings page.
  *
@@ -39,10 +40,10 @@ async function hmacKey(secret) {
   return crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
 }
 
-export async function issueSession(shopId, secret, nowSec = Math.floor(Date.now() / 1000)) {
+export async function issueSession(shopId, secret, nowSec = Math.floor(Date.now() / 1000), credentialGeneration=undefined) {
   if (!secret || secret.length < 32) throw new Error('session_secret_not_configured');
   if (!isValidShopId(shopId)) throw new Error('invalid_shop_id');
-  const payload = b64url(enc.encode(JSON.stringify({ s: shopId, e: nowSec + SESSION_TTL_SEC })));
+  const payload = b64url(enc.encode(JSON.stringify({ s: shopId, e: nowSec + SESSION_TTL_SEC, g:credentialGeneration })));
   const sig = b64url(await crypto.subtle.sign('HMAC', await hmacKey(secret), enc.encode(payload)));
   return `${payload}.${sig}`;
 }
@@ -59,7 +60,8 @@ export async function verifySession(token, secret, nowSec = Math.floor(Date.now(
   let data;
   try { data = JSON.parse(new TextDecoder().decode(b64urlDecode(parts[0]))); } catch { return null; }
   if (!data || !isValidShopId(data.s) || !Number.isSafeInteger(data.e) || data.e <= nowSec) return null;
-  return { shopId: data.s, expiresAt: data.e };
+  if(data.g!==undefined && !/^[a-f0-9]{64}$/.test(data.g))return null;
+  return { shopId: data.s, expiresAt: data.e, ...(data.g?{credentialGeneration:data.g}:{}) };
 }
 
 export function bearerFrom(request) {
@@ -69,7 +71,7 @@ export function bearerFrom(request) {
 
 async function loadInstalledShop(db, shopId) {
   return db.prepare(`
-    SELECT i.shop_id, i.state, o.eshop_url
+    SELECT i.shop_id, i.state, o.eshop_url, o.oauth_envelope
     FROM installations i
     LEFT JOIN shoptet_oauth o ON o.shop_id = i.shop_id
     WHERE i.shop_id = ?
@@ -122,7 +124,7 @@ export async function verifyShoptetAdmin({ code, shopId, env, redirectUri, fetch
   const projectId = resData?.data?.project?.id;
   if (projectId == null || String(projectId) !== shopId) return { ok: false, reason: 'shop_mismatch' };
 
-  return { ok: true };
+  return { ok: true, ...(shop.oauth_envelope?{credentialGeneration:await credentialDigest(shop.oauth_envelope)}:{}) };
 }
 
 /**
@@ -132,7 +134,7 @@ export async function authorizeSettingsPage(request, env, fetchImpl = fetch) {
   const url = new URL(request.url);
   const shopId = url.searchParams.get('eshopId') || url.searchParams.get('eshopid') || '';
   if (!isValidShopId(shopId)) return { error: 'missing_eshop_id', status: 400 };
-  const sessionSecret = env.ADMIN_SESSION_SECRET || env.VAULT_MASTER_KEY || env.SHOPTET_CLIENT_SECRET;
+  const sessionSecret = env.ADMIN_SESSION_SECRET;
   if (!sessionSecret) return { error: 'session_secret_not_configured', status: 503 };
 
   const preview = url.searchParams.get('preview');
@@ -141,7 +143,7 @@ export async function authorizeSettingsPage(request, env, fetchImpl = fetch) {
     if (!previewKey || !timingSafeEqual(preview, previewKey)) return { error: 'invalid_preview_key', status: 403 };
     const shop = await loadInstalledShop(env.DB, shopId);
     if (!shop || shop.state !== 'active') return { error: 'not_installed', status: 403 };
-    return { shopId, session: await issueSession(shopId, sessionSecret), mode: 'preview' };
+    return { shopId, session: await issueSession(shopId, sessionSecret,undefined,shop.oauth_envelope?await credentialDigest(shop.oauth_envelope):undefined), mode: 'preview' };
   }
 
   const code = url.searchParams.get('code') || url.searchParams.get('oauth_code');
@@ -153,5 +155,5 @@ export async function authorizeSettingsPage(request, env, fetchImpl = fetch) {
     fetchImpl
   });
   if (!result.ok) return { error: result.reason, status: result.reason === 'missing_code' ? 401 : 403 };
-  return { shopId, session: await issueSession(shopId, sessionSecret), mode: 'shoptet' };
+  return { shopId, session: await issueSession(shopId, sessionSecret,undefined,result.credentialGeneration), mode: 'shoptet' };
 }

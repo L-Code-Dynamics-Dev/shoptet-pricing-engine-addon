@@ -38,7 +38,11 @@ cache publication. API errors never include upstream response bodies.
 For key rotation, add a new key alongside the old key and set `active` to the new
 ID. Convert/re-encrypt each shop with the utility. Retain old keys until every
 permanent/cache envelope and recovery backup has an understood recovery path.
-Dropping a key early intentionally makes its envelopes unreadable.
+Dropping a key early intentionally makes its envelopes unreadable. With migration
+0015 present, conversion also re-encrypts the webhook signing key and preserves
+its installation-generation binding and ordered terminal lifecycle state. An
+uncertain native signing-key mutation blocks rotation until reconciled. See
+[SIGNED-LIFECYCLE.md](SIGNED-LIFECYCLE.md).
 
 Recovery after conversion must use a vault-aware runtime or encrypted backup with
 the matching keyring. Reverting to the old plaintext-writing runtime is not a safe

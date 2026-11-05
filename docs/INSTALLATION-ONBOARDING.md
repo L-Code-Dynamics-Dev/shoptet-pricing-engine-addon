@@ -62,8 +62,9 @@ cron trigger, secret or Worker has been changed remotely.
 ## Current limits
 
 Actual partner application callbacks, approved scopes and real Shoptet staging
-installation still need verification. The webhook lifecycle handler is not yet
-complete in this checkpoint; unauthenticated uninstall remains denied. The code
+installation still need verification. Signed lifecycle handling and its explicit
+signing-key setup are documented in [SIGNED-LIFECYCLE.md](SIGNED-LIFECYCLE.md);
+unsigned uninstall remains denied. The code
 capture is not represented as verified native pricing activation.
 
 References:
