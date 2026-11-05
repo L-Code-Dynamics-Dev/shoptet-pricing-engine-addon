@@ -3,6 +3,7 @@
  * High-fidelity native Shoptet administration theme with Shoptet tabs, cards, and buttons.
  */
 import { authorizeSettingsPage, verifySession, bearerFrom } from './admin-session.mjs';
+import { UI_DEFAULTS, validateUiSection } from './admin-sections.mjs';
 
 const FRAME_ANCESTORS = "'self' https://*.myshoptet.com https://*.shoptet.cz https://*.shoptet.sk https://admin.shoptet.cz";
 const MCP_UI_SCOPES = ['installation:read', 'pricing:preview', 'assets:preview', 'shoptet:read', 'shoptet:write', 'pricing:sync'];
@@ -152,6 +153,7 @@ export async function handleAdminSettingsApi(request, env) {
       installation: inst || null,
       tiers,
       rules,
+      ui: Object.fromEntries(Object.entries(UI_DEFAULTS).map(([k, v]) => [k, config.ui?.[k] ?? v])),
       version,
       mcpTokens: (tokens.results || []).map(t => ({
         fingerprint: t.fp,
@@ -209,6 +211,24 @@ export async function handleAdminSettingsApi(request, env) {
     }
     if (!result?.meta?.changes) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.' }, 409);
     return jsonRes({ status: 'saved', rules: v.rules, version: version + 1 });
+  }
+
+  // Persist draft UI configuration only. No Shoptet writes or sync execution.
+  if (route === '/section' && request.method === 'PUT') {
+    let body;
+    try { body = await request.json(); } catch { return jsonRes({ error: 'Neplatný JSON.' }, 400); }
+    if (!body || !Number.isSafeInteger(body.version) || body.version < 0) return jsonRes({ error: 'Chybí verze nastavení.' }, 400);
+    const checked = validateUiSection(body.section, body.value);
+    if (checked.error) return jsonRes({ error: checked.error }, 422);
+    const current = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
+    const { config, version } = parseConfig(current);
+    if (version !== body.version) return jsonRes({ error: 'Konfigurace byla mezitím změněna. Obnovte stránku.', version }, 409);
+    const next = { ...config, ui: { ...(config.ui || {}), [body.section]: checked.value } };
+    const result = current
+      ? await env.DB.prepare('UPDATE tenant_settings SET config_json = ?, version = version + 1 WHERE shop_id = ? AND version = ?').bind(JSON.stringify(next), shopId, version).run()
+      : await env.DB.prepare('INSERT INTO tenant_settings (shop_id, config_json, version) VALUES (?, ?, 1) ON CONFLICT(shop_id) DO NOTHING').bind(shopId, JSON.stringify(next)).run();
+    if (!result?.meta?.changes) return jsonRes({ error: 'Konflikt verzí. Obnovte stránku.' }, 409);
+    return jsonRes({ status: 'saved', section: body.section, value: checked.value, version: version + 1 });
   }
 
   if (route === '/mcp-token' && request.method === 'POST') {
