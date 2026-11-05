@@ -13,7 +13,9 @@ export function calculateTierPrice({ baseMinor, actionMinor = null, tierPercent,
 }
 
 export function resolveDiscountCap({ productCap = null, brandCap = null, categoryCap = null }) {
-  return productCap ?? brandCap ?? categoryCap;
+  const caps = [productCap, categoryCap, brandCap].filter(value => value !== null);
+  if (caps.some(value => !Number.isFinite(value) || value < 0 || value > 100)) throw new TypeError('Invalid discount cap');
+  return caps.length ? Math.min(...caps) : null;
 }
 
 export function createPricelistPricePatch({ code, priceMinor, vatRate, includingVat = true }) {

@@ -1,3 +1,9 @@
+export function trustedShopOrigin(value) {
+  let url; try { url = new URL(value); } catch { throw Error('Trusted shop URL required'); }
+  if (url.protocol !== 'https:' || !/^[0-9]{1,12}\.myshoptet\.com$/.test(url.hostname) || url.port || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Trusted shop URL required');
+  return url.origin;
+}
+
 /**
  * Shoptet OAuth 2.0 handler for Partner Addon installation & short-term API token management.
  */
@@ -14,20 +20,12 @@ export async function exchangeAuthorizationCode({
   if (!clientId || !clientSecret) throw new Error('Missing client credentials');
   if (!redirectUri) throw new Error('Missing redirectUri');
 
-  // If eshopUrl is provided, use it as origin, otherwise fallback to 826800.myshoptet.com
-  let baseUrl = 'https://826800.myshoptet.com';
-  if (eshopUrl) {
-    try {
-      baseUrl = new URL(eshopUrl).origin;
-    } catch {
-      baseUrl = `https://${eshopUrl}`;
-    }
-  }
+  const baseUrl = trustedShopOrigin(eshopUrl);
 
   const tokenEndpoint = `${baseUrl}/action/ApiOAuthServer/token`;
 
   const response = await fetchImpl(tokenEndpoint, {
-    method: 'POST',
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
     headers: {
       'Content-Type': 'application/json',
       'Accept': 'application/json'
@@ -43,8 +41,7 @@ export async function exchangeAuthorizationCode({
   });
 
   if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`OAuth exchange failed (${response.status}): ${errorBody}`);
+    throw new Error(`OAuth exchange failed (${response.status})`);
   }
 
   const data = await response.json();
@@ -129,16 +126,11 @@ export async function getShoptetApiAccessToken({ db, shopId, fetchImpl = fetch }
     };
   }
 
-  let baseUrl = row.eshop_url || `https://${shopId}.myshoptet.com`;
-  try {
-    baseUrl = new URL(baseUrl).origin;
-  } catch {
-    baseUrl = `https://${baseUrl}`;
-  }
+  const baseUrl = trustedShopOrigin(row.eshop_url);
 
   const endpoint = `${baseUrl}/action/ApiOAuthServer/getAccessToken`;
   const response = await fetchImpl(endpoint, {
-    method: 'GET',
+    method: 'GET', redirect: 'error', signal: AbortSignal.timeout(10000),
     headers: {
       'Authorization': `Bearer ${row.oauth_access_token}`
     }
@@ -147,17 +139,19 @@ export async function getShoptetApiAccessToken({ db, shopId, fetchImpl = fetch }
   if (!response.ok) {
     const errorBody = await response.text();
     // If maximum tokens reached and we have an existing cached token, return cached token as fallback
-    if (response.status === 404 && errorBody.includes('maximum_tokens_reached') && row.cached_api_token) {
+    if (response.status === 404 && errorBody.includes('maximum_tokens_reached') && row.cached_api_token && row.api_token_expires_at > nowSec) {
       return {
         apiAccessToken: row.cached_api_token,
         expiresIn: Math.max(0, (row.api_token_expires_at || (nowSec + 600)) - nowSec)
       };
     }
-    throw new Error(`Failed to obtain short-term API token (${response.status}): ${errorBody}`);
+    throw new Error(`Failed to obtain short-term API token (${response.status})`);
   }
 
   const data = await response.json();
-  const expiresIn = data.expires_in || 1800;
+  if (typeof data.access_token !== 'string' || !data.access_token) throw Error('Invalid API token response');
+  const expiresIn = data.expires_in;
+  if (!Number.isSafeInteger(expiresIn) || expiresIn <= 0) throw Error('Invalid API token expiry');
   const expiresAt = nowSec + expiresIn;
 
   // Cache in D1

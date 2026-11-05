@@ -171,20 +171,12 @@ export async function hashToken(token) {
   return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
 }
 
-async function authenticate(request, env) {
+export async function authenticate(request, env) {
   let token = null;
   const auth = request.headers.get('authorization') || '';
   const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/.exec(auth);
   if (match) {
     token = match[1];
-  } else {
-    try {
-      const url = new URL(request.url);
-      const qToken = url.searchParams.get('token');
-      if (qToken && /^[A-Za-z0-9_-]{32,256}$/.test(qToken)) {
-        token = qToken;
-      }
-    } catch {}
   }
 
   if (!token || !env.DB) return null;
@@ -259,6 +251,8 @@ export async function handleMcp(request, env) {
 
     const required = toolScope[name] || 'installation:read';
     if (!identity.scopes.has(required)) return rpcError(id, -32603, 'Forbidden', 403);
+
+    if (['shoptet_configure_tiers', 'shoptet_sync_tier_price', 'frontend_assets_install'].includes(name)) return rpcError(id, -32603, 'Execution disabled: trusted revision approval and fencing required', 403);
 
     // 1. Installation Status
     if (name === 'installation_status') {
@@ -418,27 +412,7 @@ export async function handleMcpSse(request, env) {
     return json({ error: 'unauthorized' }, 401, { 'www-authenticate': 'Bearer' });
   }
 
-  const sessionId = crypto.randomUUID().replaceAll('-', '');
-  const url = new URL(request.url);
-  const tokenParam = url.searchParams.get('token');
-  const messageUrl = `${url.origin}/mcp/message?sessionId=${sessionId}${tokenParam ? `&token=${encodeURIComponent(tokenParam)}` : ''}`;
-
-  const { readable, writable } = new TransformStream();
-  const writer = writable.getWriter();
-  const encoder = new TextEncoder();
-
-  // Send SSE endpoint event per Model Context Protocol SSE specification
-  await writer.write(encoder.encode(`event: endpoint\r\ndata: ${messageUrl}\r\n\r\n`));
-
-  return new Response(readable, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no'
-    }
-  });
+  return json({ error: 'legacy_transport_removed', endpoint: '/mcp' }, 410);
 }
 
 export async function handleMcpMessage(request, env) {

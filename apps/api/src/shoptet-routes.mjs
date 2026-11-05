@@ -52,7 +52,7 @@ export async function handleShoptetInstall(request, env) {
   }
 
   const redirectUri = `${url.origin}/shoptet/install`;
-  const eshopUrl = url.searchParams.get('eshopUrl') || 'https://826800.myshoptet.com';
+  const eshopUrl = url.searchParams.get('eshopUrl');
 
   try {
     const tokenResult = await exchangeAuthorizationCode({
@@ -78,8 +78,8 @@ export async function handleShoptetInstall(request, env) {
       headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
     });
   } catch (err) {
-    console.error("Installation error:", err);
-    return new Response(`Installation failed: ${err.message}`, {
+    console.error("Installation failed");
+    return new Response('Installation failed', {
       status: 502,
       headers: { "Content-Type": "text/plain; charset=utf-8" }
     });

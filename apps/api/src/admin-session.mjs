@@ -138,9 +138,9 @@ export async function authorizeSettingsPage(request, env, fetchImpl = fetch) {
   if (!sessionSecret) return { error: 'session_secret_not_configured', status: 503 };
 
   const preview = url.searchParams.get('preview');
-  const previewKey = env.ADMIN_PREVIEW_KEY || 'lcode_preview_826800_dev';
+  const previewKey = env.ADMIN_PREVIEW_KEY;
   if (preview) {
-    if (!timingSafeEqual(preview, previewKey)) return { error: 'invalid_preview_key', status: 403 };
+    if (!previewKey || !timingSafeEqual(preview, previewKey)) return { error: 'invalid_preview_key', status: 403 };
     const shop = await loadInstalledShop(env.DB, shopId);
     if (!shop || shop.state !== 'active') return { error: 'not_installed', status: 403 };
     return { shopId, session: await issueSession(shopId, sessionSecret), mode: 'preview' };

@@ -28,10 +28,10 @@ test('install tool is not listed without install scope',async()=>{
 test('install tool fails closed without trusted services',async()=>{
  const t='C'.repeat(48);records.push({digest:await hashToken(t),identity:{shop_id:'shop1',scopes_json:'["assets:install"]'}});
  const r=await handleMcp(req('tools/call',{name:'frontend_assets_install',arguments:{approvalId:'A'.repeat(32)}},t),env);
- assert.equal(r.status,503);
+ assert.equal(r.status,403);
 });
 test('install tool rejects caller supplied assets and credentials',async()=>{
  const t='C'.repeat(48);
  const r=await (await handleMcp(req('tools/call',{name:'frontend_assets_install',arguments:{approvalId:'A'.repeat(32),password:'secret'}},t),env)).json();
- assert.equal(r.error.code,-32602);
+ assert.equal(r.error.code,-32603);
 });

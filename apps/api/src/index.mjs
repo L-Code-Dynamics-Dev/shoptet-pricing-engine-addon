@@ -1,3 +1,4 @@
+import { handleMerchantMcp } from './mcp/gateway.mjs';
 import { handleMcp, handleMcpSse, handleMcpMessage } from './mcp/server.mjs';
 import { handleAdmin } from './admin.mjs';
 import { handleAdminSettingsIframe, handleAdminSettingsApi } from './iframe-settings.mjs';
@@ -12,19 +13,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // MCP server endpoints (Universal /mcp + explicit /mcp/sse and /mcp/message)
-    if (url.pathname === '/mcp') {
-      if (request.method === 'GET' && request.headers.get('accept')?.includes('text/event-stream')) {
-        return handleMcpSse(request, env);
-      }
-      return handleMcp(request, env);
-    }
-    if (url.pathname === '/mcp/sse') {
-      return handleMcpSse(request, env);
-    }
-    if (url.pathname === '/mcp/message') {
-      return handleMcpMessage(request, env);
-    }
+    if (url.pathname === '/mcp') return handleMerchantMcp(request, env);
+    if (url.pathname.startsWith('/mcp/')) return json({ error: 'legacy_transport_removed', endpoint: '/mcp' }, 410);
 
     // Admin asset approvals
     if (url.pathname === '/admin/asset-approvals') {
@@ -45,7 +35,7 @@ export default {
         addon: 'L-Code Loyalty Pricing Engine',
         version: '0.1.0',
         status: 'ok',
-        partner_shop: '826800.myshoptet.com'
+        liveWrites: false
       });
     }
 
@@ -54,20 +44,8 @@ export default {
       return handleShoptetInstall(request, env);
     }
 
-    // Shoptet uninstallation webhook
-    if (url.pathname === '/shoptet/uninstall') {
-      return handleShoptetUninstall(request, env);
-    }
-
-    // Shop installation status inquiry
-    if (url.pathname === '/shoptet/status') {
-      return handleShoptetStatus(request, env);
-    }
-
-    // Shoptet live API test
-    if (url.pathname === '/shoptet/api-test') {
-      return handleShoptetApiTest(request, env);
-    }
+    // Unauthenticated legacy shop-ID endpoints cannot manage or inspect tenants.
+    if (['/shoptet/uninstall','/shoptet/status','/shoptet/api-test'].includes(url.pathname)) return json({ error: 'trusted_lifecycle_authentication_required' }, 403);
 
     if (url.pathname.startsWith('/admin/') || url.pathname.startsWith('/sync/')) {
       return json({ error: 'authentication_not_configured' }, 403);

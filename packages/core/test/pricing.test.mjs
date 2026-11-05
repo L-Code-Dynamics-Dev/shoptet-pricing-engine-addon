@@ -28,3 +28,5 @@ test('missing VAT rate is rejected before network write', () => {
 test('invalid money is rejected', () => {
   assert.throws(()=>calculateTierPrice({baseMinor:NaN,tierPercent:10}),/baseMinor/);
 });
+
+test('most restrictive category and brand override larger product cap',()=>{assert.equal(resolveDiscountCap({productCap:20,categoryCap:8,brandCap:5}),5);assert.throws(()=>resolveDiscountCap({brandCap:-1}),/Invalid/);});

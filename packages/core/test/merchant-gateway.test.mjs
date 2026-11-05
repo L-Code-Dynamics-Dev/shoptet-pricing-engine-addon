@@ -1,0 +1,17 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {handleMerchantMcp} from '../../../apps/api/src/mcp/gateway.mjs';
+import {hashToken} from '../../../apps/api/src/mcp/server.mjs';
+const token='x'.repeat(48);
+const digest=await hashToken(token);
+function env(scopes=['shop:read','catalog:read','pricing:read']) {return {DB:{prepare(sql){return {bind(...args){return {async first(){ if(sql.includes('mcp_credentials')) return args[0]===digest?{shop_id:'tenant-A',scopes_json:JSON.stringify(scopes)}:null; assert.equal(args[0],'tenant-A'); return {version:4,config_json:'{"tiers":[]}'}; } };}};}}};}
+function req(method,params={},extra={}) {return new Request('https://addon.example/mcp',{method:'POST',headers:{'content-type':'application/json',accept:'application/json, text/event-stream',authorization:'Bearer '+token,...extra},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});}
+const call=async(method,params={},e=env())=>(await handleMerchantMcp(req(method,params),e)).json();
+test('SDK initializes protocol and advertises tools resources prompts',async()=>{const r=await call('initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'test',version:'1'}});assert.equal(r.result.protocolVersion,'2025-11-25'); for(const k of ['tools','resources','prompts']) assert.ok(r.result.capabilities[k]);});
+test('SDK tool discovery never exposes live mutations',async()=>{const r=await call('tools/list');assert.ok(r.result.tools.some(x=>x.name==='brands_search'));assert.ok(r.result.tools.every(x=>x.annotations.readOnlyHint));});
+test('SDK scopes apply equally to resources and tools',async()=>{const e=env(['pricing:read']); const t=await call('tools/list',{},e);assert.deepEqual(t.result.tools.map(t=>t.name),['shop_get_configuration']);const r=await call('resources/list',{},e);assert.deepEqual(r.result.resources.map(x=>x.uri),['lcode://pricing/configuration']);});
+test('SDK configuration derives tenant identity exclusively from credential',async()=>{const r=await call('tools/call',{name:'shop_get_configuration',arguments:{}});assert.equal(r.result.structuredContent.version,4);assert.equal(r.result.structuredContent.applied,false);const bad=await call('tools/call',{name:'shop_get_configuration',arguments:{shopId:'tenant-B'}});assert.equal(bad.result.isError,true);});
+test('SDK prompt discovery and Czech guide',async()=>{const r=await call('prompts/list');assert.equal(r.result.prompts.length,8);const p=await call('prompts/get',{name:'loyalty_setup_wizard'});assert.match(p.result.messages[0].content.text,/česky/);});
+test('query bearer is refused and browser origins refused',async()=>{assert.equal((await handleMerchantMcp(new Request('https://addon.example/mcp?token='+token,{method:'POST',body:'{}'}),env())).status,400);assert.equal((await handleMerchantMcp(req('tools/list',{}, {origin:'https://evil.example'}),env())).status,403);});
+test('invalid and revoked credentials denied before protocol',async()=>{assert.equal((await handleMerchantMcp(req('tools/list',{}, {authorization:'Bearer '+'z'.repeat(48)}),env())).status,401);});
+test('SDK blocks unknown tool and cross tenant resource',async()=>{const r=await call('tools/call',{name:'sync_execute',arguments:{}});assert.ok(r.error || r.result.isError);const q=await call('resources/read',{uri:'lcode://tenant-B/secrets'});assert.ok(q.error);});

@@ -152,3 +152,9 @@ test('getShoptetApiAccessToken returns cached token when still valid', async () 
   assert.equal(result.apiAccessToken, 'cached-token-123');
   assert.equal(fetchCalls.length, 0); // No network call made
 });
+
+test('OAuth refuses SSRF targets before transmitting client secret',async()=>{
+  for (const eshopUrl of ['http://127.0.0.1','https://evil.example','https://826800.myshoptet.com.evil.example','https://user:pass@826800.myshoptet.com','https://826800.myshoptet.com/path']) {
+    await assert.rejects(exchangeAuthorizationCode({code:'code',eshopUrl,redirectUri:'https://addon.example/install',clientId:'client',clientSecret:'secret',fetchImpl:async()=>{assert.fail('must not fetch');}}),/Trusted shop URL/);
+  }
+});

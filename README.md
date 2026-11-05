@@ -1,3 +1,7 @@
+# Current implementation status
+
+See [the 2026-11-05 implementation audit](docs/MCP-IMPLEMENTATION-AUDIT.md) for the authoritative implemented surface and release blockers. Historical notes below describe earlier states and are not release evidence. The complete onboarding task is not yet implemented.
+
 # L-Code Loyalty Pricing Engine — Shoptet Marketplace
 
 **Status: secure foundation / NOT MARKETPLACE READY.** Private repository candidate.

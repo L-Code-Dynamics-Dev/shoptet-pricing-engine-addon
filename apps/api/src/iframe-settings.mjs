@@ -5,7 +5,7 @@
 import { authorizeSettingsPage, verifySession, bearerFrom } from './admin-session.mjs';
 
 const FRAME_ANCESTORS = "'self' https://*.myshoptet.com https://*.shoptet.cz https://*.shoptet.sk https://admin.shoptet.cz";
-const MCP_UI_SCOPES = ['installation:read', 'pricing:preview', 'assets:preview', 'shoptet:read', 'shoptet:write', 'pricing:sync'];
+const MCP_UI_SCOPES = ['shop:read', 'catalog:read', 'pricing:read'];
 const MAX_TIERS = 10;
 
 const jsonRes = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -129,23 +129,11 @@ export async function handleAdminSettingsApi(request, env) {
       highestDiscountWins: true,
       vatIntegrity: true,
       postWriteVerify: true,
-      brandLimits: { 'MIVARDI': 10, 'HONDA': 0 }
+      brandLimits: {}
     };
     const rules = { ...defaultRules, ...(config.rules || {}) };
 
-    const cleanTiers = [
-      { name: 'Věrnostní hladina 4 %', percent: 4, minTurnover: 5000 },
-      { name: 'Věrnostní hladina 6 %', percent: 6, minTurnover: 12500 },
-      { name: 'Věrnostní hladina 8 %', percent: 8, minTurnover: 25000 },
-      { name: 'Věrnostní hladina 10 %', percent: 10, minTurnover: 37500 },
-      { name: 'Věrnostní hladina 12 %', percent: 12, minTurnover: 62500 },
-      { name: 'Věrnostní hladina 14 %', percent: 14, minTurnover: 87500 },
-      { name: 'Věrnostní hladina 16 %', percent: 16, minTurnover: 125000 },
-      { name: 'Věrnostní hladina 18 %', percent: 18, minTurnover: 175000 },
-      { name: 'Věrnostní hladina 20 %', percent: 20, minTurnover: 250000 },
-      { name: 'Věrnostní hladina 25 %', percent: 25, minTurnover: 375000 }
-    ];
-    const tiers = Array.isArray(config.tiers) && config.tiers.length > 0 ? config.tiers : cleanTiers;
+    const tiers = Array.isArray(config.tiers) ? config.tiers : [];
 
     return jsonRes({
       shopId,
@@ -211,6 +199,11 @@ export async function handleAdminSettingsApi(request, env) {
     return jsonRes({ status: 'saved', rules: v.rules, version: version + 1 });
   }
 
+  if (route === '/mcp-token' && request.method === 'DELETE') {
+    await env.DB.prepare('UPDATE mcp_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE shop_id = ? AND revoked_at IS NULL').bind(shopId).run();
+    return jsonRes({ revoked: true });
+  }
+
   if (route === '/mcp-token' && request.method === 'POST') {
     const raw = new Uint8Array(24);
     crypto.getRandomValues(raw);
@@ -218,7 +211,7 @@ export async function handleAdminSettingsApi(request, env) {
     const digest = await sha256Hex(token);
     await env.DB.batch([
       env.DB.prepare('UPDATE mcp_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE shop_id = ? AND revoked_at IS NULL').bind(shopId),
-      env.DB.prepare('INSERT INTO mcp_credentials (token_sha256, shop_id, scopes_json) VALUES (?, ?, ?)').bind(digest, shopId, JSON.stringify(MCP_UI_SCOPES))
+      env.DB.prepare("INSERT INTO mcp_credentials (token_sha256, shop_id, scopes_json, expires_at) VALUES (?, ?, ?, datetime('now', '+7 days'))").bind(digest, shopId, JSON.stringify(MCP_UI_SCOPES))
     ]);
     return jsonRes({ token, fingerprint: digest.slice(0, 8), scopes: MCP_UI_SCOPES });
   }
@@ -587,7 +580,7 @@ export function renderAdminHtml(eshopId, auth) {
     <div class="shoptet-tabs" role="tablist">
       <button type="button" class="shoptet-tab active" data-tab="tiers" role="tab">Nastavení</button>
       <button type="button" class="shoptet-tab" data-tab="rules" role="tab">Pravidla slev</button>
-      <button type="button" class="shoptet-tab" data-tab="mcp" role="tab">Přístup k MCP</button>
+      <button type="button" class="shoptet-tab" data-tab="mcp" role="tab">AI asistent</button>
       <button type="button" class="shoptet-tab" data-tab="overview" role="tab">Přehled</button>
     </div>
 
@@ -883,7 +876,7 @@ export function renderAdminHtml(eshopId, auth) {
 
       const c = $('brand-limits-container');
       c.textContent = '';
-      const limits = r.brandLimits || { 'MIVARDI': 10, 'HONDA': 0 };
+      const limits = r.brandLimits || {};
       Object.entries(limits).forEach(([k, v]) => addBrandLimitRow(k, v));
 
       $('rules-version').textContent = state.version ? 'Uloženo (verze: ' + state.version + ')' : '';
