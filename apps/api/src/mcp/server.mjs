@@ -172,10 +172,23 @@ export async function hashToken(token) {
 }
 
 async function authenticate(request, env) {
+  let token = null;
   const auth = request.headers.get('authorization') || '';
   const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/.exec(auth);
-  if (!match || !env.DB) return null;
-  const digest = await hashToken(match[1]);
+  if (match) {
+    token = match[1];
+  } else {
+    try {
+      const url = new URL(request.url);
+      const qToken = url.searchParams.get('token');
+      if (qToken && /^[A-Za-z0-9_-]{32,256}$/.test(qToken)) {
+        token = qToken;
+      }
+    } catch {}
+  }
+
+  if (!token || !env.DB) return null;
+  const digest = await hashToken(token);
   const record = await env.DB.prepare(`
     SELECT c.shop_id, c.scopes_json
     FROM mcp_credentials c
@@ -394,4 +407,43 @@ export async function handleMcp(request, env) {
   }
 
   return rpcError(id, -32601, 'Method not found');
+}
+
+export async function handleMcpSse(request, env) {
+  if (request.method !== 'GET') {
+    return json({ error: 'method_not_allowed' }, 405, { allow: 'GET' });
+  }
+  const identity = await authenticate(request, env);
+  if (!identity) {
+    return json({ error: 'unauthorized' }, 401, { 'www-authenticate': 'Bearer' });
+  }
+
+  const sessionId = crypto.randomUUID().replaceAll('-', '');
+  const url = new URL(request.url);
+  const tokenParam = url.searchParams.get('token');
+  const messageUrl = `${url.origin}/mcp/message?sessionId=${sessionId}${tokenParam ? `&token=${encodeURIComponent(tokenParam)}` : ''}`;
+
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+
+  // Send SSE endpoint event per Model Context Protocol SSE specification
+  await writer.write(encoder.encode(`event: endpoint\r\ndata: ${messageUrl}\r\n\r\n`));
+
+  return new Response(readable, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    }
+  });
+}
+
+export async function handleMcpMessage(request, env) {
+  if (request.method !== 'POST') {
+    return json({ error: 'method_not_allowed' }, 405, { allow: 'POST' });
+  }
+  return handleMcp(request, env);
 }

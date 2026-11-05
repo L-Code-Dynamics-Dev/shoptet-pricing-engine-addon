@@ -1,5 +1,6 @@
-import { handleMcp } from './mcp/server.mjs';
+import { handleMcp, handleMcpSse, handleMcpMessage } from './mcp/server.mjs';
 import { handleAdmin } from './admin.mjs';
+import { handleAdminSettingsIframe } from './iframe-settings.mjs';
 import { handleShoptetInstall, handleShoptetUninstall, handleShoptetStatus, handleShoptetApiTest } from './shoptet-routes.mjs';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -11,14 +12,28 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // MCP server endpoint
+    // MCP server endpoints (Universal /mcp + explicit /mcp/sse and /mcp/message)
     if (url.pathname === '/mcp') {
+      if (request.method === 'GET' && request.headers.get('accept')?.includes('text/event-stream')) {
+        return handleMcpSse(request, env);
+      }
       return handleMcp(request, env);
+    }
+    if (url.pathname === '/mcp/sse') {
+      return handleMcpSse(request, env);
+    }
+    if (url.pathname === '/mcp/message') {
+      return handleMcpMessage(request, env);
     }
 
     // Admin asset approvals
     if (url.pathname === '/admin/asset-approvals') {
       return handleAdmin(request, env);
+    }
+
+    // Shoptet Admin iFrame Settings UI
+    if (url.pathname === '/admin/settings') {
+      return handleAdminSettingsIframe(request, env);
     }
 
     // Health check
