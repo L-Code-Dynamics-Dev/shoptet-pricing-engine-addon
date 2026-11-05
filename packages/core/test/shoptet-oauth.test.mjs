@@ -83,14 +83,19 @@ test('saveShoptetInstallation saves shop record in D1 tables', async () => {
   assert.match(executed[1].query, /INSERT INTO shoptet_oauth/);
 });
 
-test('getShoptetApiAccessToken requests short-term api access token', async () => {
+test('getShoptetApiAccessToken requests short-term api access token and caches it', async () => {
+  const updates = [];
   const fakeDb = {
-    prepare: () => ({
-      bind: () => ({
+    prepare: (query) => ({
+      bind: (...args) => ({
         first: async () => ({
           oauth_access_token: 'perm-token-999',
           eshop_url: 'https://826800.myshoptet.com'
-        })
+        }),
+        run: async () => {
+          updates.push({ query, args });
+          return { success: true };
+        }
       })
     })
   };
@@ -117,4 +122,32 @@ test('getShoptetApiAccessToken requests short-term api access token', async () =
 
   assert.equal(result.apiAccessToken, 'api-short-term-token-abc');
   assert.equal(result.expiresIn, 1800);
+  assert.equal(updates.length, 1);
+  assert.match(updates[0].query, /UPDATE shoptet_oauth/);
+});
+
+test('getShoptetApiAccessToken returns cached token when still valid', async () => {
+  const futureSec = Math.floor(Date.now() / 1000) + 1200;
+  const fakeDb = {
+    prepare: () => ({
+      bind: () => ({
+        first: async () => ({
+          oauth_access_token: 'perm-token-999',
+          eshop_url: 'https://826800.myshoptet.com',
+          cached_api_token: 'cached-token-123',
+          api_token_expires_at: futureSec
+        })
+      })
+    })
+  };
+
+  const fetchCalls = [];
+  const result = await getShoptetApiAccessToken({
+    db: fakeDb,
+    shopId: '826800',
+    fetchImpl: async (...args) => { fetchCalls.push(args); }
+  });
+
+  assert.equal(result.apiAccessToken, 'cached-token-123');
+  assert.equal(fetchCalls.length, 0); // No network call made
 });

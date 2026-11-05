@@ -92,14 +92,24 @@ export async function getShoptetApiAccessToken({ db, shopId, fetchImpl = fetch }
   if (!db) throw new Error('Missing database handle');
   if (!shopId) throw new Error('Missing shopId');
 
+  const nowSec = Math.floor(Date.now() / 1000);
+
   const row = await db.prepare(`
-    SELECT oauth_access_token, eshop_url
+    SELECT oauth_access_token, eshop_url, cached_api_token, api_token_expires_at
     FROM shoptet_oauth
     WHERE shop_id = ?
   `).bind(shopId).first();
 
   if (!row || !row.oauth_access_token) {
     throw new Error(`Shop ${shopId} is not installed or missing OAuth token`);
+  }
+
+  // Return cached token if still valid for at least 60 seconds
+  if (row.cached_api_token && row.api_token_expires_at && row.api_token_expires_at > (nowSec + 60)) {
+    return {
+      apiAccessToken: row.cached_api_token,
+      expiresIn: row.api_token_expires_at - nowSec
+    };
   }
 
   let baseUrl = row.eshop_url || `https://${shopId}.myshoptet.com`;
@@ -119,12 +129,33 @@ export async function getShoptetApiAccessToken({ db, shopId, fetchImpl = fetch }
 
   if (!response.ok) {
     const errorBody = await response.text();
+    // If maximum tokens reached and we have an existing cached token, return cached token as fallback
+    if (response.status === 404 && errorBody.includes('maximum_tokens_reached') && row.cached_api_token) {
+      return {
+        apiAccessToken: row.cached_api_token,
+        expiresIn: Math.max(0, (row.api_token_expires_at || (nowSec + 600)) - nowSec)
+      };
+    }
     throw new Error(`Failed to obtain short-term API token (${response.status}): ${errorBody}`);
   }
 
   const data = await response.json();
+  const expiresIn = data.expires_in || 1800;
+  const expiresAt = nowSec + expiresIn;
+
+  // Cache in D1
+  try {
+    await db.prepare(`
+      UPDATE shoptet_oauth
+      SET cached_api_token = ?, api_token_expires_at = ?
+      WHERE shop_id = ?
+    `).bind(data.access_token, expiresAt, shopId).run();
+  } catch {
+    // Non-fatal if cache write fails
+  }
+
   return {
     apiAccessToken: data.access_token,
-    expiresIn: data.expires_in
+    expiresIn
   };
 }

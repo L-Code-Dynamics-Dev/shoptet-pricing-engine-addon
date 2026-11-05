@@ -146,3 +146,40 @@ export async function handleShoptetStatus(request, env) {
     shop: row
   });
 }
+
+export async function handleShoptetApiTest(request, env) {
+  const url = new URL(request.url);
+  const shopId = url.searchParams.get('shopId') || '826800';
+
+  try {
+    const { apiAccessToken, expiresIn } = await getShoptetApiAccessToken({
+      db: env.DB,
+      shopId,
+      fetchImpl: fetch
+    });
+
+    // Test calling Shoptet REST API eshop info endpoint
+    const apiRes = await fetch('https://api.myshoptet.com/api/eshop', {
+      headers: {
+        'Shoptet-Access-Token': apiAccessToken,
+        'Content-Type': 'application/vnd.shoptet.v1.0'
+      }
+    });
+
+    const apiData = await apiRes.json();
+
+    return json({
+      status: 'connected',
+      shopId,
+      expiresIn,
+      shoptetApiStatus: apiRes.status,
+      eshop: apiData
+    });
+  } catch (err) {
+    return json({
+      status: 'error',
+      shopId,
+      message: err.message
+    }, 500);
+  }
+}

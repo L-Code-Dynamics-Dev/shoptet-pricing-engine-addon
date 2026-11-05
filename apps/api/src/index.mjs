@@ -1,6 +1,6 @@
 import { handleMcp } from './mcp/server.mjs';
 import { handleAdmin } from './admin.mjs';
-import { handleShoptetInstall, handleShoptetUninstall, handleShoptetStatus } from './shoptet-routes.mjs';
+import { handleShoptetInstall, handleShoptetUninstall, handleShoptetStatus, handleShoptetApiTest } from './shoptet-routes.mjs';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
   status,
@@ -44,6 +44,11 @@ export default {
     // Shop installation status inquiry
     if (url.pathname === '/shoptet/status') {
       return handleShoptetStatus(request, env);
+    }
+
+    // Shoptet live API test
+    if (url.pathname === '/shoptet/api-test') {
+      return handleShoptetApiTest(request, env);
     }
 
     if (url.pathname.startsWith('/admin/') || url.pathname.startsWith('/sync/')) {
