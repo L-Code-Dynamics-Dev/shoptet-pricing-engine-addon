@@ -11,7 +11,10 @@ export function verifyShoptetSignature(eshopId, timestamp, signature, clientSecr
 
 export async function handleAdminSettingsIframe(request, env) {
   const url = new URL(request.url);
-  const eshopId = url.searchParams.get('eshopId') || '826800';
+  const eshopId = url.searchParams.get('eshopId') || url.searchParams.get('eshopid') || '826800';
+  const language = url.searchParams.get('language') || 'cs';
+  const oauthCode = url.searchParams.get('oauth_code') || url.searchParams.get('code');
+  const signature = url.searchParams.get('signature');
 
   let mcpTokenDisplay = 'lcode_mcp_2e84640fe257b62ecb3719bac8914d63cf2d553c90f4eed3';
   let tiers = [
@@ -405,13 +408,18 @@ export async function handleAdminSettingsIframe(request, env) {
   <div class="toast" id="toast"></div>
 
   <script>
-    function notifyHeight() {
+    function sendHeightToShoptet() {
       const height = document.documentElement.scrollHeight || document.body.scrollHeight;
-      window.parent.postMessage({ action: 'shoptet.resize', height: height + 24 }, '*');
+      window.parent.postMessage({
+        action: 'shoptet.resize',
+        height: height
+      }, '*');
     }
-    window.addEventListener('load', notifyHeight);
-    window.addEventListener('resize', notifyHeight);
-    if (window.ResizeObserver) new ResizeObserver(notifyHeight).observe(document.body);
+    window.addEventListener('load', sendHeightToShoptet);
+    window.addEventListener('resize', sendHeightToShoptet);
+    if (window.ResizeObserver) {
+      new ResizeObserver(sendHeightToShoptet).observe(document.body);
+    }
 
     function showToast(msg) {
       const t = document.getElementById('toast');
@@ -448,9 +456,9 @@ export async function handleAdminSettingsIframe(request, env) {
     status: 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      'Content-Security-Policy': "frame-ancestors 'self' https://*.myshoptet.com https://*.shoptet.cz https://*.shoptet.sk;",
+      'Content-Security-Policy': "frame-ancestors 'self' https://*.myshoptet.com https://*.shoptet.cz https://*.shoptet.sk https://admin.shoptet.cz;",
       'X-Content-Type-Options': 'nosniff',
-      'Referrer-Policy': 'strict-origin-when-cross-origin',
+      'Referrer-Policy': 'no-referrer-when-downgrade',
       'Cache-Control': 'no-store'
     }
   });
