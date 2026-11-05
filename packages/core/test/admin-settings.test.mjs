@@ -125,15 +125,16 @@ test('tier validation', () => {
 });
 
 test('rule validation', () => {
-  assert.deepEqual(validateRules({ circuitBreakerMaxPercent: 30, couponLockAbovePercent: 20, selfHealingBatch: true, vipCartDynamic: true }).rules, {
-    circuitBreakerMaxPercent: 30,
-    couponLockAbovePercent: 20,
-    selfHealingBatch: true,
-    vipCartDynamic: true
+  const v = validateRules({
+    couponLockZR20ZR25: true,
+    couponLockMaxRemaining: true,
+    highestDiscountWins: true,
+    postWriteVerifyINC010: true,
+    brandLimits: { 'MIVARDI': 10, 'honda': '0' }
   });
-  assert.match(validateRules({ circuitBreakerMaxPercent: 0 }).error, /Maximální/);
-  assert.match(validateRules({ circuitBreakerMaxPercent: 95 }).error, /Maximální/);
-  assert.match(validateRules({ circuitBreakerMaxPercent: 30, couponLockAbovePercent: -1 }).error, /Kupónový/);
+  assert.equal(v.rules.couponLockZR20ZR25, true);
+  assert.equal(v.rules.highestDiscountWins, true);
+  assert.deepEqual(v.rules.brandLimits, { 'MIVARDI': 10, 'HONDA': 0 });
 });
 
 async function apiReq(path, { method = 'GET', body, session, origin } = {}) {
@@ -171,15 +172,15 @@ test('tier save enforces optimistic version and keeps other config', async () =>
 });
 
 test('rule save updates config and increments version', async () => {
-  const db = fakeDb({ config: { tiers: [], rules: { circuitBreakerMaxPercent: 30 } }, version: 1 });
+  const db = fakeDb({ config: { tiers: [], rules: { couponLockZR20ZR25: true } }, version: 1 });
   const env = { DB: db, ADMIN_SESSION_SECRET: SECRET };
   const session = await issueSession('826800', SECRET);
-  const rules = { circuitBreakerMaxPercent: 25, couponLockAbovePercent: 15, selfHealingBatch: true, vipCartDynamic: false };
+  const rules = { couponLockZR20ZR25: true, couponLockMaxRemaining: true, highestDiscountWins: true, postWriteVerifyINC010: true, brandLimits: { MIVARDI: 10 } };
   const ok = await handleAdminSettingsApi(await apiReq('/rules', { method: 'PUT', session, body: { rules, version: 1 } }), env);
   assert.equal(ok.status, 200);
   assert.equal((await ok.json()).version, 2);
-  assert.equal(db.config.rules.circuitBreakerMaxPercent, 25);
-  assert.equal(db.config.rules.vipCartDynamic, false);
+  assert.equal(db.config.rules.couponLockZR20ZR25, true);
+  assert.deepEqual(db.config.rules.brandLimits, { MIVARDI: 10 });
 });
 
 test('mcp token is returned once, stored hashed and revokes previous', async () => {
