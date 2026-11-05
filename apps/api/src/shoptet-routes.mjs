@@ -72,32 +72,17 @@ export async function handleShoptetInstall(request, env) {
       contactEmail: tokenResult.contactEmail
     });
 
-    const isHtmlRequest = request.headers.get('accept')?.includes('text/html');
-    if (isHtmlRequest) {
-      return html(`
-        <span class="badge">PROPOJENO</span>
-        <h1>L-Code Loyalty Pricing Engine</h1>
-        <p>Doplněk byl úspěšně autorizován a aktivován pro e-shop <strong>${tokenResult.eshopId}</strong>.</p>
-        <div class="details">
-          E-shop URL: ${tokenResult.eshopUrl}<br>
-          Kontakt: ${tokenResult.contactEmail || 'neuveden'}<br>
-          OAuth Token: Uložen bezpečně v D1 databázi.
-        </div>
-        <p>Nyní můžete toto okno zavřít a vrátit se do administrace Shoptetu.</p>
-      `);
-    }
-
-    return json({
-      status: 'active',
-      shopId: tokenResult.eshopId,
-      eshopUrl: tokenResult.eshopUrl,
-      contactEmail: tokenResult.contactEmail
+    // Shoptet vyžaduje HTTP 200 OK (text/plain "OK") pro úspěšné dokončení instalace
+    return new Response("OK", {
+      status: 200,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
     });
   } catch (err) {
-    return json({
-      error: 'oauth_exchange_failed',
-      message: err.message
-    }, 502);
+    console.error("Installation error:", err);
+    return new Response(`Installation failed: ${err.message}`, {
+      status: 502,
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    });
   }
 }
 
