@@ -57,6 +57,22 @@ export function validateTiers(input) {
   return { tiers };
 }
 
+export function validateRules(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { error: 'Neplatná data pravidel.' };
+  const maxCap = Number(input.circuitBreakerMaxPercent);
+  if (!Number.isFinite(maxCap) || maxCap <= 0 || maxCap > 90) return { error: 'Maximální sleva (Circuit Breaker) musí být 1–90 %.' };
+  const couponLock = Number(input.couponLockAbovePercent);
+  if (!Number.isFinite(couponLock) || couponLock < 0 || couponLock > 100) return { error: 'Kupónový zámek musí být 0–100 %.' };
+  return {
+    rules: {
+      circuitBreakerMaxPercent: Math.round(maxCap * 10) / 10,
+      couponLockAbovePercent: Math.round(couponLock * 10) / 10,
+      selfHealingBatch: Boolean(input.selfHealingBatch),
+      vipCartDynamic: Boolean(input.vipCartDynamic)
+    }
+  };
+}
+
 /* ---------------------------------------------------------------- API */
 
 async function requireSession(request, env) {
@@ -99,10 +115,19 @@ export async function handleAdminSettingsApi(request, env) {
       WHERE shop_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
       ORDER BY created_at DESC
     `).bind(shopId).all();
+    const defaultRules = {
+      circuitBreakerMaxPercent: 30,
+      couponLockAbovePercent: 20,
+      selfHealingBatch: true,
+      vipCartDynamic: true
+    };
+    const rules = { ...defaultRules, ...(config.rules || {}) };
+
     return jsonRes({
       shopId,
       installation: inst || null,
       tiers: Array.isArray(config.tiers) ? config.tiers : [],
+      rules,
       version,
       mcpTokens: (tokens.results || []).map(t => ({
         fingerprint: t.fp,
@@ -112,6 +137,30 @@ export async function handleAdminSettingsApi(request, env) {
       })),
       mcpEndpoint: `${url.origin}/mcp/sse`
     });
+  }
+
+  if (route === '/rules' && request.method === 'PUT') {
+    let body;
+    try { body = await request.json(); } catch { return jsonRes({ error: 'Neplatný JSON.' }, 400); }
+    if (!body || !Number.isSafeInteger(body.version) || body.version < 0) return jsonRes({ error: 'Chybí verze nastavení.' }, 400);
+    const v = validateRules(body.rules);
+    if (v.error) return jsonRes({ error: v.error }, 422);
+
+    const current = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
+    const { config, version } = parseConfig(current);
+    if (version !== body.version) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.', version }, 409);
+    const next = { ...config, rules: v.rules };
+
+    let result;
+    if (current) {
+      result = await env.DB.prepare('UPDATE tenant_settings SET config_json = ?, version = version + 1 WHERE shop_id = ? AND version = ?')
+        .bind(JSON.stringify(next), shopId, version).run();
+    } else {
+      result = await env.DB.prepare('INSERT INTO tenant_settings (shop_id, config_json, version) VALUES (?, ?, 1) ON CONFLICT(shop_id) DO NOTHING')
+        .bind(shopId, JSON.stringify(next)).run();
+    }
+    if (!result?.meta?.changes) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.' }, 409);
+    return jsonRes({ status: 'saved', rules: v.rules, version: version + 1 });
   }
 
   if (route === '/tiers' && request.method === 'PUT') {
@@ -258,6 +307,7 @@ function renderApp({ shopId, session, mode }) {
   <div class="tabs" role="tablist">
     <button class="tab active" data-tab="overview" role="tab">Přehled</button>
     <button class="tab" data-tab="tiers" role="tab">Věrnostní hladiny</button>
+    <button class="tab" data-tab="rules" role="tab">Pravidla a ochrana marže</button>
     <button class="tab" data-tab="mcp" role="tab">AI agent (MCP)</button>
   </div>
 
@@ -273,6 +323,7 @@ function renderApp({ shopId, session, mode }) {
     <div class="form-row"><span class="label">Kontaktní e-mail</span><span class="value" id="ov-email"></span></div>
     <div class="section-title">Souhrn</div>
     <div class="form-row"><span class="label">Věrnostní hladiny</span><span class="value" id="ov-tiers"></span></div>
+    <div class="form-row"><span class="label">Ochrana marže (Circuit Breaker)</span><span class="value" id="ov-rules"></span></div>
     <div class="form-row"><span class="label">Aktivní MCP tokeny</span><span class="value" id="ov-tokens"></span></div>
     <div class="form-row"><span class="label">Synchronizace cen</span><span class="value">Ceny se do Shoptetu zapisují vždy s DPH a explicitní sazbou (<code>includingVat</code> + <code>vatRate</code>).</span></div>
   </section>
@@ -285,9 +336,71 @@ function renderApp({ shopId, session, mode }) {
     </table>
     <p class="hint">Zákazník dostane slevu nejvyšší hladiny, jejíhož obratu dosáhl. Je-li akční cena produktu nižší než věrnostní, platí akční cena.</p>
     <div class="actions">
-      <button class="btn btn-green" id="tiers-save">Uložit</button>
+      <button class="btn btn-green" id="tiers-save">Uložit hladiny</button>
       <button class="btn btn-blue" id="tiers-add">Přidat hladinu</button>
       <span class="muted" id="tiers-version"></span>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-rules">
+    <div class="section-title">Ochrana marže a mantinely</div>
+    
+    <div class="form-row">
+      <label for="rule-circuit-breaker"><strong>Maximální celková sleva (Circuit Breaker)</strong></label>
+      <div class="cell-inline">
+        <input type="number" id="rule-circuit-breaker" class="num" min="1" max="90" step="0.5" style="width:90px;height:26px;border:1px solid var(--border);padding:3px 7px;">
+        <span class="unit">%</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <div></div>
+      <p class="hint" style="margin:0 0 10px;">Bezpečnostní strop marže: žádný produkt nesmí po věrnostní slevě klesnout pod tuto maximální hranici slevy.</p>
+    </div>
+
+    <div class="form-row">
+      <label for="rule-coupon-lock"><strong>Kupónový zámek nad</strong></label>
+      <div class="cell-inline">
+        <input type="number" id="rule-coupon-lock" class="num" min="0" max="100" step="1" style="width:90px;height:26px;border:1px solid var(--border);padding:3px 7px;">
+        <span class="unit">%</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <div></div>
+      <p class="hint" style="margin:0 0 10px;">Zamezení kumulace: dosáhne-li zákazník věrnostní hladiny rovné nebo vyšší než toto procento, košík zablokuje další slevový kupón.</p>
+    </div>
+
+    <div class="section-title">Automatizace a košík</div>
+
+    <div class="form-row">
+      <label for="rule-self-healing"><strong>Self-Healing synchronizace</strong></label>
+      <div>
+        <label style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="rule-self-healing" style="width:16px;height:16px;cursor:pointer;">
+          <span>Automaticky vyřadit neexistující SKU bez pádu celé dávky</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label for="rule-vip-cart"><strong>VIP dynamický košík (vip_cart.js)</strong></label>
+      <div>
+        <label style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="rule-vip-cart" style="width:16px;height:16px;cursor:pointer;">
+          <span>Zobrazovat dosaženou hladinu a ušetřenou částku v košíku Shoptetu</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <span class="label">Pravidlo vítězné ceny</span>
+      <div class="value" style="color:var(--green);font-weight:600;">
+        ✓ Aktivní v enginu (akční cena produktu má vždy přednost před věrnostní slevou)
+      </div>
+    </div>
+
+    <div class="actions" style="margin-top:20px;">
+      <button class="btn btn-green" id="rules-save">Uložit pravidla</button>
+      <span class="muted" id="rules-version"></span>
     </div>
   </section>
 
@@ -375,9 +488,38 @@ function renderApp({ shopId, session, mode }) {
     $('ov-created').textContent = fmtDate(i.created_at);
     $('ov-updated').textContent = fmtDate(i.updated_at);
     $('ov-email').textContent = i.contact_email || '—';
-    $('ov-tiers').textContent = state.tiers.length ? state.tiers.length + ' (verze nastavení ' + state.version + ')' : 'Zatím nenastaveny';
+    $('ov-tiers').textContent = state.tiers.length ? state.tiers.length + ' hladin (verze ' + state.version + ')' : 'Zatím nenastaveny';
+    const r = state.rules || {};
+    $('ov-rules').textContent = 'Strop max ' + (r.circuitBreakerMaxPercent ?? 30) + ' %, kupónový zámek ' + (r.couponLockAbovePercent ?? 20) + ' %';
     $('ov-tokens').textContent = String(state.mcpTokens.length);
   }
+
+  /* rules */
+  function renderRules() {
+    const r = state.rules || {};
+    $('rule-circuit-breaker').value = r.circuitBreakerMaxPercent ?? 30;
+    $('rule-coupon-lock').value = r.couponLockAbovePercent ?? 20;
+    $('rule-self-healing').checked = r.selfHealingBatch !== false;
+    $('rule-vip-cart').checked = r.vipCartDynamic !== false;
+    $('rules-version').textContent = state.version ? 'Verze nastavení: ' + state.version : '';
+  }
+  $('rules-save').addEventListener('click', async () => {
+    const rules = {
+      circuitBreakerMaxPercent: Number($('rule-circuit-breaker').value),
+      couponLockAbovePercent: Number($('rule-coupon-lock').value),
+      selfHealingBatch: $('rule-self-healing').checked,
+      vipCartDynamic: $('rule-vip-cart').checked
+    };
+    const btn = $('rules-save');
+    btn.disabled = true;
+    try {
+      const res = await api('/rules', { method: 'PUT', body: JSON.stringify({ rules, version: state.version }) });
+      state.rules = res.rules; state.version = res.version;
+      renderRules(); renderOverview();
+      flash('Pravidla a ochrana marže byly uloženy.');
+    } catch (e) { flash(e.message, 'error'); }
+    finally { btn.disabled = false; resize(); }
+  });
 
   /* tiers */
   function tierRow(t = { name: '', percent: '', minTurnover: '' }) {
@@ -498,7 +640,7 @@ function renderApp({ shopId, session, mode }) {
       state = await api('/state');
       $('loading').remove();
       $('panel-overview').classList.add('active');
-      renderOverview(); renderTiers(); renderTokens();
+      renderOverview(); renderTiers(); renderRules(); renderTokens();
       if (BOOT.mode === 'preview') flash('Náhledový režim (bez přihlášení přes Shoptet).', 'warn');
     } catch (e) {
       $('loading').textContent = '';

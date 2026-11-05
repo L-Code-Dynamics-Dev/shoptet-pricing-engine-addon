@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { issueSession, verifySession, verifyShoptetAdmin, authorizeSettingsPage, timingSafeEqual } from '../../../apps/api/src/admin-session.mjs';
-import { validateTiers, handleAdminSettingsApi, handleAdminSettingsIframe } from '../../../apps/api/src/iframe-settings.mjs';
+import { validateTiers, validateRules, handleAdminSettingsApi, handleAdminSettingsIframe } from '../../../apps/api/src/iframe-settings.mjs';
 
 const SECRET = 's'.repeat(48);
 
@@ -124,6 +124,18 @@ test('tier validation', () => {
   assert.match(validateTiers([{ name: 'A', percent: 5, minTurnover: 0, shopId: 'x' }]).error, /neznámá/);
 });
 
+test('rule validation', () => {
+  assert.deepEqual(validateRules({ circuitBreakerMaxPercent: 30, couponLockAbovePercent: 20, selfHealingBatch: true, vipCartDynamic: true }).rules, {
+    circuitBreakerMaxPercent: 30,
+    couponLockAbovePercent: 20,
+    selfHealingBatch: true,
+    vipCartDynamic: true
+  });
+  assert.match(validateRules({ circuitBreakerMaxPercent: 0 }).error, /Maximální/);
+  assert.match(validateRules({ circuitBreakerMaxPercent: 95 }).error, /Maximální/);
+  assert.match(validateRules({ circuitBreakerMaxPercent: 30, couponLockAbovePercent: -1 }).error, /Kupónový/);
+});
+
 async function apiReq(path, { method = 'GET', body, session, origin } = {}) {
   const headers = { 'content-type': 'application/json' };
   if (session) headers.authorization = `Bearer ${session}`;
@@ -156,6 +168,18 @@ test('tier save enforces optimistic version and keeps other config', async () =>
   assert.deepEqual(db.config.brandCaps, { X: 10 });
   const invalid = await handleAdminSettingsApi(await apiReq('/tiers', { method: 'PUT', session, body: { tiers: [{ name: '', percent: 5, minTurnover: 0 }], version: 4 } }), env);
   assert.equal(invalid.status, 422);
+});
+
+test('rule save updates config and increments version', async () => {
+  const db = fakeDb({ config: { tiers: [], rules: { circuitBreakerMaxPercent: 30 } }, version: 1 });
+  const env = { DB: db, ADMIN_SESSION_SECRET: SECRET };
+  const session = await issueSession('826800', SECRET);
+  const rules = { circuitBreakerMaxPercent: 25, couponLockAbovePercent: 15, selfHealingBatch: true, vipCartDynamic: false };
+  const ok = await handleAdminSettingsApi(await apiReq('/rules', { method: 'PUT', session, body: { rules, version: 1 } }), env);
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).version, 2);
+  assert.equal(db.config.rules.circuitBreakerMaxPercent, 25);
+  assert.equal(db.config.rules.vipCartDynamic, false);
 });
 
 test('mcp token is returned once, stored hashed and revokes previous', async () => {
