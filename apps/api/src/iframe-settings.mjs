@@ -229,258 +229,305 @@ export async function handleAdminSettingsApi(request, env) {
 /* ---------------------------------------------------------------- render */
 
 const SHOPTET_STYLES = `
-    :root {
-      --bg: #f4f6f8;
-      --card-bg: #ffffff;
-      --border: #dfe3e8;
-      --border-dark: #c4cdd5;
-      --text: #212b36;
-      --text-muted: #637381;
-      --primary: #008060;
-      --primary-hover: #006e52;
-      --danger: #de3618;
-      --blue: #2c6ecb;
-      --blue-subtle: #ebf5fa;
-      --tag-green-bg: #e3f1df;
-      --tag-green-text: #108043;
-    }
-
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background-color: var(--bg);
-      color: var(--text);
+      background-color: #f0f2f5;
+      color: #333333;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       font-size: 13px;
       line-height: 1.5;
       padding: 20px;
     }
 
-    .wrapper {
+    .page-card {
+      background: #ffffff;
+      border: 1px solid #e2e5e8;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+      padding: 24px 34px 40px;
       max-width: 1140px;
       margin: 0 auto;
+      min-height: 520px;
     }
 
-    /* Top Bar */
-    .topbar {
+    /* Breadcrumbs */
+    .breadcrumbs {
+      font-size: 11px;
+      color: #888888;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .breadcrumbs .sep { color: #cccccc; }
+    .breadcrumbs .current { color: #555555; }
+
+    /* Top Title Row */
+    .title-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 16px;
+      margin-bottom: 18px;
     }
-    .main-title {
-      font-size: 20px;
-      font-weight: 600;
-      color: #0084a8;
-      letter-spacing: -0.3px;
+    .page-title {
+      font-size: 32px;
+      font-weight: 300;
+      color: #25a9e0;
+      line-height: 1.2;
+      margin: 0;
+    }
+    .top-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    /* Buttons */
+    .btn-shoptet-green {
+      background-color: #79b928;
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: bold;
+      border-radius: 3px;
+      border: none;
+      padding: 6px 18px;
+      cursor: pointer;
+      line-height: 1.4;
+      transition: background 0.15s ease;
+    }
+    .btn-shoptet-green:hover {
+      background-color: #65a01c;
+    }
+    .btn-secondary {
+      background: #ffffff;
+      border: 1px solid #cfcfcf;
+      border-radius: 3px;
+      color: #333333;
+      font-size: 13px;
+      padding: 6px 14px;
+      cursor: pointer;
+      line-height: 1.4;
+      transition: background 0.15s ease;
+    }
+    .btn-secondary:hover {
+      background: #f7f7f7;
+    }
+    .btn-remove {
+      background: none;
+      border: none;
+      color: #d9534f;
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+      padding: 0 4px;
+      font-weight: bold;
+    }
+    .btn-remove:hover {
+      color: #c9302c;
+    }
+    button[disabled] {
+      opacity: 0.55;
+      cursor: default;
     }
 
     /* Shoptet Tabs */
-    .nav-tabs {
+    .shoptet-tabs {
       display: flex;
-      gap: 4px;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 20px;
+      gap: 2px;
+      border-bottom: 1px solid #d9d9d9;
+      margin-bottom: 18px;
     }
-    .nav-tab {
-      padding: 8px 16px;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--text-muted);
-      background: #eaedef;
-      border: 1px solid var(--border);
+    .shoptet-tab {
+      background: #f3f3f3;
+      color: #444444;
+      border: 1px solid #d9d9d9;
       border-bottom: none;
-      border-radius: 4px 4px 0 0;
+      border-radius: 3px 3px 0 0;
+      padding: 7px 18px;
+      font-size: 13px;
+      font-family: inherit;
       cursor: pointer;
-      text-decoration: none;
+      margin-bottom: 0;
+      outline: none;
+      transition: background 0.1s ease;
+    }
+    .shoptet-tab:hover {
+      background: #ebebeb;
+      color: #222222;
+    }
+    .shoptet-tab.active {
+      background: #ffffff;
+      color: #111111;
+      font-weight: bold;
+      border-bottom: 1px solid #ffffff;
       margin-bottom: -1px;
     }
-    .nav-tab:hover {
-      background: #f0f2f4;
-      color: var(--text);
-    }
-    .nav-tab.active {
-      background: var(--card-bg);
-      color: var(--text);
-      border-bottom: 1px solid var(--card-bg);
-      font-weight: 600;
-    }
 
-    /* Card Panels */
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 20px;
-      margin-bottom: 20px;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-    }
-    .card-title {
-      font-size: 14px;
-      font-weight: 600;
-      color: #0084a8;
-      border-bottom: 1px solid #e1e9ee;
-      padding-bottom: 8px;
-      margin-bottom: 16px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-
-    /* Key-Value Tables & Status */
-    .table-kv {
-      width: 100%;
-      border-collapse: collapse;
-    }
-    .table-kv td {
-      padding: 9px 0;
-      vertical-align: middle;
+    .tab-intro {
+      color: #444444;
       font-size: 13px;
-      border-bottom: 1px solid #f4f6f8;
-    }
-    .table-kv tr:last-child td {
-      border-bottom: none;
-    }
-    .table-kv td.key {
-      width: 280px;
-      color: var(--text-muted);
-      font-weight: 500;
-    }
-    .table-kv td.val {
-      color: var(--text);
+      margin: 0 0 22px 0;
+      line-height: 1.5;
     }
 
-    /* Data Tables */
-    .data-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 16px;
+    /* Section Headings */
+    .section-heading {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin: 28px 0 16px;
+      color: #25a9e0;
+      font-size: 20px;
+      font-weight: 300;
     }
-    .data-table th {
-      background: #f9fafb;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      color: var(--text-muted);
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--border);
-      text-align: left;
-    }
-    .data-table td {
-      padding: 10px 12px;
-      border-bottom: 1px solid #f0f2f4;
-      vertical-align: middle;
-    }
-    .data-table tr:last-child td {
-      border-bottom: none;
+    .section-heading::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: #e4e4e4;
     }
 
-    /* Badges & Inputs */
-    .badge-success {
-      display: inline-block;
-      padding: 2px 8px;
-      font-size: 11px;
-      font-weight: 600;
-      border-radius: 12px;
-      background: var(--tag-green-bg);
-      color: var(--tag-green-text);
-    }
-    .badge-scope {
-      display: inline-block;
-      padding: 2px 6px;
-      font-size: 11px;
+    /* Notice Box (Daně) */
+    .shoptet-notice {
+      background-color: #fffdf5;
+      border: 1px solid #e6b85c;
       border-radius: 3px;
-      background: #e4e8eb;
-      color: #454f5b;
-      margin-right: 4px;
-      font-family: monospace;
-    }
-
-    .form-input {
-      height: 32px;
-      padding: 4px 10px;
-      border: 1px solid var(--border-dark);
-      border-radius: 4px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 22px;
       font-size: 13px;
-      color: var(--text);
-      background: #fff;
-      outline: none;
-      transition: border 0.15s ease;
+      color: #333333;
     }
-    .form-input:focus {
-      border-color: var(--blue);
-      box-shadow: 0 0 0 1px var(--blue);
+    .notice-icon {
+      font-size: 18px;
+      line-height: 1;
+      color: #e6b85c;
     }
-    .form-input.w-small { width: 90px; }
-    .form-input.w-med { width: 140px; }
-    .form-input.w-full { width: 100%; }
 
-    /* Buttons */
-    .btn {
+    /* Form Rows */
+    .form-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .form-label {
+      width: 280px;
+      text-align: right;
+      padding-right: 18px;
+      color: #333333;
+      font-size: 13px;
+      font-weight: 400;
+    }
+    .form-field {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #333333;
+    }
+    .info-icon {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      height: 32px;
-      padding: 0 14px;
-      font-size: 12px;
-      font-weight: 500;
-      border-radius: 4px;
-      cursor: pointer;
-      border: 1px solid transparent;
-      text-decoration: none;
-    }
-    .btn-primary {
-      background: var(--primary);
-      color: #fff;
-    }
-    .btn-primary:hover {
-      background: var(--primary-hover);
-    }
-    .btn-secondary {
-      background: #fff;
-      border-color: var(--border-dark);
-      color: var(--text);
-    }
-    .btn-secondary:hover {
-      background: #f9fafb;
-    }
-    .btn-danger {
-      color: var(--danger);
-      background: none;
-      border: none;
-      padding: 0 6px;
-      cursor: pointer;
-      font-size: 16px;
-    }
-    .btn[disabled] { opacity: .55; cursor: default; }
-
-    /* Alert / Flash */
-    .alert {
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-      border: 1px solid var(--primary);
+      justify-content: center;
+      width: 17px;
+      height: 17px;
+      border-radius: 50%;
+      border: 1px solid #25a9e0;
+      color: #25a9e0;
+      font-size: 11px;
+      font-family: serif;
+      font-style: italic;
+      font-weight: bold;
+      cursor: help;
       background: #ffffff;
-      border-radius: 4px;
-      padding: 12px 16px;
-      margin-bottom: 16px;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+      margin-left: 4px;
+      flex-shrink: 0;
     }
-    .alert-icon { color: var(--primary); font-weight: 700; }
-    .alert.error { border-color: var(--danger); }
-    .alert.error .alert-icon { color: var(--danger); }
-    .alert.warn { border-color: #f0a30a; }
-    .alert.warn .alert-icon { color: #f0a30a; }
+
+    /* Inputs */
+    .input-text {
+      height: 30px;
+      border: 1px solid #cfcfcf;
+      border-radius: 3px;
+      padding: 4px 8px;
+      font-size: 13px;
+      color: #333333;
+      background: #ffffff;
+      outline: none;
+      font-family: inherit;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .input-text:focus {
+      border-color: #25a9e0;
+      box-shadow: 0 0 3px rgba(37,169,224,0.35);
+    }
+    .input-text[readonly] {
+      background: #f9f9f9;
+      color: #555555;
+    }
+    .w-small { width: 85px; }
+    .w-med { width: 140px; }
+    .w-full { width: 100%; }
+    .unit { color: #666666; margin-left: 4px; }
+
+    /* Table */
+    .shoptet-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 16px;
+    }
+    .shoptet-table th {
+      background-color: #f7f7f7;
+      color: #555555;
+      font-size: 12px;
+      font-weight: bold;
+      padding: 9px 12px;
+      border-bottom: 1px solid #d9d9d9;
+      text-align: left;
+    }
+    .shoptet-table td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #eeeeee;
+      font-size: 13px;
+      color: #333333;
+      vertical-align: middle;
+    }
+    .shoptet-table tr:hover {
+      background-color: #fafbfc;
+    }
+
+    /* Alerts */
+    .flash-box {
+      margin-bottom: 16px;
+    }
+    .alert-success {
+      background: #dff0d8;
+      border: 1px solid #d6e9c6;
+      color: #3c763d;
+      padding: 10px 14px;
+      border-radius: 3px;
+      font-size: 13px;
+    }
+    .alert-error {
+      background: #f2dede;
+      border: 1px solid #ebccd1;
+      color: #a94442;
+      padding: 10px 14px;
+      border-radius: 3px;
+      font-size: 13px;
+    }
 
     .panel { display: none; }
     .panel.active { display: block; }
-    .hint { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
-    pre.snippet { background: #f9fafb; border: 1px solid var(--border); padding: 12px 14px; font: 12px/1.5 Menlo, Consolas, monospace; overflow-x: auto; margin-top: 8px; border-radius: 4px; }
-    .unit { color: var(--text-muted); margin-left: 6px; }
 `;
 
 function renderErrorPage(error, status) {
   const nonce = crypto.randomUUID().replace(/-/g, '');
   const messages = {
-    missing_code: 'Stránku otevřete z administrace Shoptetu: <strong>Propojení → L-Code Loyalty Pricing Engine</strong>.',
+    missing_code: 'Stránku otevřete z administrace Shoptetu: <strong>Propojení → Věrnostní slevy a ceníky</strong>.',
     missing_eshop_id: 'V adrese chybí parametr <code>eshopId</code>.',
     not_installed: 'Doplněk není na tomto e-shopu nainstalovaný.',
     invalid_preview_key: 'Neplatný náhledový klíč.',
@@ -490,9 +537,9 @@ function renderErrorPage(error, status) {
   };
   const msg = messages[error] || `Ověření uživatele se nezdařilo (${escapeHtml(error)}). Zkuste stránku otevřít znovu z administrace.`;
   return new Response(`<!DOCTYPE html><html lang="cs"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>L-Code Loyalty Pricing Engine</title><style>${SHOPTET_STYLES}</style></head><body><div class="wrapper">
-<div class="topbar"><h1 class="main-title">L-Code Loyalty Pricing Engine</h1></div>
-<div class="alert error"><span class="alert-icon">!</span><div>${msg}</div></div>
+<title>Věrnostní slevy a ceníky</title><style>${SHOPTET_STYLES}</style></head><body><div class="page-card">
+<div class="title-row"><h1 class="page-title">Věrnostní slevy a ceníky</h1></div>
+<div class="alert-error">${msg}</div>
 </div>
 <script nonce="${nonce}">
   function h(){window.parent.postMessage({action:'shoptet.resize',height:document.documentElement.scrollHeight},'*');}
@@ -509,174 +556,172 @@ export function renderAdminHtml(eshopId, auth) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>L-Code Loyalty Pricing Engine</title>
+  <title>Věrnostní slevy a ceníky</title>
   <style>
     ${SHOPTET_STYLES}
   </style>
 </head>
 <body>
-  <div class="wrapper">
-    <div class="topbar">
-      <h1 class="main-title">L-Code Loyalty Pricing Engine</h1>
-      <div>
-        <span class="badge-success" id="badge-status">Připojeno k e-shopu</span>
+  <div class="page-card">
+    <!-- Breadcrumbs -->
+    <div class="breadcrumbs">
+      <span>🏠</span>
+      <span class="sep">&gt;</span>
+      <span>Propojení</span>
+      <span class="sep">&gt;</span>
+      <span class="current">Věrnostní slevy a ceníky</span>
+    </div>
+
+    <!-- Title Row -->
+    <div class="title-row">
+      <h1 class="page-title">Věrnostní slevy a ceníky</h1>
+      <div class="top-actions">
+        <button type="button" class="btn-shoptet-green" id="btn-top-save">Uložit</button>
       </div>
     </div>
 
-    <div id="flash"></div>
+    <!-- Flash message -->
+    <div id="flash" class="flash-box"></div>
 
-    <!-- Shoptet Navigation Tabs -->
-    <div class="nav-tabs" role="tablist">
-      <button class="nav-tab active" data-tab="overview" role="tab">Přehled</button>
-      <button class="nav-tab" data-tab="tiers" role="tab">Věrnostní hladiny</button>
-      <button class="nav-tab" data-tab="rules" role="tab">Pravidla a ochrana marže</button>
-      <button class="nav-tab" data-tab="mcp" role="tab">AI agent (MCP)</button>
+    <!-- Navigation Tabs -->
+    <div class="shoptet-tabs" role="tablist">
+      <button type="button" class="shoptet-tab active" data-tab="tiers" role="tab">Nastavení</button>
+      <button type="button" class="shoptet-tab" data-tab="rules" role="tab">Pravidla slev</button>
+      <button type="button" class="shoptet-tab" data-tab="overview" role="tab">Přehled</button>
     </div>
 
-    <div id="loading" style="padding: 24px 0; color: var(--text-muted);">Načítám konfiguraci e-shopu…</div>
+    <div id="loading" style="padding: 24px 0; color: #777777;">Načítám nastavení…</div>
 
-    <!-- Tab 1: Přehled -->
-    <section class="panel" id="panel-overview">
-      <div class="card">
-        <div class="card-title">Stav instalace a licence</div>
-        <table class="table-kv">
-          <tbody>
-            <tr><td class="key">Identifikátor e-shopu</td><td class="val"><strong>${escapeHtml(eshopId)}</strong></td></tr>
-            <tr><td class="key">Adresa obchodu</td><td class="val" id="ov-url">—</td></tr>
-            <tr><td class="key">Stav doplňku</td><td class="val"><span class="badge-success" id="ov-state">Aktivní</span></td></tr>
-            <tr><td class="key">Datum aktivace</td><td class="val" id="ov-created">—</td></tr>
-            <tr><td class="key">Poslední synchronizace ceníků</td><td class="val" id="ov-updated">—</td></tr>
-            <tr><td class="key">Kontaktní e-mail</td><td class="val" id="ov-email">—</td></tr>
-          </tbody>
-        </table>
+    <!-- Tab 1: Nastavení (Věrnostní ceníky) -->
+    <section class="panel active" id="panel-tiers">
+      <p class="tab-intro">Vypište pečlivě níže uvedené údaje. Nastavení určuje procentuální věrnostní slevy a nákupní obrat pro automatické zařazení vašich zákazníků do ceníků.</p>
+
+      <div class="shoptet-notice">
+        <span class="notice-icon">💡</span>
+        <span>Pokud má produkt v e-shopu akční cenu výhodnější než zákazníkova věrnostní sleva, zákazník nakupuje za výhodnější akční cenu. Všechny ceny se do e-shopu ukládají včetně platné sazby DPH.</span>
       </div>
 
-      <div class="card">
-        <div class="card-title">Souhrn cenového enginu</div>
-        <table class="table-kv">
-          <tbody>
-            <tr><td class="key">Věrnostní hladiny</td><td class="val" id="ov-tiers">—</td></tr>
-            <tr><td class="key">Ochrana marže</td><td class="val" id="ov-rules">—</td></tr>
-            <tr><td class="key">Aktivní připojení pro AI agenta</td><td class="val" id="ov-tokens">—</td></tr>
-            <tr><td class="key">DPH a zaokrouhlování</td><td class="val">Ceny se do Shoptetu zapisují vždy včetně platné sazby DPH.</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+      <div class="section-heading">Věrnostní ceníky a obraty</div>
 
-    <!-- Tab 2: Věrnostní hladiny -->
-    <section class="panel" id="panel-tiers">
-      <div class="card">
-        <div class="card-title">Nastavení věrnostních slev a obratů</div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th style="width: 45%;">Název hladiny</th>
-              <th style="width: 25%;">Věrnostní sleva</th>
-              <th style="width: 25%;">Minimální obrat</th>
-              <th style="width: 5%;"></th>
-            </tr>
-          </thead>
-          <tbody id="tiers-body"></tbody>
-        </table>
-        <p class="hint">Zákazník získá slevu nejvyšší hladiny, jejíhož obratu za rozhodné období dosáhl. Pokud je akční cena zboží výhodnější než věrnostní, platí pro zákazníka nižší akční cena.</p>
-        
-        <div style="display: flex; gap: 8px; align-items: center; margin-top: 16px;">
-          <button class="btn btn-primary" id="tiers-save">Uložit hladiny</button>
-          <button class="btn btn-secondary" id="tiers-add">+ Přidat hladinu</button>
-          <span style="color: var(--text-muted); font-size: 12px; margin-left: 8px;" id="tiers-version"></span>
-        </div>
+      <table class="shoptet-table">
+        <thead>
+          <tr>
+            <th style="width: 48%;">Název věrnostního ceníku</th>
+            <th style="width: 24%;">Věrnostní sleva</th>
+            <th style="width: 24%;">Požadovaný obrat</th>
+            <th style="width: 4%;"></th>
+          </tr>
+        </thead>
+        <tbody id="tiers-body"></tbody>
+      </table>
+
+      <div style="display: flex; gap: 8px; align-items: center; margin-top: 16px;">
+        <button type="button" class="btn-secondary" id="tiers-add">+ Přidat další ceník</button>
+        <button type="button" class="btn-shoptet-green" id="tiers-save-bottom">Uložit</button>
+        <span style="color: #888888; font-size: 12px; margin-left: 8px;" id="tiers-version"></span>
       </div>
     </section>
 
-    <!-- Tab 3: Pravidla a ochrana marže -->
+    <!-- Tab 2: Pravidla slev -->
     <section class="panel" id="panel-rules">
-      <div class="card">
-        <div class="card-title">Pravidla výpočtu a ochrana marže</div>
-        <table class="table-kv">
-          <tbody>
-            <tr>
-              <td class="key">Výhodnější cena má přednost</td>
-              <td class="val">
-                <label style="cursor: pointer; display: inline-flex; align-items: center; gap: 8px;">
-                  <input type="checkbox" id="rule-highest-discount" checked style="width: 16px; height: 16px;">
-                  <span>Pokud má produkt akční cenu výhodnější než věrnostní hladina, zákazník platí nižší akční cenu; je-li věrnostní sleva vyšší, uplatní se věrnostní cena.</span>
-                </label>
-              </td>
-            </tr>
-            <tr>
-              <td class="key">Zákaz kupónů pro nejvyšší hladiny</td>
-              <td class="val">
-                <label style="cursor: pointer; display: inline-flex; align-items: center; gap: 8px;">
-                  <input type="checkbox" id="rule-coupon-lock-top" checked style="width: 16px; height: 16px;">
-                  <span>Zákazníci s nejvyššími slevami (20 % a 25 %) nesmí v košíku kombinovat věrnostní cenu se slevovými kupóny.</span>
-                </label>
-              </td>
-            </tr>
-            <tr>
-              <td class="key">Sčítání slevového kupónu s věrností</td>
-              <td class="val">
-                <label style="cursor: pointer; display: inline-flex; align-items: center; gap: 8px;">
-                  <input type="checkbox" id="rule-coupon-min-price-ratio" checked style="width: 16px; height: 16px;">
-                  <span>U nižších hladin omezit slevu z kupónu tak, aby sečtení obou slev nepřekročilo tvůj maržový strop na zboží.</span>
-                </label>
-              </td>
-            </tr>
-            <tr>
-              <td class="key">Okamžitá kontrola uložení cen</td>
-              <td class="val">
-                <label style="cursor: pointer; display: inline-flex; align-items: center; gap: 8px;">
-                  <input type="checkbox" id="rule-post-write-verify" checked style="width: 16px; height: 16px;">
-                  <span>U nově naceněných položek provést okamžitou kontrolu uložení v Shoptetu a při výpadku zápis automaticky zopakovat.</span>
-                </label>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <p class="tab-intro">Nastavte pravidla pro kombinování slev, uplatňování slevových kupónů v nákupním košíku a slevové stropy pro vybrané značky.</p>
+
+      <div class="section-heading">Kombinování slev a slevových kupónů</div>
+
+      <div class="form-row">
+        <label class="form-label">Výhodnější cena má přednost</label>
+        <div class="form-field">
+          <input type="checkbox" id="rule-highest-discount" checked style="width: 16px; height: 16px; cursor: pointer;">
+          <label for="rule-highest-discount" style="cursor: pointer;">Pokud je akční cena zboží výhodnější než věrnostní sleva, platí nižší akční cena.</label>
+          <span class="info-icon" title="Zákazník vždy nakupuje za nejvýhodnější nabízenou cenu.">i</span>
+        </div>
       </div>
 
-      <div class="card">
-        <div class="card-title">Maximální povolená sleva pro vybrané značky</div>
-        <p class="hint" style="margin-bottom: 12px;">Značky s pevným stropem maximální věrnostní slevy (např. <code>MIVARDI: 10%</code>, <code>HONDA: 0%</code>):</p>
-        <div id="brand-limits-container" style="display: flex; flex-direction: column; gap: 8px; max-width: 420px; margin-bottom: 12px;"></div>
-        <button class="btn btn-secondary" id="btn-add-brand-limit">+ Přidat značku</button>
-
-        <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #f0f2f4;">
-          <button class="btn btn-primary" id="rules-save">Uložit pravidla</button>
-          <span style="color: var(--text-muted); font-size: 12px; margin-left: 8px;" id="rules-version"></span>
+      <div class="form-row">
+        <label class="form-label">Zákaz kupónů pro nejvyšší slevy</label>
+        <div class="form-field">
+          <input type="checkbox" id="rule-coupon-lock-top" checked style="width: 16px; height: 16px; cursor: pointer;">
+          <label for="rule-coupon-lock-top" style="cursor: pointer;">Zákazníci s nejvyššími slevami (20 % a 25 %) nemohou v nákupním košíku uplatnit slevový kupón.</label>
+          <span class="info-icon" title="Ochrana před kombinováním vysoké věrnostní slevy se slevovými kupóny.">i</span>
         </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">Sčítání slevového kupónu s věrností</label>
+        <div class="form-field">
+          <input type="checkbox" id="rule-coupon-min-price-ratio" checked style="width: 16px; height: 16px; cursor: pointer;">
+          <label for="rule-coupon-min-price-ratio" style="cursor: pointer;">U ostatních slev omezit výši kupónu tak, aby výsledná částka neklesla pod nákupní marži zboží.</label>
+          <span class="info-icon" title="Hlídá minimální prodejní cenu při zadání kupónu.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">Okamžitá kontrola uložení cen</label>
+        <div class="form-field">
+          <input type="checkbox" id="rule-post-write-verify" checked style="width: 16px; height: 16px; cursor: pointer;">
+          <label for="rule-post-write-verify" style="cursor: pointer;">Po každé změně cen ihned ověřit, že se nová cena v e-shopu v pořádku uložila.</label>
+          <span class="info-icon" title="Automaticky zkontroluje uložení cen v Shoptetu.">i</span>
+        </div>
+      </div>
+
+      <div class="section-heading">Maximální povolená sleva pro vybrané značky</div>
+      <p style="color: #666666; font-size: 13px; margin-bottom: 14px;">U vybraných značek můžete nastavit pevný strop maximální slevy, který věrnostní program nikdy nepřekročí:</p>
+
+      <div id="brand-limits-container" style="display: flex; flex-direction: column; gap: 8px; max-width: 440px; margin-bottom: 14px;"></div>
+      <button type="button" class="btn-secondary" id="btn-add-brand-limit">+ Přidat značku</button>
+
+      <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #eeeeee; display: flex; align-items: center; gap: 8px;">
+        <button type="button" class="btn-shoptet-green" id="rules-save-bottom">Uložit pravidla</button>
+        <span style="color: #888888; font-size: 12px; margin-left: 8px;" id="rules-version"></span>
       </div>
     </section>
 
-    <!-- Tab 4: AI agent (MCP) -->
-    <section class="panel" id="panel-mcp">
-      <div class="card">
-        <div class="card-title">Připojení pro AI asistenta (Model Context Protocol)</div>
-        <p style="margin-bottom: 14px;">Připojte Claude Desktop, Cursor nebo jiného AI klienta a ovládejte věrnostní ceny a ceníky přirozenou řečí.</p>
-        
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Identifikátor klíče</th>
-              <th>Vytvořeno</th>
-              <th>Přiřazená oprávnění</th>
-            </tr>
-          </thead>
-          <tbody id="tokens-body"></tbody>
-        </table>
+    <!-- Tab 3: Přehled -->
+    <section class="panel" id="panel-overview">
+      <p class="tab-intro">Základní přehled o stavu propojení věrnostního systému s vaším e-shopem.</p>
 
-        <div style="display: flex; gap: 8px; align-items: center; margin-top: 14px;">
-          <button class="btn btn-primary" id="token-new">Vygenerovat nový přístupový token</button>
-          <span class="hint">Vygenerováním se všechny dosavadní tokeny pro jistotu zneplatní.</span>
+      <div class="section-heading">Stav propojení s e-shopem</div>
+
+      <div class="form-row">
+        <label class="form-label">Adresa e-shopu</label>
+        <div class="form-field">
+          <input type="text" class="input-text" style="width: 320px;" readonly id="ov-url" value="—">
+          <span class="info-icon" title="Adresa připojeného e-shopu.">i</span>
         </div>
-
-        <div id="token-result"></div>
       </div>
 
-      <div class="card">
-        <div class="card-title">Konfigurační soubor klienta</div>
-        <p class="hint">Vložte do souboru <code>claude_desktop_config.json</code> (Mac: <code>~/Library/Application Support/Claude/</code>, Windows: <code>%APPDATA%\\Claude\\</code>):</p>
-        <pre class="snippet" id="mcp-snippet"></pre>
+      <div class="form-row">
+        <label class="form-label">Stav</label>
+        <div class="form-field">
+          <span style="display: inline-flex; align-items: center; gap: 6px; font-weight: bold; color: #79b928;">
+            <span style="font-size: 14px;">●</span> Schváleno a v provozu
+          </span>
+          <span class="info-icon" title="Doplněk je aktivní a platný.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">Způsob zápisu cen</label>
+        <div class="form-field">
+          <span>Všechny ceny se do ceníků ukládají včetně platné sazby DPH</span>
+          <span class="info-icon" title="Zajišťuje bezchybné zobrazení cen pro plátce i neplátce.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">E-mail podpory</label>
+        <div class="form-field">
+          <input type="text" class="input-text" style="width: 320px;" readonly id="ov-email" value="—">
+          <span class="info-icon" title="Kontaktní e-mail pro dotazy.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">Aktivní ceníky</label>
+        <div class="form-field">
+          <span id="ov-tiers">—</span>
+          <span class="info-icon" title="Počet nakonfigurovaných věrnostních ceníků.">i</span>
+        </div>
       </div>
     </section>
   </div>
@@ -686,6 +731,7 @@ export function renderAdminHtml(eshopId, auth) {
     const BOOT = ${boot};
     const $ = id => document.getElementById(id);
     let state = null;
+    let activeTab = 'tiers';
 
     function resize() {
       const h = document.documentElement.scrollHeight || document.body.scrollHeight;
@@ -695,20 +741,16 @@ export function renderAdminHtml(eshopId, auth) {
     addEventListener('resize', resize);
     if (window.ResizeObserver) new ResizeObserver(resize).observe(document.body);
 
-    function flash(msg, kind) {
+    function flash(msg, isError = false) {
       const box = $('flash');
       box.textContent = '';
       if (!msg) return;
       const el = document.createElement('div');
-      el.className = 'alert' + (kind === 'error' ? ' error' : kind === 'warn' ? ' warn' : '');
-      const icon = document.createElement('span');
-      icon.className = 'alert-icon';
-      icon.textContent = kind === 'error' || kind === 'warn' ? '!' : '✓';
-      const text = document.createElement('div');
-      text.textContent = msg;
-      el.append(icon, text);
+      el.className = isError ? 'alert-error' : 'alert-success';
+      el.textContent = msg;
       box.append(el);
-      if (kind !== 'error') setTimeout(() => { if (box.firstChild === el) box.textContent = ''; }, 5000);
+      if (!isError) setTimeout(() => { if (box.firstChild === el) box.textContent = ''; }, 5000);
+      resize();
     }
 
     async function api(path, opts = {}) {
@@ -723,41 +765,29 @@ export function renderAdminHtml(eshopId, auth) {
       return data;
     }
 
-    const fmtDate = s => {
-      if (!s) return '—';
-      const d = new Date(String(s).replace(' ', 'T') + 'Z');
-      return isNaN(d) ? s : d.toLocaleString('cs-CZ', { day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-    };
-
-    /* Tabs switching */
-    document.querySelectorAll('.nav-tab').forEach(btn => btn.addEventListener('click', () => {
-      document.querySelectorAll('.nav-tab').forEach(b => b.classList.toggle('active', b === btn));
-      document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + btn.dataset.tab));
+    /* Tabs */
+    document.querySelectorAll('.shoptet-tab').forEach(btn => btn.addEventListener('click', () => {
+      activeTab = btn.dataset.tab;
+      document.querySelectorAll('.shoptet-tab').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + activeTab));
       resize();
     }));
 
     /* Overview */
     function renderOverview() {
       const i = state.installation || {};
-      $('ov-url').textContent = i.eshop_url || '—';
-      $('ov-state').textContent = i.state === 'active' ? 'Aktivní' : (i.state || 'Aktivní');
-      $('ov-created').textContent = fmtDate(i.created_at);
-      $('ov-updated').textContent = fmtDate(i.updated_at);
-      $('ov-email').textContent = i.contact_email || '—';
-      $('ov-tiers').textContent = state.tiers.length ? state.tiers.length + ' hladin (verze nastavení ' + state.version + ')' : 'Zatím nenastaveny';
-      const r = state.rules || {};
-      const blCount = Object.keys(r.brandLimits || {}).length;
-      $('ov-rules').textContent = 'Zákaz kupónů u nejvyšších slev, ochrana marže, stropy značek: ' + blCount + ' aktivní';
-      $('ov-tokens').textContent = String(state.mcpTokens.length);
+      $('ov-url').value = i.eshop_url || 'https://' + BOOT.shopId + '.myshoptet.com/';
+      $('ov-email').value = i.contact_email || 'ceo@l-code-dynamics.com';
+      $('ov-tiers').textContent = state.tiers.length ? state.tiers.length + ' aktivních věrnostních ceníků' : 'Zatím nenastaveny';
     }
 
     /* Tiers table */
     function tierRow(t = { name: '', percent: '', minTurnover: '' }) {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td><input type="text" class="form-input w-full tier-name" placeholder="např. VIP Bronz" value="' + (t.name || '') + '"></td>' +
-        '<td><div style="display:flex;align-items:center;"><input type="number" class="form-input w-small tier-percent" min="0.01" max="100" step="0.01" value="' + (t.percent ?? '') + '"><span class="unit">%</span></div></td>' +
-        '<td><div style="display:flex;align-items:center;"><input type="number" class="form-input w-med tier-turnover" min="0" step="1" value="' + (t.minTurnover ?? '') + '"><span class="unit">Kč</span></div></td>' +
-        '<td><button class="btn-danger tier-remove" title="Odebrat">×</button></td>';
+      tr.innerHTML = '<td><input type="text" class="input-text w-full tier-name" placeholder="např. Věrnostní sleva 4 %" value="' + (t.name || '') + '"></td>' +
+        '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-small tier-percent" min="0.01" max="100" step="0.01" value="' + (t.percent ?? '') + '"><span class="unit">%</span></div></td>' +
+        '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-med tier-turnover" min="0" step="1" value="' + (t.minTurnover ?? '') + '"><span class="unit">Kč</span></div></td>' +
+        '<td><button type="button" class="btn-remove tier-remove" title="Smazat ceník">×</button></td>';
       tr.querySelector('.tier-remove').addEventListener('click', () => { tr.remove(); resize(); });
       return tr;
     }
@@ -766,35 +796,37 @@ export function renderAdminHtml(eshopId, auth) {
       const b = $('tiers-body');
       b.textContent = '';
       state.tiers.forEach(t => b.append(tierRow(t)));
-      $('tiers-version').textContent = state.version ? 'Verze nastavení: ' + state.version : '';
+      $('tiers-version').textContent = state.version ? 'Uloženo (verze: ' + state.version + ')' : '';
     }
 
     $('tiers-add').addEventListener('click', () => {
       const b = $('tiers-body');
-      if (b.children.length >= 10) return flash('Maximálně 10 věrnostních hladin.', 'warn');
+      if (b.children.length >= 10) return flash('Můžete nastavit maximálně 10 věrnostních ceníků.', true);
       const r = tierRow();
       b.append(r);
       r.querySelector('input').focus();
       resize();
     });
 
-    $('tiers-save').addEventListener('click', async () => {
+    async function saveTiers() {
       const rows = [...$('tiers-body').querySelectorAll('tr')];
       const tiers = rows.map(r => ({
         name: r.querySelector('.tier-name').value,
         percent: r.querySelector('.tier-percent').value === '' ? NaN : Number(r.querySelector('.tier-percent').value),
         minTurnover: r.querySelector('.tier-turnover').value === '' ? NaN : Number(r.querySelector('.tier-turnover').value)
       }));
-      const btn = $('tiers-save');
+      const btn = $('btn-top-save');
       btn.disabled = true;
       try {
         const res = await api('/tiers', { method: 'PUT', body: JSON.stringify({ tiers, version: state.version }) });
         state.tiers = res.tiers; state.version = res.version;
         renderTiers(); renderOverview();
-        flash('Věrnostní hladiny byly uloženy.');
-      } catch (e) { flash(e.message, 'error'); }
+        flash('Věrnostní ceníky byly úspěšně uloženy.');
+      } catch (e) { flash(e.message, true); }
       finally { btn.disabled = false; resize(); }
-    });
+    }
+
+    $('tiers-save-bottom').addEventListener('click', saveTiers);
 
     /* Rules */
     function addBrandLimitRow(name = '', limit = 10) {
@@ -803,10 +835,10 @@ export function renderAdminHtml(eshopId, auth) {
       row.style.display = 'flex';
       row.style.gap = '8px';
       row.style.alignItems = 'center';
-      row.innerHTML = '<input type="text" class="form-input bl-name" placeholder="ZNAČKA" value="' + name + '" style="flex:1;text-transform:uppercase;">' +
-        '<input type="number" class="form-input bl-limit w-small" min="0" max="100" step="1" value="' + limit + '">' +
+      row.innerHTML = '<input type="text" class="input-text bl-name" placeholder="NÁZEV ZNAČKY" value="' + name + '" style="flex:1;text-transform:uppercase;">' +
+        '<input type="number" class="input-text bl-limit w-small" min="0" max="100" step="1" value="' + limit + '">' +
         '<span class="unit">%</span>' +
-        '<button class="btn-danger bl-remove" title="Odebrat">×</button>';
+        '<button type="button" class="btn-remove bl-remove" title="Odebrat">×</button>';
       row.querySelector('.bl-remove').addEventListener('click', () => { row.remove(); resize(); });
       c.append(row);
       resize();
@@ -824,12 +856,12 @@ export function renderAdminHtml(eshopId, auth) {
       const limits = r.brandLimits || { 'MIVARDI': 10, 'HONDA': 0 };
       Object.entries(limits).forEach(([k, v]) => addBrandLimitRow(k, v));
 
-      $('rules-version').textContent = state.version ? 'Verze nastavení: ' + state.version : '';
+      $('rules-version').textContent = state.version ? 'Uloženo (verze: ' + state.version + ')' : '';
     }
 
     $('btn-add-brand-limit').addEventListener('click', () => addBrandLimitRow('', 10));
 
-    $('rules-save').addEventListener('click', async () => {
+    async function saveRules() {
       const brandLimits = {};
       document.querySelectorAll('#brand-limits-container > div').forEach(row => {
         const name = row.querySelector('.bl-name').value.trim().toUpperCase();
@@ -844,62 +876,26 @@ export function renderAdminHtml(eshopId, auth) {
         postWriteVerify: $('rule-post-write-verify').checked,
         brandLimits
       };
-      const btn = $('rules-save');
+      const btn = $('btn-top-save');
       btn.disabled = true;
       try {
         const res = await api('/rules', { method: 'PUT', body: JSON.stringify({ rules, version: state.version }) });
         state.rules = res.rules; state.version = res.version;
         renderRules(); renderOverview();
-        flash('Pravidla a slevové stropy byly uloženy.');
-      } catch (e) { flash(e.message, 'error'); }
+        flash('Pravidla slev a stropy značek byly úspěšně uloženy.');
+      } catch (e) { flash(e.message, true); }
       finally { btn.disabled = false; resize(); }
-    });
-
-    /* MCP */
-    function snippet(token) {
-      return JSON.stringify({ mcpServers: { 'shoptet-pricing': { command: 'npx', args: ['-y', 'mcp-remote', state.mcpEndpoint, '--header', 'Authorization: Bearer ' + (token || '<VÁŠ_TOKEN>')] } } }, null, 2);
     }
 
-    function renderTokens() {
-      const b = $('tokens-body');
-      b.textContent = '';
-      if (!state.mcpTokens.length) {
-        b.innerHTML = '<tr><td colspan="3" style="color:var(--text-muted);padding:14px 12px;">Žádný aktivní klíč. Vygenerujte nový níže.</td></tr>';
+    $('rules-save-bottom').addEventListener('click', saveRules);
+
+    /* Top Save Button saves active tab */
+    $('btn-top-save').addEventListener('click', () => {
+      if (activeTab === 'rules') {
+        saveRules();
       } else {
-        state.mcpTokens.forEach(t => {
-          const tr = document.createElement('tr');
-          const scopes = (t.scopes || []).map(s => '<span class="badge-scope">' + s + '</span>').join('');
-          tr.innerHTML = '<td><code>lcode_mcp_… (' + t.fingerprint + ')</code></td>' +
-            '<td>' + fmtDate(t.createdAt) + '</td>' +
-            '<td>' + scopes + '</td>';
-          b.append(tr);
-        });
+        saveTiers();
       }
-      $('mcp-snippet').textContent = snippet(null);
-    }
-
-    $('token-new').addEventListener('click', async () => {
-      if (state.mcpTokens.length && !confirm('Vygenerovat nový token? Všechny dosavadní klíče přestanou fungovat.')) return;
-      const btn = $('token-new'); btn.disabled = true;
-      try {
-        const res = await api('/mcp-token', { method: 'POST', body: '{}' });
-        const fresh = await api('/state');
-        state = fresh; renderTokens(); renderOverview();
-        const box = $('token-result');
-        box.innerHTML = '<div class="alert" style="margin-top:14px;"><span class="alert-icon">✓</span><div style="flex:1;">' +
-          '<strong>Nový přístupový token byl vygenerován:</strong>' +
-          '<div style="display:flex;gap:8px;margin-top:8px;">' +
-          '<input type="text" readonly class="form-input" style="flex:1;font-family:monospace;" value="' + res.token + '" id="new-token-val">' +
-          '<button class="btn btn-primary" id="btn-copy-token">Zkopírovat</button>' +
-          '</div></div></div>';
-        $('btn-copy-token').addEventListener('click', () => {
-          const inp = $('new-token-val'); inp.select();
-          navigator.clipboard?.writeText(res.token);
-          flash('Token byl zkopírován do schránky.');
-        });
-        $('mcp-snippet').textContent = snippet(res.token);
-      } catch (e) { flash(e.message, 'error'); }
-      finally { btn.disabled = false; resize(); }
     });
 
     /* Boot */
@@ -907,12 +903,10 @@ export function renderAdminHtml(eshopId, auth) {
       try {
         state = await api('/state');
         $('loading').remove();
-        $('panel-overview').classList.add('active');
-        renderOverview(); renderTiers(); renderRules(); renderTokens();
-        if (BOOT.mode === 'preview') flash('Režim přímého náhledu (bez nutnosti přihlášení ze Shoptetu).', 'warn');
+        renderOverview(); renderTiers(); renderRules();
       } catch (e) {
         $('loading').textContent = '';
-        flash(e.message, 'error');
+        flash(e.message, true);
       }
       resize();
     })();
