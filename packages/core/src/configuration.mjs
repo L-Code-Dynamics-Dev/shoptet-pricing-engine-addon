@@ -2,7 +2,7 @@ import { z } from 'zod';
 const percent=z.number().finite().min(0).max(100);
 export const proposalSchema=z.object({
   currency:z.string().regex(/^[A-Z]{3}$/),
-  tiers:z.array(z.object({name:z.string().trim().min(1).max(60),percent,minTurnover:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).strict()).max(30),
+  tiers:z.array(z.object({name:z.string().trim().min(1).max(60),percent,minTurnover:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),pricelistId:z.number().int().positive().nullable().optional()}).strict()).max(30),
   brandCaps:z.array(z.object({id:z.string().uuid(),percent}).strict()).max(100),
   categoryCaps:z.array(z.object({id:z.string().uuid(),percent}).strict()).max(200).default([]),
   productCaps:z.array(z.object({id:z.string().uuid(),variantCode:z.string().min(1).max(128).optional(),percent}).strict()).max(200).default([]),
@@ -21,7 +21,7 @@ const checkShop=shop=>{if(typeof shop!=='string'||!shop||shop.length>128)throw n
 export function createConfigurationService(db, verifyBrand, verifyCatalog=null) {
   async function current(shop) {checkShop(shop);const row=await db.prepare('SELECT config_json,version FROM tenant_settings WHERE shop_id=?').bind(shop).first();return {version:row?.version??0,config:row?JSON.parse(row.config_json):{}};}
   async function revision(shop,revisionId) {checkShop(shop);const row=await db.prepare('SELECT * FROM configuration_revisions WHERE shop_id=? AND revision_id=?').bind(shop,revisionId).first();if(!row)throw new ConfigurationError('revision_not_found');return row;}
-  async function validate(proposal) {const parsed=proposalSchema.parse(proposal);for(const cap of parsed.brandCaps){if(!verifyBrand||!await verifyBrand(cap.id))throw new ConfigurationError('brand_reference_not_verified');}for(const cap of parsed.categoryCaps){if(!verifyCatalog||!await verifyCatalog('category',cap.id))throw new ConfigurationError('category_reference_not_verified');}for(const cap of parsed.productCaps){if(!verifyCatalog||!await verifyCatalog('product',cap.id,cap.variantCode))throw new ConfigurationError('product_reference_not_verified');}return parsed;}
+  async function validate(proposal) {const parsed=proposalSchema.parse(proposal);for(const cap of parsed.brandCaps){if(!verifyBrand||!await verifyBrand(cap.id))throw new ConfigurationError('brand_reference_not_verified');}for(const tier of parsed.tiers){if(tier.pricelistId!=null&&(!verifyCatalog||!await verifyCatalog('pricelist',tier.pricelistId)))throw new ConfigurationError('pricelist_reference_not_verified');}for(const cap of parsed.categoryCaps){if(!verifyCatalog||!await verifyCatalog('category',cap.id))throw new ConfigurationError('category_reference_not_verified');}for(const cap of parsed.productCaps){if(!verifyCatalog||!await verifyCatalog('product',cap.id,cap.variantCode))throw new ConfigurationError('product_reference_not_verified');}return parsed;}
   return {
     async create(shop,expectedVersion,proposal) {
       const checked=await validate(proposal);const base=await current(shop);

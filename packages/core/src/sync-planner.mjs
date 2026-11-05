@@ -4,7 +4,7 @@ import {evaluatePricing,grossApiPrice,activeActionMinor,formatApiPrice,shopDate}
 export const syncSelectionSchema=z.object({revisionId:z.string().uuid(),tierName:z.string().min(1).max(60),targetPricelistId:z.number().int().positive(),products:z.array(z.object({guid:z.string().uuid(),codes:z.array(z.string().min(1).max(128)).min(1).max(20)}).strict()).min(1).max(25)}).strict();
 export async function buildSyncPlan({adapter,proposal,selection,instant=new Date()}) {
  const policy=proposalSchema.parse(proposal),selected=syncSelectionSchema.parse(selection);
- const tier=policy.tiers.find(t=>t.name===selected.tierName);if(!tier)throw Error('tier_not_found');
+ const tier=policy.tiers.find(t=>t.name===selected.tierName);if(!tier)throw Error('tier_not_found');if(tier.pricelistId!=null && tier.pricelistId!==selected.targetPricelistId)throw Error('tier_pricelist_mapping_mismatch');
  const profile=await adapter.profile();const currency=profile.currencies.find(c=>c.code===policy.currency);
  if(!currency||currency.priceDecimalPlaces>2)throw Error('currency_rounding_not_supported');
  if(profile.defaultPricelistId===selected.targetPricelistId)throw Error('default_pricelist_write_forbidden');

@@ -1,3 +1,7 @@
+# Update: typed domain operations and diagnostics
+
+[DOMAIN-TOOLS.md](DOMAIN-TOOLS.md) documents the added tier/cap/policy/mapping tools, three additional scoped resources, real permission discovery and tenant diagnostics. These are proposal operations, not implicit native activation or customer assignment. The admin tier renderer no longer interpolates saved names into HTML.
+
 # Update: native sync plans, fenced jobs and catalog selection
 
 [SYNC-EXECUTION.md](SYNC-EXECUTION.md) describes nine sync tools, immutable native-price plans, separate admin approval, durable checkpoints, tenant fencing, uncertain-write quarantine and a SQLite Durable Object coordinator. Product/variant/category caps and the real-brand picker are implemented. Native activation remains off and staging/parity/capability evidence remains required. Previous missing-executor/brand-picker findings below are superseded for this bounded subset, not for customer automation or full checkout behavior.
