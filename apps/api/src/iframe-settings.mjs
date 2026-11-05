@@ -607,6 +607,13 @@ export function renderAdminHtml(eshopId, auth) {
     <div class="shoptet-tabs" role="tablist">
       <button type="button" class="shoptet-tab active" data-tab="tiers" role="tab">Nastavení</button>
       <button type="button" class="shoptet-tab" data-tab="rules" role="tab">Pravidla slev</button>
+      <button type="button" class="shoptet-tab" data-tab="settings" role="tab">Obecné</button>
+      <button type="button" class="shoptet-tab" data-tab="pricelists" role="tab">Ceníky</button>
+      <button type="button" class="shoptet-tab" data-tab="categories" role="tab">Kategorie</button>
+      <button type="button" class="shoptet-tab" data-tab="products" role="tab">Produkty</button>
+      <button type="button" class="shoptet-tab" data-tab="brandSales" role="tab">Akce značek</button>
+      <button type="button" class="shoptet-tab" data-tab="coupons" role="tab">Kupóny</button>
+      <button type="button" class="shoptet-tab" data-tab="sync" role="tab">Synchronizace</button>
       <button type="button" class="shoptet-tab" data-tab="mcp" role="tab">Přístup k MCP</button>
       <button type="button" class="shoptet-tab" data-tab="overview" role="tab">Přehled</button>
     </div>
@@ -697,6 +704,14 @@ export function renderAdminHtml(eshopId, auth) {
       </div>
     </section>
 
+    <!-- Draft configuration sections; no live Shoptet operations -->
+    <section class="panel" id="panel-settings"><p class="tab-intro">Obecné nastavení doplňku.</p><div id="section-settings"></div></section>
+    <section class="panel" id="panel-pricelists"><p class="tab-intro">Přiřazení ceníků k věrnostním úrovním. ID zadejte podle Shoptetu.</p><div id="section-pricelists"></div></section>
+    <section class="panel" id="panel-categories"><p class="tab-intro">Maximální sleva pro jednotlivé kategorie.</p><div id="section-categories"></div></section>
+    <section class="panel" id="panel-products"><p class="tab-intro">Výjimky a maximální slevy jednotlivých produktů.</p><div id="section-products"></div></section>
+    <section class="panel" id="panel-brandSales"><p class="tab-intro">Samostatné akční limity značek.</p><div id="section-brandSales"></div></section>
+    <section class="panel" id="panel-coupons"><p class="tab-intro">Omezení kupónů a věrnostních úrovní.</p><div id="section-coupons"></div></section>
+    <section class="panel" id="panel-sync"><p class="tab-intro">Konfigurace budoucí synchronizace. Tato stránka synchronizaci nespouští.</p><div id="section-sync"></div></section>
     <!-- Tab 3: Přístup k MCP -->
     <section class="panel" id="panel-mcp">
       <p class="tab-intro">Přístup k MCP (Model Context Protocol) pro propojení s vaším asistentem. Umožňuje bezpečně kontrolovat a spravovat věrnostní ceny přirozenou řečí.</p>
@@ -941,11 +956,9 @@ export function renderAdminHtml(eshopId, auth) {
 
     /* Top Save Button saves active tab */
     $('btn-top-save').addEventListener('click', () => {
-      if (activeTab === 'rules') {
-        saveRules();
-      } else {
-        saveTiers();
-      }
+      if (activeTab === 'rules') saveRules();
+      else if (activeTab === 'tiers') saveTiers();
+      else if (sectionKeys.includes(activeTab)) saveSection(activeTab);
     });
 
     /* MCP */
@@ -1001,12 +1014,93 @@ export function renderAdminHtml(eshopId, auth) {
       finally { btn.disabled = false; resize(); }
     });
 
+
+    /* Validated draft configuration: edit in existing Shoptet iframe, save to D1. */
+    const sectionKeys = ['settings', 'pricelists', 'categories', 'products', 'brandSales', 'coupons', 'sync'];
+    const sectionRows = { pricelists: ['id','name','tierName'], categories: ['id','name','limit'], products: ['id','name','limit'], brandSales: ['id','name','limit'] };
+    const el = (tag, attrs = {}, value = '') => {
+      const n = document.createElement(tag);
+      for (const [key, val] of Object.entries(attrs)) n.setAttribute(key, val);
+      if (tag === 'input' && attrs.type !== 'checkbox') n.value = String(value ?? '');
+      if (tag === 'input' && attrs.type === 'checkbox') n.checked = !!value;
+      return n;
+    };
+    function sectionInput(parent, key, value, type = 'text') {
+      const row = el('div', { class: 'form-row' });
+      const label = el('label', { class: 'form-label' }); label.textContent = key;
+      const field = el('div', { class: 'form-field' });
+      const input = el('input', { class: 'input-text', type, 'data-field': key }, value);
+      if (type === 'number') { input.step = '0.01'; input.min = '0'; }
+      field.append(input); row.append(label, field); parent.append(row);
+      return input;
+    }
+    function renderSection(key) {
+      const root = $('section-' + key); if (!root || !state) return;
+      root.textContent = '';
+      const value = state.ui[key];
+      if (sectionRows[key]) {
+        const table = el('table', { class: 'shoptet-table' });
+        const head = el('thead'); const header = el('tr');
+        for (const col of sectionRows[key]) { const th = el('th'); th.textContent = col === 'limit' ? 'Max. sleva %' : col === 'tierName' ? 'Věrnostní úroveň' : col === 'id' ? 'ID' : 'Název'; header.append(th); }
+        head.append(header); table.append(head);
+        const body = el('tbody');
+        function addRow(data = {}) {
+          const tr = el('tr');
+          for (const col of sectionRows[key]) {
+            const td = el('td'); const input = el('input', { class: 'input-text w-full', 'data-col': col, type: col === 'limit' ? 'number' : 'text' }, data[col] ?? (col === 'limit' ? 0 : ''));
+            if (col === 'limit') { input.min = '0'; input.max = '100'; input.step = '0.01'; }
+            td.append(input); tr.append(td);
+          }
+          const td = el('td'); const remove = el('button', { type: 'button', class: 'btn-remove' }); remove.textContent = '×'; remove.addEventListener('click', () => tr.remove()); td.append(remove); tr.append(td); body.append(tr);
+        }
+        value.forEach(addRow); table.append(body); root.append(table);
+        const add = el('button', { type: 'button', class: 'btn-secondary' }); add.textContent = '+ Přidat'; add.addEventListener('click', () => addRow()); root.append(add);
+      } else if (key === 'settings') {
+        sectionInput(root, 'enabled', value.enabled, 'checkbox');
+        sectionInput(root, 'currency', value.currency);
+        sectionInput(root, 'verifyWrites', value.verifyWrites, 'checkbox');
+        sectionInput(root, 'rounding', value.rounding, 'number');
+      } else if (key === 'coupons') {
+        sectionInput(root, 'enabled', value.enabled, 'checkbox');
+        sectionInput(root, 'mode', value.mode);
+        sectionInput(root, 'maxPercent', value.maxPercent, 'number');
+        for (const field of ['lockedTiers','disabledBrands','disabledProducts']) sectionInput(root, field, value[field].join(', '));
+      } else if (key === 'sync') {
+        sectionInput(root, 'incremental', value.incremental, 'checkbox');
+        sectionInput(root, 'intervalMinutes', value.intervalMinutes, 'number');
+        sectionInput(root, 'dryRun', value.dryRun, 'checkbox');
+        const note = el('p', { class: 'tab-intro' }); note.textContent = 'Synchronizace se spustí až po dokončení a schválení Shoptet API adaptéru.'; root.append(note);
+      }
+      const save = el('button', { type: 'button', class: 'btn-shoptet-green' }); save.textContent = 'Uložit nastavení';
+      save.addEventListener('click', () => saveSection(key)); root.append(save);
+    }
+    function sectionValue(key) {
+      const root = $('section-' + key);
+      if (sectionRows[key]) return [...root.querySelectorAll('tbody tr')].map(tr => Object.fromEntries([...tr.querySelectorAll('[data-col]')].map(input => [input.dataset.col, input.type === 'number' ? Number(input.value) : input.value])));
+      const next = {};
+      for (const input of root.querySelectorAll('[data-field]')) {
+        const field = input.dataset.field;
+        next[field] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : ['lockedTiers','disabledBrands','disabledProducts'].includes(field) ? input.value.split(',').map(x => x.trim()).filter(Boolean) : input.value;
+      }
+      return next;
+    }
+    async function saveSection(key) {
+      const btn = $('section-' + key).querySelector('.btn-shoptet-green');
+      btn.disabled = true;
+      try {
+        const res = await api('/section', { method: 'PUT', body: JSON.stringify({ section: key, value: sectionValue(key), version: state.version }) });
+        state.ui[key] = res.value; state.version = res.version;
+        renderSection(key); renderTiers(); renderRules();
+        flash('Nastavení uloženo (verze ' + state.version + ').');
+      } catch (e) { flash(e.message, true); } finally { btn.disabled = false; resize(); }
+    }
+
     /* Boot */
     (async () => {
       try {
         state = await api('/state');
         $('loading').remove();
-        renderOverview(); renderTiers(); renderRules(); renderTokens();
+        renderOverview(); renderTiers(); renderRules(); renderTokens(); sectionKeys.forEach(renderSection);
       } catch (e) {
         $('loading').textContent = '';
         flash(e.message, true);
