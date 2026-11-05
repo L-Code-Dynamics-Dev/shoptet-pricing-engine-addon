@@ -587,6 +587,7 @@ export function renderAdminHtml(eshopId, auth) {
     <div class="shoptet-tabs" role="tablist">
       <button type="button" class="shoptet-tab active" data-tab="tiers" role="tab">Nastavení</button>
       <button type="button" class="shoptet-tab" data-tab="rules" role="tab">Pravidla slev</button>
+      <button type="button" class="shoptet-tab" data-tab="mcp" role="tab">Přístup k MCP</button>
       <button type="button" class="shoptet-tab" data-tab="overview" role="tab">Přehled</button>
     </div>
 
@@ -676,7 +677,36 @@ export function renderAdminHtml(eshopId, auth) {
       </div>
     </section>
 
-    <!-- Tab 3: Přehled -->
+    <!-- Tab 3: Přístup k MCP -->
+    <section class="panel" id="panel-mcp">
+      <p class="tab-intro">Přístup k MCP (Model Context Protocol) pro propojení s vaším asistentem. Umožňuje bezpečně kontrolovat a spravovat věrnostní ceny přirozenou řečí.</p>
+
+      <div class="section-heading">Aktivní přístupové klíče pro MCP</div>
+
+      <table class="shoptet-table">
+        <thead>
+          <tr>
+            <th style="width: 35%;">Otisk klíče</th>
+            <th style="width: 30%;">Vytvořeno</th>
+            <th style="width: 35%;">Přiřazená oprávnění</th>
+          </tr>
+        </thead>
+        <tbody id="tokens-body"></tbody>
+      </table>
+
+      <div style="display: flex; gap: 10px; align-items: center; margin: 16px 0;">
+        <button type="button" class="btn-shoptet-green" id="token-new">Vygenerovat nový klíč pro MCP</button>
+        <span style="color: #777777; font-size: 12px;">Vygenerováním se všechny dosavadní klíče automaticky zneplatní.</span>
+      </div>
+
+      <div id="token-result"></div>
+
+      <div class="section-heading">Nastavení pro Claude Desktop</div>
+      <p style="color: #666666; font-size: 13px; margin-bottom: 8px;">Vložte následující konfiguraci do vašeho souboru <code>claude_desktop_config.json</code>:</p>
+      <pre style="background: #f8f9fa; border: 1px solid #d9d9d9; border-radius: 3px; padding: 12px; font-family: monospace; font-size: 12px; overflow-x: auto; line-height: 1.4;" id="mcp-snippet"></pre>
+    </section>
+
+    <!-- Tab 4: Přehled -->
     <section class="panel" id="panel-overview">
       <p class="tab-intro">Základní přehled o stavu propojení věrnostního systému s vaším e-shopem.</p>
 
@@ -898,12 +928,65 @@ export function renderAdminHtml(eshopId, auth) {
       }
     });
 
+    /* MCP */
+    function fmtDate(s) {
+      if (!s) return '—';
+      const d = new Date(String(s).replace(' ', 'T') + 'Z');
+      return isNaN(d) ? s : d.toLocaleString('cs-CZ', { day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    function snippet(token) {
+      return JSON.stringify({ mcpServers: { 'shoptet-pricing': { command: 'npx', args: ['-y', 'mcp-remote', state.mcpEndpoint, '--header', 'Authorization: Bearer ' + (token || '<VÁŠ_TOKEN>')] } } }, null, 2);
+    }
+
+    function renderTokens() {
+      const b = $('tokens-body');
+      b.textContent = '';
+      if (!state.mcpTokens.length) {
+        b.innerHTML = '<tr><td colspan="3" style="color:#777777;padding:12px;">Zatím nemáte vygenerovaný žádný klíč pro MCP. Klikněte níže na vygenerování.</td></tr>';
+      } else {
+        state.mcpTokens.forEach(t => {
+          const tr = document.createElement('tr');
+          const scopes = (t.scopes || []).map(s => '<span style="background:#e9ecef;color:#495057;padding:2px 6px;border-radius:3px;font-size:11px;margin-right:4px;font-family:monospace;">' + s + '</span>').join('');
+          tr.innerHTML = '<td><code>lcode_mcp_… (' + t.fingerprint + ')</code></td>' +
+            '<td>' + fmtDate(t.createdAt) + '</td>' +
+            '<td>' + scopes + '</td>';
+          b.append(tr);
+        });
+      }
+      $('mcp-snippet').textContent = snippet(null);
+    }
+
+    $('token-new').addEventListener('click', async () => {
+      if (state.mcpTokens.length && !confirm('Vygenerovat nový klíč pro MCP? Všechny dosavadní klíče přestanou fungovat.')) return;
+      const btn = $('token-new'); btn.disabled = true;
+      try {
+        const res = await api('/mcp-token', { method: 'POST', body: '{}' });
+        const fresh = await api('/state');
+        state = fresh; renderTokens(); renderOverview();
+        const box = $('token-result');
+        box.innerHTML = '<div class="alert-success" style="margin: 14px 0;">' +
+          '<strong>Nový přístupový klíč pro MCP byl vygenerován:</strong>' +
+          '<div style="display:flex;gap:8px;margin-top:8px;">' +
+          '<input type="text" readonly class="input-text" style="flex:1;font-family:monospace;" value="' + res.token + '" id="new-token-val">' +
+          '<button type="button" class="btn-shoptet-green" id="btn-copy-token">Zkopírovat</button>' +
+          '</div></div>';
+        $('btn-copy-token').addEventListener('click', () => {
+          const inp = $('new-token-val'); inp.select();
+          navigator.clipboard?.writeText(res.token);
+          flash('Klíč byl zkopírován do schránky.');
+        });
+        $('mcp-snippet').textContent = snippet(res.token);
+      } catch (e) { flash(e.message, true); }
+      finally { btn.disabled = false; resize(); }
+    });
+
     /* Boot */
     (async () => {
       try {
         state = await api('/state');
         $('loading').remove();
-        renderOverview(); renderTiers(); renderRules();
+        renderOverview(); renderTiers(); renderRules(); renderTokens();
       } catch (e) {
         $('loading').textContent = '';
         flash(e.message, true);
