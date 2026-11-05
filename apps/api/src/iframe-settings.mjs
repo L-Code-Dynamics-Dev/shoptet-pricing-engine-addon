@@ -1,3 +1,6 @@
+import {createShoptetAdapter} from '../../../packages/core/src/shoptet-adapter.mjs';
+import {getShoptetApiAccessToken} from '../../../packages/core/src/shoptet-oauth.mjs';
+import {syncRuntime} from './sync/runtime.mjs';
 import {createMcpOAuth,oauthConfiguration,digest} from '../../../packages/core/src/mcp-oauth.mjs';
 import { createConfigurationService } from '../../../packages/core/src/configuration.mjs';
 /**
@@ -7,7 +10,7 @@ import { createConfigurationService } from '../../../packages/core/src/configura
 import { authorizeSettingsPage, verifySession, bearerFrom } from './admin-session.mjs';
 
 const FRAME_ANCESTORS = "'self' https://*.myshoptet.com https://*.shoptet.cz https://*.shoptet.sk https://admin.shoptet.cz";
-const MCP_UI_SCOPES = ['shop:read', 'catalog:read', 'pricing:read'];
+const MCP_UI_SCOPES = ['shop:read', 'catalog:read', 'pricing:read','sync:read'];
 const MAX_TIERS = 10;
 
 const jsonRes = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -61,22 +64,19 @@ export function validateTiers(input) {
 export function validateRules(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { error: 'Neplatná data pravidel.' };
   const brandLimits = {};
-  if (input.brandLimits && typeof input.brandLimits === 'object') {
-    for (const [k, v] of Object.entries(input.brandLimits)) {
-      const cleanKey = String(k).trim().toUpperCase();
-      const num = Number(v);
-      if (cleanKey && Number.isFinite(num) && num >= 0 && num <= 100) {
-        brandLimits[cleanKey] = Math.round(num * 10) / 10;
-      }
-    }
+  if(input.brandLimits!==undefined && (!input.brandLimits || typeof input.brandLimits!=='object' || Array.isArray(input.brandLimits) || Object.keys(input.brandLimits).length>100))return {error:'Neplatný seznam značek.'};
+  for(const [key,value] of Object.entries(input.brandLimits||{})){
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(key))return {error:'Značku vyberte ze skutečného katalogu obchodu.'};
+    if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>100||Number(value.toFixed(2))!==value)return {error:'Sleva značky musí být 0–100 %.'};
+    const id=key.toLowerCase();if(Object.hasOwn(brandLimits,id))return {error:'Duplicitní značka.'};brandLimits[id]=value;
   }
   return {
     rules: {
-      couponLockTopTiers: input.couponLockTopTiers !== false && input.couponLockZR20ZR25 !== false,
+      couponLockTopTiers: input.couponLockTopTiers !== false,
       couponLockMaxRemaining: input.couponLockMaxRemaining !== false,
       highestDiscountWins: input.highestDiscountWins !== false,
       vatIntegrity: true,
-      postWriteVerify: input.postWriteVerify !== false && input.postWriteVerifyINC010 !== false,
+      postWriteVerify: input.postWriteVerify !== false,
       brandLimits
     }
   };
@@ -110,6 +110,32 @@ export async function handleAdminSettingsApi(request, env) {
   if (!identity) return jsonRes({ error: 'unauthorized' }, 401);
   const shopId = identity.shopId;
   const route = url.pathname.replace(/^\/admin\/settings\/api/, '');
+
+  if(route.startsWith('/catalog/')){
+    const installed=await env.DB.prepare('SELECT state FROM installations WHERE shop_id=?').bind(shopId).first();if(installed?.state!=='active')return jsonRes({error:'inactive_installation'},403);
+    if(request.method!=='GET')return jsonRes({error:'method_not_allowed'},405);
+    try{
+      const catalog=createShoptetAdapter({getToken:async()=> (await getShoptetApiAccessToken({db:env.DB,shopId,tokenKeys:env.SHOPTET_TOKEN_KEYS})).apiAccessToken});
+      if(route==='/catalog/brands')return jsonRes(await catalog.list('brands',{page:Number(url.searchParams.get('page')||1),limit:50,query:url.searchParams.get('query')||''}));
+      if(route==='/catalog/brand'){const id=url.searchParams.get('id')||'';if(!/^[a-f0-9-]{36}$/i.test(id))return jsonRes({error:'invalid_brand_id'},400);return jsonRes(await catalog.brand(id));}
+    }catch{return jsonRes({error:'catalog_unavailable',message:'Katalog není dostupný. Ověřte připojení Shoptetu a schválená oprávnění.'},502);}
+    return jsonRes({error:'not_found'},404);
+  }
+
+  if(route.startsWith('/sync/')){
+    const installed=await env.DB.prepare('SELECT state FROM installations WHERE shop_id=?').bind(shopId).first();if(installed?.state!=='active')return jsonRes({error:'inactive_installation'},403);
+    try{const sync=syncRuntime(env,shopId);
+      if(route==='/sync/pending'&&request.method==='GET')return jsonRes(await sync.service.pending(shopId));
+      if(route==='/sync/history'&&request.method==='GET')return jsonRes(await sync.service.history(shopId));
+      if(request.method==='POST'){
+        const body=await request.json();if(!body||Array.isArray(body)||Object.keys(body).length!==1)return jsonRes({error:'invalid_request'},400);
+        if(route==='/sync/plan'&&typeof body.planId==='string')return jsonRes(await sync.service.getPlan(shopId,body.planId));
+        if(route==='/sync/approve'&&typeof body.approvalId==='string')return jsonRes(await sync.service.approve(shopId,body.approvalId,await sha256Hex(bearerFrom(request))));
+        if(route==='/sync/progress'&&typeof body.jobId==='string')return jsonRes(await sync.service.progress(shopId,body.jobId));
+      }
+    }catch{return jsonRes({error:'sync_action_failed'},409);}
+    return jsonRes({error:'not_found'},404);
+  }
 
   if(route.startsWith('/oauth/')){
     const installed=await env.DB.prepare('SELECT state FROM installations WHERE shop_id=?').bind(shopId).first();
@@ -185,7 +211,7 @@ export async function handleAdminSettingsApi(request, env) {
         expiresAt: t.expires_at,
         scopes: (() => { try { return JSON.parse(t.scopes_json); } catch { return []; } })()
       })),
-      mcpEndpoint: `${url.origin}/mcp/sse`
+      mcpEndpoint: `${url.origin}/mcp`
     });
   }
 
@@ -219,6 +245,9 @@ export async function handleAdminSettingsApi(request, env) {
     if (!body || !Number.isSafeInteger(body.version) || body.version < 0) return jsonRes({ error: 'Chybí verze nastavení.' }, 400);
     const v = validateRules(body.rules);
     if (v.error) return jsonRes({ error: v.error }, 422);
+    if(Object.keys(v.rules.brandLimits).length){
+      try{const catalog=createShoptetAdapter({getToken:async()=> (await getShoptetApiAccessToken({db:env.DB,shopId,tokenKeys:env.SHOPTET_TOKEN_KEYS})).apiAccessToken});for(const id of Object.keys(v.rules.brandLimits))if(!await catalog.verifyBrand(id))return jsonRes({error:'Značka již neexistuje v katalogu.'},422);}catch{return jsonRes({error:'Značky nelze ověřit. Zkontrolujte oprávnění Shoptetu.'},422);}
+    }
 
     const current = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
     const { config, version } = parseConfig(current);
@@ -244,7 +273,7 @@ export async function handleAdminSettingsApi(request, env) {
 
   if (route === '/mcp-token' && request.method === 'POST') {
     let body;try{body=await request.json();}catch{return jsonRes({error:'invalid_json'},400);}
-    if(!body || Array.isArray(body) || Object.keys(body).some(k=>k!=='permissions') || (body.permissions!==undefined && (!Array.isArray(body.permissions)||body.permissions.some(k=>!['pricing:configure','pricing:execute'].includes(k)))))return jsonRes({error:'invalid_permissions'},400);
+    if(!body || Array.isArray(body) || Object.keys(body).some(k=>k!=='permissions') || (body.permissions!==undefined && (!Array.isArray(body.permissions)||body.permissions.some(k=>!['pricing:configure','pricing:execute','sync:execute'].includes(k)))))return jsonRes({error:'invalid_permissions'},400);
     const scopes=[...MCP_UI_SCOPES,...new Set(body.permissions||[])];
     const raw = new Uint8Array(24);
     crypto.getRandomValues(raw);
@@ -702,6 +731,9 @@ export function renderAdminHtml(eshopId, auth) {
       <div class="section-heading">Maximální povolená sleva pro vybrané značky</div>
       <p style="color: #666666; font-size: 13px; margin-bottom: 14px;">U vybraných značek můžete nastavit pevný strop maximální slevy, který věrnostní program nikdy nepřekročí:</p>
 
+      <div id="brand-picker" hidden style="max-width:440px;border:1px solid #ddd;padding:10px;margin:10px 0">
+        <label for="brand-picker-search">Hledat značku</label><input type="search" id="brand-picker-search" class="input-text" autocomplete="off"><select id="brand-picker-results" aria-label="Skutečné značky obchodu" size="5" style="width:100%;height:150px;overflow-y:auto;margin:8px 0"></select><p id="brand-picker-status" role="status"></p><button type="button" id="brand-picker-prev">Předchozí</button><button type="button" id="brand-picker-next">Další</button><button type="button" id="brand-picker-use">Vybrat</button><button type="button" id="brand-picker-close">Zavřít</button>
+      </div>
       <div id="brand-limits-container" style="display: flex; flex-direction: column; gap: 8px; max-width: 440px; margin-bottom: 14px;"></div>
       <button type="button" class="btn-secondary" id="btn-add-brand-limit">+ Přidat značku</button>
 
@@ -733,7 +765,7 @@ export function renderAdminHtml(eshopId, auth) {
       </table>
 
       <div style="display: flex; gap: 10px; align-items: center; margin: 16px 0;">
-        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odvolat ruční klíče</button>
+        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-sync"> Povolit spouštění synchronizačních úloh</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odvolat ruční klíče</button>
         <button type="button" class="btn-shoptet-green" id="token-new">Vygenerovat nový klíč pro MCP</button>
         <span style="color: #777777; font-size: 12px;">Vygenerováním se všechny dosavadní klíče automaticky zneplatní.</span>
       </div>
@@ -898,27 +930,37 @@ export function renderAdminHtml(eshopId, auth) {
     $('tiers-save-bottom').addEventListener('click', saveTiers);
 
     /* Rules */
-    function addBrandLimitRow(name = '', limit = 10) {
-      const c = $('brand-limits-container');
-      const row = document.createElement('div');
-      row.style.display = 'flex';
-      row.style.gap = '8px';
-      row.style.alignItems = 'center';
-      row.innerHTML = '<input type="text" class="input-text bl-name" placeholder="NÁZEV ZNAČKY" value="' + name + '" style="flex:1;text-transform:uppercase;">' +
-        '<input type="number" class="input-text bl-limit w-small" min="0" max="100" step="1" value="' + limit + '">' +
-        '<span class="unit">%</span>' +
-        '<button type="button" class="btn-remove bl-remove" title="Odebrat">×</button>';
-      row.querySelector('.bl-remove').addEventListener('click', () => { row.remove(); resize(); });
-      c.append(row);
+    const brandNames=new Map();let brandTarget=null,brandPage=1,brandPages=1;
+    async function loadBrandPicker(){
+      const list=$('brand-picker-results');list.textContent='';$('brand-picker-status').textContent='Načítám značky…';
+      try{const data=await api('/catalog/brands?page='+brandPage+'&query='+encodeURIComponent($('brand-picker-search').value.trim()));brandPages=data.pagination?.pageCount||brandPage;
+        for(const brand of data.items){brandNames.set(brand.guid,brand.name);const option=document.createElement('option');option.value=brand.guid;option.textContent=brand.name;list.append(option);}
+        $('brand-picker-status').textContent=data.items.length?'Stránka '+brandPage+' z '+brandPages:'Na této stránce nejsou odpovídající značky. Projděte další stránku.';
+        $('brand-picker-next').disabled=brandPage>=brandPages;$('brand-picker-prev').disabled=brandPage<=1;
+      }catch{$('brand-picker-status').textContent='Katalog značek není dostupný. Ověřte připojení a oprávnění.';}
       resize();
     }
+    function showBrandPicker(row){brandTarget=row;$('brand-picker').hidden=false;brandPage=1;$('brand-picker-search').value='';loadBrandPicker();$('brand-picker-search').focus();}
+    function addBrandLimitRow(id='',limit=0){
+      const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;align-items:center;max-width:440px';
+      const value=document.createElement('input');value.type='hidden';value.className='bl-name';value.value=id;
+      const choose=document.createElement('button');choose.type='button';choose.className='btn-secondary bl-label';choose.style.cssText='flex:1;min-width:0;overflow-wrap:anywhere';choose.textContent=id?'Ověřuji značku…':'Vybrat značku';choose.addEventListener('click',()=>showBrandPicker(row));
+      const percent=document.createElement('input');percent.type='number';percent.min='0';percent.max='100';percent.step='0.01';percent.className='input-text bl-limit w-small';percent.value=limit;percent.setAttribute('aria-label','Maximální sleva v procentech');
+      const unit=document.createElement('span');unit.textContent='%';const remove=document.createElement('button');remove.type='button';remove.className='btn-remove';remove.textContent='×';remove.setAttribute('aria-label','Odebrat značku');remove.addEventListener('click',()=>row.remove());row.append(value,choose,percent,unit,remove);$('brand-limits-container').append(row);
+      if(id){if(!/^[a-f0-9-]{36}$/i.test(id)){choose.textContent='Chybí platný odkaz: '+id;row.dataset.invalid='true';}else api('/catalog/brand?id='+encodeURIComponent(id)).then(brand=>{if(value.value!==id)return;brandNames.set(brand.guid,brand.name);choose.textContent=brand.name;row.dataset.invalid='false';}).catch(()=>{if(value.value!==id)return;choose.textContent='Nedostupná značka: '+id;row.dataset.invalid='true';});}
+      resize();return row;
+    }
+    $('brand-picker-search').addEventListener('input',()=>{clearTimeout(window.brandSearchTimer);window.brandSearchTimer=setTimeout(()=>{brandPage=1;loadBrandPicker();},250);});
+    $('brand-picker-next').addEventListener('click',()=>{brandPage++;loadBrandPicker();});$('brand-picker-prev').addEventListener('click',()=>{brandPage=Math.max(1,brandPage-1);loadBrandPicker();});
+    $('brand-picker-use').addEventListener('click',()=>{const id=$('brand-picker-results').value;if(!id||!brandTarget)return;if([...document.querySelectorAll('.bl-name')].some(input=>input!==brandTarget.querySelector('.bl-name')&&input.value===id)){flash('Tato značka už je vybraná.',true);return;}brandTarget.querySelector('.bl-name').value=id;brandTarget.querySelector('.bl-label').textContent=brandNames.get(id)||id;brandTarget.dataset.invalid='false';$('brand-picker').hidden=true;});
+    $('brand-picker-close').addEventListener('click',()=>{$('brand-picker').hidden=true;});
 
     function renderRules() {
       const r = state.rules || {};
       $('rule-highest-discount').checked = r.highestDiscountWins !== false;
-      $('rule-coupon-lock-top').checked = (r.couponLockTopTiers !== false && r.couponLockZR20ZR25 !== false);
+      $('rule-coupon-lock-top').checked = r.couponLockTopTiers !== false;
       $('rule-coupon-min-price-ratio').checked = r.couponLockMaxRemaining !== false;
-      $('rule-post-write-verify').checked = (r.postWriteVerify !== false && r.postWriteVerifyINC010 !== false);
+      $('rule-post-write-verify').checked = r.postWriteVerify !== false;
 
       const c = $('brand-limits-container');
       c.textContent = '';
@@ -928,12 +970,13 @@ export function renderAdminHtml(eshopId, auth) {
       $('rules-version').textContent = state.version ? 'Uloženo (verze: ' + state.version + ')' : '';
     }
 
-    $('btn-add-brand-limit').addEventListener('click', () => addBrandLimitRow('', 10));
+    $('btn-add-brand-limit').addEventListener('click', () => showBrandPicker(addBrandLimitRow()));
 
     async function saveRules() {
+      if(document.querySelector('#brand-limits-container [data-invalid="true"]')){flash('Nejdřív opravte nedostupné odkazy značek.',true);return;}
       const brandLimits = {};
       document.querySelectorAll('#brand-limits-container > div').forEach(row => {
-        const name = row.querySelector('.bl-name').value.trim().toUpperCase();
+        const name = row.querySelector('.bl-name').value.trim();
         const val = Number(row.querySelector('.bl-limit').value);
         if (name && Number.isFinite(val)) brandLimits[name] = val;
       });
@@ -1002,7 +1045,7 @@ export function renderAdminHtml(eshopId, auth) {
       if (state.mcpTokens.length && !confirm('Vygenerovat nový klíč pro MCP? Všechny dosavadní klíče přestanou fungovat.')) return;
       const btn = $('token-new'); btn.disabled = true;
       try {
-        const permissions=[];if($('permission-configure').checked)permissions.push('pricing:configure');if($('permission-execute').checked)permissions.push('pricing:execute');
+        const permissions=[];if($('permission-sync').checked)permissions.push('sync:execute');if($('permission-configure').checked)permissions.push('pricing:configure');if($('permission-execute').checked)permissions.push('pricing:execute');
         const res = await api('/mcp-token', { method: 'POST', body: JSON.stringify({permissions}) });
         const fresh = await api('/state');
         state = fresh; renderTokens(); renderOverview();
@@ -1053,12 +1096,20 @@ export function renderAdminHtml(eshopId, auth) {
       try{const requestId=$('oauth-pair-code').value.trim();const info=await api('/oauth/inspect',{method:'POST',body:JSON.stringify({requestId})});const description=document.createElement('p');description.textContent='Klient: '+info.clientName+'; návratová adresa: '+info.redirectUri+'; požadovaná oprávnění: '+info.scopes.join(', ');const approve=document.createElement('button');approve.type='button';approve.className='btn-shoptet-green';approve.textContent='Povolit tato oprávnění tomuto klientovi';approve.addEventListener('click',async()=>{approve.disabled=true;try{await api('/oauth/consent',{method:'POST',body:JSON.stringify({requestId})});root.textContent='Povoleno. Vraťte se do okna AI klienta.';renderOAuthConnections();}catch(e){approve.disabled=false;flash(e.message,true);}});root.append(description,approve);}catch(e){flash(e.message,true);}resize();
     });
 
+    async function renderSyncApprovals(){
+      const root=document.createElement('section');const heading=document.createElement('h2');heading.textContent='Synchronizace cen';root.append(heading);$('panel-overview').append(root);
+      try{const data=await api('/sync/pending');
+        for(const approval of data.approvals){const detail=await api('/sync/plan',{method:'POST',body:JSON.stringify({planId:approval.plan_id})});const card=document.createElement('div');const title=document.createElement('p');title.textContent='Plán '+detail.planId+'; položek: '+detail.plan.actions.length+'; cílový ceník: '+detail.plan.targetPricelistId;const preview=document.createElement('pre');preview.style.cssText='max-height:320px;overflow:auto;white-space:pre-wrap';preview.textContent=JSON.stringify(detail,null,2);const approve=document.createElement('button');approve.type='button';approve.className='btn-shoptet-green';approve.textContent='Schválit přesně tento plán';approve.addEventListener('click',async()=>{approve.disabled=true;try{await api('/sync/approve',{method:'POST',body:JSON.stringify({approvalId:approval.approval_id})});approve.textContent='Schváleno';}catch(e){approve.disabled=false;flash(e.message,true);}});card.append(title,preview,approve);root.append(card);}
+        const history=await api('/sync/history');for(const job of history.jobs){const row=document.createElement('p');row.textContent=job.job_id+' — '+job.mode+' — '+job.state+(job.error_code?' — '+job.error_code:'');root.append(row);}if(!data.approvals.length&&!history.jobs.length)root.append(document.createTextNode('Žádné plány ani synchronizační úlohy.'));
+      }catch{root.append(document.createTextNode('Synchronizace není dostupná; ověřte migraci 0013 a konfiguraci koordinátoru.'));}resize();
+    }
+
     /* Boot */
     (async () => {
       try {
         state = await api('/state');
         $('loading').remove();
-        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections();
+        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals();
       } catch (e) {
         $('loading').textContent = '';
         flash(e.message, true);

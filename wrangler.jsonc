@@ -18,5 +18,14 @@
       "binding": "RELEASE_ASSETS",
       "bucket_name": "lcode-shoptet-pricing-releases"
     }
-  ]
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SYNC_COORDINATOR",
+        "class_name": "ShopSyncCoordinator",
+        "script_name": "lcode-shoptet-sync-dev"
+      }
+    ]
+  }
 }

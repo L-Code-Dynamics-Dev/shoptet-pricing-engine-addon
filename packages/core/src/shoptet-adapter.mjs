@@ -1,9 +1,10 @@
+import { z } from 'zod';
 // Fixed-origin read adapter. Callers cannot provide URLs, HTTP methods or credentials.
 export class ShoptetError extends Error {
   constructor(code, status = 502) { super(code); this.code = code; this.status = status; }
 }
 const collections = { brands: 'brands', products: 'products', categories: 'categories', pricelists: 'pricelists' };
-export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms => new Promise(r => setTimeout(r, ms)), timeoutMs = 10000 }) {
+export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms => new Promise(r => setTimeout(r, ms)), timeoutMs = 10000, authorizeWrite = null }) {
   async function read(path, params = {}) {
     for (let attempt = 0; attempt < 3; attempt++) {
       const token = await getToken();
@@ -13,7 +14,8 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       try { res = await fetchImpl(url.href, { redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' } }); }
       catch { throw new ShoptetError('upstream_unavailable'); }
       if ((res.status === 429 || res.status >= 500) && attempt < 2) {
-        const retry = Number(res.headers.get('retry-after'));
+        const retryHeader = res.headers.get('retry-after');
+        const retry = retryHeader === null ? NaN : Number(retryHeader);
         await sleep(Math.min(5000, Math.max(0, Number.isFinite(retry) ? retry * 1000 : 250 * 2 ** attempt) + Math.random() * 100));
         continue;
       }
@@ -28,7 +30,51 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
     async verifyBrand(id) {
       if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)) throw new ShoptetError('invalid_brand_id',400);
       const data=await read('/api/brands/'+encodeURIComponent(id));
-      return data.brand?.guid === id;
+      return data.guid === id;
+    },
+    async brand(id) {
+      if(typeof id!=='string'||!id||id.length>128)throw new ShoptetError('invalid_brand_id',400);
+      const data=await read('/api/brands/'+encodeURIComponent(id));
+      return brandSchema.parse(data);
+    },
+    async product(id) {
+      uuidSchema.parse(id);
+      const data=await read('/api/products/'+encodeURIComponent(id),{include:'allCategories'});
+      if(data.guid!==id)throw new ShoptetError('product_reference_mismatch');
+      return productSchema.parse(data);
+    },
+    async category(id) {uuidSchema.parse(id);const data=await read('/api/categories/'+encodeURIComponent(id));const parsed=z.object({guid:uuidSchema,name:z.string(),visible:z.boolean()}).parse(data);if(parsed.guid!==id)throw new ShoptetError('category_reference_mismatch');return parsed;},
+    async pricelist(id) {
+      positiveId.parse(id);
+      const data=await read('/api/price-lists/'+id);
+      const parsed=pricelistSchema.parse(data.priceList);if(parsed.id!==id)throw new ShoptetError('pricelist_reference_mismatch');return parsed;
+    },
+    async prices(id,{page=1,limit=50,code}={}) {
+      positiveId.parse(id);positiveId.parse(page);z.number().int().min(1).max(100).parse(limit);
+      if(code!==undefined)z.string().min(1).max(128).parse(code);
+      const data=await read('/api/price-lists/'+id+'/prices',{page,itemsPerPage:limit,...(code!==undefined?{code}:{})});
+      const rows=z.array(priceRowSchema).max(100).parse(data.prices);
+      return {items:rows,pagination:paginatorSchema.parse(data.paginator)};
+    },
+    async capabilities() {
+      const data=await read('/api/system/endpoints',{status:'approved'});
+      return {source:'shoptet_approved_endpoints',endpoints:z.array(z.object({endpoint:z.string().max(128),access:z.enum(['read','write','both']),action:z.literal(null)})).max(1000).parse(data.endpoints)};
+    },
+    async writePrices(id,rows) {
+      positiveId.parse(id);const items=z.array(pricePatchSchema).min(1).max(100).parse(rows);
+      if(!authorizeWrite)throw new ShoptetError('write_not_authorized',403);
+      await authorizeWrite({pricelistId:id,items});
+      const token=await getToken();let response;
+      // Mutations are never automatically retried: a timeout may mean the server applied them.
+      try{response=await fetchImpl('https://api.myshoptet.com/api/price-lists/'+id+'/prices',{method:'PATCH',redirect:'error',signal:AbortSignal.timeout(timeoutMs),headers:{'Shoptet-Access-Token':token,'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({data:items})});}
+      catch{return {outcome:'unknown',error:'write_outcome_unknown',requiresReadback:true};}
+      let body;try{body=await response.json();}catch{return {outcome:'unknown',error:'invalid_write_response',requiresReadback:true};}
+      if(!response.ok && response.status>=500)return {outcome:'unknown',error:'write_outcome_unknown',requiresReadback:true};
+      if(!body||typeof body!=='object'||!Object.hasOwn(body,'data')||!Object.hasOwn(body,'errors')||(body.data!==null&&typeof body.data!=='object'))return {outcome:'unknown',error:'invalid_write_response',requiresReadback:true};
+      const errors=z.array(z.object({errorCode:z.string().max(128),instance:z.string().max(128)})).safeParse(body.errors??[]);
+      if(!errors.success)return {outcome:'unknown',error:'invalid_write_response',requiresReadback:true};
+      if(!response.ok || errors.data.length)return {outcome:response.ok?'partial':'failed',errors:errors.data,status:response.status,requiresReadback:true};
+      return {outcome:'accepted',requiresReadback:true};
     },
     async list(kind, {page=1, limit=30, query=''} = {}) {
       if (!collections[kind] || !Number.isSafeInteger(page) || page<1 || page>10000 || !Number.isSafeInteger(limit) || limit<1 || limit>50 || typeof query!=='string' || query.length>100) throw new ShoptetError('invalid_parameters',400);
@@ -37,6 +83,18 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       const items = data[collections[kind]].slice(0, kind==='pricelists'?500:limit).map(compact);
       return { items: items.filter(x=>!query || [x.name,x.code,x.guid].some(v=>String(v??'').toLocaleLowerCase('cs').includes(query.toLocaleLowerCase('cs')))), page, limit, searchScope:'returned_page_only', pagination: data.paginator || null };
     },
-    async profile() { const data=await read('/api/eshop'); const e=data.eshop || data; return Object.fromEntries(['id','name','currency','currencies','vatPayer'].filter(k=>e[k]!==undefined).map(k=>[k,e[k]])); }
+    async profile() { const data=await read('/api/eshop'); return profileSchema.parse({id:data.contactInformation?.eshopId,name:data.contactInformation?.eshopName,vatPayer:data.settings?.vatPayer,defaultPricelistId:data.settings?.defaultPricelist?.id,timezone:data.settings?.timezone,currencies:data.currencies}); }
   };
 }
+
+const positiveId=z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const uuidSchema=z.string().uuid();
+const decimal=z.string().regex(/^\d+\.\d{2}$/).max(24);
+const actionSchema=z.object({price:decimal,fromDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),toDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable()}).nullable();
+export const priceRowSchema=z.object({code:z.string().min(1).max(128),currencyCode:z.string().regex(/^[A-Z]{3}$/),includingVat:z.boolean(),vatRate:decimal,price:z.object({price:decimal.nullable(),priceRatio:z.string().regex(/^\d+\.\d{3}$/),actionPrice:actionSchema}),sales:z.object({discountCoupon:z.boolean()})});
+const pricePatchSchema=z.object({code:z.string().min(1).max(128),priceWithVat:z.object({price:decimal.refine(v=>BigInt(v.replace('.',''))>0n,'Zero price requires a verified shop capability')}).strict(),sales:z.object({discountCoupon:z.boolean()}).strict().optional()}).strict();
+const brandSchema=z.object({guid:uuidSchema,name:z.string().max(500),indexName:z.string().max(500)});
+const productSchema=z.object({guid:uuidSchema,name:z.string().nullable(),visibility:z.string(),brand:z.object({code:z.string(),name:z.string()}).nullable(),categories:z.array(z.object({guid:uuidSchema.nullable()})).optional(),defaultCategory:z.object({guid:uuidSchema.nullable()}),variants:z.array(z.object({code:z.string(),visible:z.boolean()}))});
+const pricelistSchema=z.object({id:positiveId,name:z.string(),currency:z.string().nullable(),isDefault:z.boolean()});
+const paginatorSchema=z.object({page:z.number().int().nonnegative(),pageCount:z.number().int().nonnegative(),totalCount:z.number().int().nonnegative()});
+const profileSchema=z.object({id:positiveId,name:z.string(),vatPayer:z.boolean(),defaultPricelistId:positiveId,timezone:z.string(),currencies:z.array(z.object({code:z.string(),priceDecimalPlaces:z.number().int().min(0).max(4),rounding:z.enum(['none','up','down','math'])})).max(100)});

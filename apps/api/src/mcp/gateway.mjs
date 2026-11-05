@@ -1,3 +1,6 @@
+import {syncRuntime} from '../sync/runtime.mjs';
+import {SyncError} from '../../../../packages/core/src/sync-service.mjs';
+import {syncSelectionSchema} from '../../../../packages/core/src/sync-planner.mjs';
 import {oauthConfiguration} from '../../../../packages/core/src/mcp-oauth.mjs';
 import { createConfigurationService, proposalSchema, ConfigurationError } from '../../../../packages/core/src/configuration.mjs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -12,16 +15,17 @@ const json = (body,status) => new Response(JSON.stringify(body),{status,headers:
 export function createMerchantServer(identity, env) {
   const server = new McpServer({name:'lcode-loyalty-pricing',version:'0.2.0'});
   const adapter = createShoptetAdapter({getToken:async()=> (await getShoptetApiAccessToken({db:env.DB,tokenKeys:env.SHOPTET_TOKEN_KEYS,shopId:identity.shopId})).apiAccessToken});
-  const configs=createConfigurationService(env.DB,id=>adapter.verifyBrand(id));
-  const can = scope => identity.scopes.has(scope);
+  const configs=createConfigurationService(env.DB,id=>adapter.verifyBrand(id),async(kind,id,code)=>{const item=await adapter[kind](id);return kind==='category'?item.guid===id:item.guid===id&&(code===undefined||item.variants.some(v=>v.code===code));});
+  const can = scope => Array.isArray(scope)?scope.every(s=>identity.scopes.has(s)):identity.scopes.has(scope);
+  const sync=syncRuntime(env,identity.shopId);
   let oauthReady=false;try{oauthConfiguration(env);oauthReady=true;}catch{}
-  const capabilities = () => ({ configuration:'approved_proposals_only', catalog:can('catalog:read'), liveWrites:false, verifiedLiveState:false, reasons:['pricing_parity_not_verified','fenced_executor_not_implemented'], authorization:'revocable_header_bearer', mcpOAuth:oauthReady });
+  const capabilities = () => ({ configuration:'approved_proposals_only', catalog:can('catalog:read'), liveWrites:false, verifiedLiveState:false, reasons:['pricing_parity_not_verified',...(!env.SYNC_COORDINATOR?['sync_coordinator_not_configured']:[])], authorization:'revocable_header_bearer', mcpOAuth:oauthReady });
   const configuration = async()=>{ const row=await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(identity.shopId).first(); return {version:row?.version??0,configuration:row?JSON.parse(row.config_json):{},state:'saved_only',applied:false,verified:false}; };
   function tool(name,scope,description,schema,run,readOnly=true) {
     if (!can(scope)) return;
     server.registerTool(name,{description,inputSchema:z.object(schema).strict(),annotations:{readOnlyHint:readOnly,destructiveHint:!readOnly,openWorldHint:true}},async args=>{
       try { return result(await run(args)); }
-      catch(e) { return {...result({error:e instanceof ShoptetError?e.code:e instanceof ConfigurationError?e.message:'operation_failed',applied:false}),isError:true}; }
+      catch(e) { return {...result({error:e instanceof ShoptetError?e.code:e instanceof ConfigurationError||e instanceof SyncError?e.message:'operation_failed',applied:false}),isError:true}; }
     });
   }
   tool('shop_get_status','shop:read','Stav přihlášeného obchodu a skutečně dostupné funkce.',{},async()=>({installed:true,capabilities:capabilities()}));
@@ -39,6 +43,15 @@ export function createMerchantServer(identity, env) {
   ]) tool(name,scope,'Práce s konkrétní neměnnou revizí konfigurace.',{revisionId:z.string().uuid()},a=>configs[method](identity.shopId,a.revisionId),readOnly);
   tool('configuration_apply','pricing:execute','Uloží revizi pouze po skutečném potvrzení v administraci; neaktivuje Shoptet ceny.',{approvalId:z.string().uuid()},a=>configs.apply(identity.shopId,a.approvalId),false);
   tool('configuration_get_history','pricing:read','Historie uložených revizí, nikoli důkaz aktivace.',{},()=>configs.history(identity.shopId));
+  tool('sync_preview','sync:read','Vypočítá ceny ze skutečných variant bez zápisů.',syncSelectionSchema.shape,a=>sync.service.preview(identity.shopId,a));
+  tool('sync_plan',['sync:read','pricing:configure'],'Vytvoří neměnný plán a žádost o potvrzení v administraci.',syncSelectionSchema.shape,a=>sync.service.plan(identity.shopId,a),false);
+  tool('sync_execute','sync:execute','Zařadí plán do trvalé fronty. Live vyžaduje další oprávnění, schválení a aktivovaný ověřený release.',{planId:z.string().uuid(),mode:z.enum(['dry-run','live']).default('dry-run'),approvalId:z.string().uuid().optional()},a=>{if(a.mode==='live'&&!can('pricing:execute'))throw new SyncError('pricing_execute_scope_required');return sync.execute(a.planId,a.mode,a.approvalId);},false);
+  tool('sync_get_progress','sync:read','Průběh a chyby konkrétní úlohy.',{jobId:z.string().uuid()},a=>sync.service.progress(identity.shopId,a.jobId));
+  tool('sync_get_status','sync:read','Poslední synchronizace aktuálního obchodu.',{},()=>sync.service.history(identity.shopId));
+  tool('sync_get_history','sync:read','Historie skutečných úloh, včetně chyb.',{},()=>sync.service.history(identity.shopId));
+  tool('sync_cancel','sync:execute','Požádá o bezpečné zastavení před další položkou.',{jobId:z.string().uuid()},a=>sync.service.cancel(identity.shopId,a.jobId),false);
+  tool('sync_retry_failed','sync:execute','Zopakuje způsobilou testovací úlohu. Nejisté live zápisy vyžadují ruční ověření.',{jobId:z.string().uuid()},a=>sync.retry(a.jobId),false);
+  tool('sync_verify','sync:read','Načte ceny znovu a porovná je s neměnným plánem.',{planId:z.string().uuid()},a=>sync.verify(a.planId));
   for(const kind of ['brands','products','categories','pricelists']) {
     const schema={page:z.number().int().min(1).max(10000).default(1),limit:z.number().int().min(1).max(50).default(30)};
     tool(kind+'_list','catalog:read','Skutečná data aktuálního obchodu; omezená stránka.',schema,args=>adapter.list(kind,args));

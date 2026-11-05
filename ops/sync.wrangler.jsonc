@@ -1,0 +1,33 @@
+{
+  "name": "lcode-shoptet-sync-dev",
+  "main": "../apps/sync/src/index.mjs",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "vars": {
+    "SYNC_MODE": "off"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SYNC_COORDINATOR",
+        "class_name": "ShopSyncCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ShopSyncCoordinator"
+      ]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lcode-shoptet-pricing-dev",
+      "database_id": "e30f946d-5e2d-4985-9c3a-fada524d9edf",
+      "migrations_dir": "../migrations"
+    }
+  ]
+}

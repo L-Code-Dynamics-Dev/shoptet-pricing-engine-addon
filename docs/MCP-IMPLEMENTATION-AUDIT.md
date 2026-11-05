@@ -1,3 +1,7 @@
+# Update: native sync plans, fenced jobs and catalog selection
+
+[SYNC-EXECUTION.md](SYNC-EXECUTION.md) describes nine sync tools, immutable native-price plans, separate admin approval, durable checkpoints, tenant fencing, uncertain-write quarantine and a SQLite Durable Object coordinator. Product/variant/category caps and the real-brand picker are implemented. Native activation remains off and staging/parity/capability evidence remains required. Previous missing-executor/brand-picker findings below are superseded for this bounded subset, not for customer automation or full checkout behavior.
+
 # Update: MCP OAuth/PKCE
 
 [MCP-OAUTH.md](MCP-OAUTH.md) describes the implemented pre-registered public-client authorization flow, signed-admin pairing/consent, PKCE, metadata, resource binding, access/refresh lifecycle, replay-family revocation and client disconnect. Migration 0012 and HTTP/SQLite integration/security tests were added. The original missing-OAuth findings below are superseded for this supported subset. Real-client compatibility, Cloudflare D1/browser staging, dynamic client registration and operational audit/retention remain unverified or unimplemented; no deployment occurred.
