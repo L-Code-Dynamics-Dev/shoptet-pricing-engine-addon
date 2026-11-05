@@ -1,3 +1,4 @@
+import { createTokenVault } from './token-vault.mjs';
 export function trustedShopOrigin(value) {
   let url; try { url = new URL(value); } catch { throw Error('Trusted shop URL required'); }
   if (url.protocol !== 'https:' || !/^[0-9]{1,12}\.myshoptet\.com$/.test(url.hostname) || url.port || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Trusted shop URL required');
@@ -57,116 +58,52 @@ export async function exchangeAuthorizationCode({
   };
 }
 
-export async function saveShoptetInstallation({ db, shopId, accessToken, eshopUrl, contactEmail }) {
-  if (!db) throw new Error('Missing database handle');
-  if (!shopId) throw new Error('Missing shopId');
-  if (!accessToken) throw new Error('Missing accessToken');
-
-  // 1. Upsert into installations
-  await db.prepare(`
-    INSERT INTO installations (shop_id, state, updated_at)
-    VALUES (?, 'active', CURRENT_TIMESTAMP)
-    ON CONFLICT(shop_id) DO UPDATE SET
-      state = 'active',
-      updated_at = CURRENT_TIMESTAMP
-  `).bind(shopId).run();
-
-  // 2. Upsert into shoptet_oauth
-  await db.prepare(`
-    INSERT INTO shoptet_oauth (shop_id, oauth_access_token, eshop_url, contact_email, updated_at)
-    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(shop_id) DO UPDATE SET
-      oauth_access_token = excluded.oauth_access_token,
-      eshop_url = excluded.eshop_url,
-      contact_email = excluded.contact_email,
-      updated_at = CURRENT_TIMESTAMP
-  `).bind(shopId, accessToken, eshopUrl, contactEmail).run();
-
-  // 3. Upsert into shoptet_installations (canonical schema compatibility)
-  try {
-    const numericShopId = parseInt(shopId, 10) || shopId;
-    await db.prepare(`
-      INSERT INTO shoptet_installations (eshop_id, eshop_url, contact_email, oauth_token, status, updated_at)
-      VALUES (?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
-      ON CONFLICT(eshop_id) DO UPDATE SET
-        eshop_url = excluded.eshop_url,
-        contact_email = excluded.contact_email,
-        oauth_token = excluded.oauth_token,
-        status = 'active',
-        updated_at = CURRENT_TIMESTAMP
-    `).bind(numericShopId, eshopUrl, contactEmail, accessToken).run();
-  } catch (err) {
-    // Non-fatal if table not yet migrated in test environments
-  }
-
-  return { success: true, shopId };
+export async function saveShoptetInstallation({ db, shopId, accessToken, eshopUrl, contactEmail, tokenKeys }) {
+  if (!db || typeof shopId!=='string' || !/^[0-9]{1,12}$/.test(shopId)) throw Error('Invalid installation context');
+  const origin=trustedShopOrigin(eshopUrl);
+  const envelope=await createTokenVault(tokenKeys).seal(shopId,'oauth',accessToken);
+  // D1 batch is transactional: installation identity and secret cannot partially persist.
+  await db.batch([
+    db.prepare("INSERT INTO installations(shop_id,state,updated_at) VALUES(?,'active',CURRENT_TIMESTAMP) ON CONFLICT(shop_id) DO UPDATE SET state='active',updated_at=CURRENT_TIMESTAMP").bind(shopId),
+    db.prepare("INSERT INTO shoptet_oauth(shop_id,oauth_access_token,eshop_url,contact_email,oauth_envelope) VALUES(?,'',?,?,?) ON CONFLICT(shop_id) DO UPDATE SET oauth_access_token='',cached_api_token=NULL,api_envelope=NULL,api_token_expires_at=NULL,eshop_url=excluded.eshop_url,contact_email=excluded.contact_email,oauth_envelope=excluded.oauth_envelope,updated_at=CURRENT_TIMESTAMP").bind(shopId,origin,contactEmail??null,envelope),
+    db.prepare("INSERT INTO shoptet_installations(eshop_id,eshop_url,contact_email,oauth_token,status) VALUES(?,?,?,'','active') ON CONFLICT(eshop_id) DO UPDATE SET eshop_url=excluded.eshop_url,contact_email=excluded.contact_email,oauth_token='',status='active',updated_at=CURRENT_TIMESTAMP").bind(Number(shopId),origin,contactEmail??null)
+  ]);
+  return {success:true,shopId};
 }
 
-export async function getShoptetApiAccessToken({ db, shopId, fetchImpl = fetch }) {
-  if (!db) throw new Error('Missing database handle');
-  if (!shopId) throw new Error('Missing shopId');
+export async function getShoptetApiAccessToken({ db, shopId, tokenKeys, fetchImpl = fetch }) {
+  const vault=createTokenVault(tokenKeys);
+  if(!db || typeof shopId!=='string'||!shopId)throw Error('Invalid installation context');
+  const row=await db.prepare("SELECT o.oauth_envelope,o.api_envelope,o.api_token_expires_at,o.eshop_url FROM shoptet_oauth o JOIN installations i ON i.shop_id=o.shop_id WHERE o.shop_id=? AND i.state='active'").bind(shopId).first();
+  if(!row?.oauth_envelope)throw Error('Encrypted installation token unavailable; migration required');
+  const nowSec=Math.floor(Date.now()/1000);
+  if(row.api_envelope && row.api_token_expires_at>nowSec+60)return {apiAccessToken:await vault.open(shopId,'api',row.api_envelope),expiresIn:row.api_token_expires_at-nowSec};
+  const oauth=await vault.open(shopId,'oauth',row.oauth_envelope);
+  const response=await fetchImpl(trustedShopOrigin(row.eshop_url)+'/action/ApiOAuthServer/getAccessToken',{method:'GET',redirect:'error',signal:AbortSignal.timeout(10000),headers:{Authorization:'Bearer '+oauth}});
+  if(!response.ok)throw Error('API token renewal failed ('+response.status+')');
+  const data=await response.json();
+  if(typeof data.access_token!=='string'||!data.access_token||!Number.isSafeInteger(data.expires_in)||data.expires_in<=0||data.expires_in>86400)throw Error('Invalid API token response');
+  const envelope=await vault.seal(shopId,'api',data.access_token);
+  const saved=await db.prepare("UPDATE shoptet_oauth SET api_envelope=?,api_token_expires_at=? WHERE shop_id=? AND oauth_envelope=? AND EXISTS(SELECT 1 FROM installations i WHERE i.shop_id=shoptet_oauth.shop_id AND i.state='active')").bind(envelope,nowSec+data.expires_in,shopId,row.oauth_envelope).run();
+  if(!saved.meta?.changes)throw Error('Installation changed during token renewal');
+  return {apiAccessToken:data.access_token,expiresIn:data.expires_in};
+}
 
-  const nowSec = Math.floor(Date.now() / 1000);
-
-  const row = await db.prepare(`
-    SELECT oauth_access_token, eshop_url, cached_api_token, api_token_expires_at
-    FROM shoptet_oauth
-    WHERE shop_id = ?
-  `).bind(shopId).first();
-
-  if (!row || !row.oauth_access_token) {
-    throw new Error(`Shop ${shopId} is not installed or missing OAuth token`);
-  }
-
-  // Return cached token if still valid for at least 60 seconds
-  if (row.cached_api_token && row.api_token_expires_at && row.api_token_expires_at > (nowSec + 60)) {
-    return {
-      apiAccessToken: row.cached_api_token,
-      expiresIn: row.api_token_expires_at - nowSec
-    };
-  }
-
-  const baseUrl = trustedShopOrigin(row.eshop_url);
-
-  const endpoint = `${baseUrl}/action/ApiOAuthServer/getAccessToken`;
-  const response = await fetchImpl(endpoint, {
-    method: 'GET', redirect: 'error', signal: AbortSignal.timeout(10000),
-    headers: {
-      'Authorization': `Bearer ${row.oauth_access_token}`
-    }
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    // If maximum tokens reached and we have an existing cached token, return cached token as fallback
-    if (response.status === 404 && errorBody.includes('maximum_tokens_reached') && row.cached_api_token && row.api_token_expires_at > nowSec) {
-      return {
-        apiAccessToken: row.cached_api_token,
-        expiresIn: Math.max(0, (row.api_token_expires_at || (nowSec + 600)) - nowSec)
-      };
-    }
-    throw new Error(`Failed to obtain short-term API token (${response.status})`);
-  }
-
-  const data = await response.json();
-  if (typeof data.access_token !== 'string' || !data.access_token) throw Error('Invalid API token response');
-  const expiresIn = data.expires_in;
-  if (!Number.isSafeInteger(expiresIn) || expiresIn <= 0) throw Error('Invalid API token expiry');
-  const expiresAt = nowSec + expiresIn;
-
-  // Cache in D1
-  try {
-    await db.prepare(`
-      UPDATE shoptet_oauth
-      SET cached_api_token = ?, api_token_expires_at = ?
-      WHERE shop_id = ?
-    `).bind(data.access_token, expiresAt, shopId).run();
-  } catch {
-    // Non-fatal if cache write fails
-  }
-
-  return {
-    apiAccessToken: data.access_token,
-    expiresIn
-  };
+// Explicit server/operator utility: never exposed as an MCP tool or public route.
+// Retain old keys during rotation. Batch clears both legacy copies atomically.
+export async function migrateShopTokens({db,shopId,tokenKeys}) {
+  const vault=createTokenVault(tokenKeys);
+  const row=await db.prepare('SELECT * FROM shoptet_oauth WHERE shop_id=?').bind(shopId).first();
+  if(!row)throw Error('Installation unavailable');
+  const token=row.oauth_envelope?await vault.open(shopId,'oauth',row.oauth_envelope):row.oauth_access_token;
+  if(!token)throw Error('Installation token unavailable');
+  const oauth=await vault.seal(shopId,'oauth',token);
+  const api=row.api_envelope?await vault.open(shopId,'api',row.api_envelope):row.cached_api_token;
+  const encryptedApi=api?await vault.seal(shopId,'api',api):null;
+  const results=await db.batch([
+    db.prepare("UPDATE shoptet_oauth SET oauth_envelope=?,api_envelope=?,oauth_access_token='',cached_api_token=NULL WHERE shop_id=? AND oauth_access_token=? AND oauth_envelope IS ?").bind(oauth,encryptedApi,shopId,row.oauth_access_token,row.oauth_envelope??null),
+    db.prepare("UPDATE shoptet_installations SET oauth_token='' WHERE eshop_id=? AND EXISTS(SELECT 1 FROM shoptet_oauth WHERE shop_id=? AND oauth_envelope=?)").bind(Number(shopId),shopId,oauth)
+  ]);
+  if(!results[0].meta?.changes)throw Error('Concurrent token migration');
+  return {shopId,encrypted:true};
 }

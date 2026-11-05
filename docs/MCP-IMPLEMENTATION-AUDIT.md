@@ -1,3 +1,7 @@
+# Update: encrypted Shoptet credentials
+
+[TOKEN-VAULT.md](TOKEN-VAULT.md) documents the implemented per-shop AES-GCM vault, key rotation, transactional installation writes and encrypted API-token cache. Migration 0011 and explicit server-only legacy conversion are provided and tested locally; no remote migration or secret provisioning occurred. The previous plaintext-storage finding below is superseded for the new runtime. Trusted installation callback verification, MCP OAuth/PKCE and production staging verification remain outstanding.
+
 # Update: configuration approval foundation
 
 The revision workflow described in [CONFIGURATION-APPROVALS.md](CONFIGURATION-APPROVALS.md) now supersedes the read-only configuration limitations in the original audit below. Nine additional tools implement draft creation/replacement, validation, preview, trusted approval request, approved proposal saving, verification, history and rollback proposal creation. These store proposals only; live Shoptet execution remains disabled. The admin can explicitly grant proposal permissions or revoke credentials. Migration 0010 and real SQLite integration tests were added; no remote migration was run.

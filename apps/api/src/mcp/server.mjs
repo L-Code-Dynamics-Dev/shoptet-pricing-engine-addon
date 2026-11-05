@@ -290,7 +290,7 @@ export async function handleMcp(request, env) {
     // 5. Shoptet Get Info & Pricelists
     if (name === 'shoptet_get_info') {
       try {
-        const { apiAccessToken } = await getShoptetApiAccessToken({ db: env.DB, shopId: identity.shopId, fetchImpl: fetch });
+        const { apiAccessToken } = await getShoptetApiAccessToken({ db: env.DB, tokenKeys: env.SHOPTET_TOKEN_KEYS, shopId: identity.shopId, fetchImpl: fetch });
         const [eshopRes, pricelistsRes] = await Promise.all([
           fetch('https://api.myshoptet.com/api/eshop', { headers: { 'Shoptet-Access-Token': apiAccessToken, 'Content-Type': 'application/vnd.shoptet.v1.0' } }),
           fetch('https://api.myshoptet.com/api/pricelists', { headers: { 'Shoptet-Access-Token': apiAccessToken, 'Content-Type': 'application/vnd.shoptet.v1.0' } })
@@ -306,7 +306,7 @@ export async function handleMcp(request, env) {
     // 6. Shoptet Get Products
     if (name === 'shoptet_get_products') {
       try {
-        const { apiAccessToken } = await getShoptetApiAccessToken({ db: env.DB, shopId: identity.shopId, fetchImpl: fetch });
+        const { apiAccessToken } = await getShoptetApiAccessToken({ db: env.DB, tokenKeys: env.SHOPTET_TOKEN_KEYS, shopId: identity.shopId, fetchImpl: fetch });
         const page = args.page || 1;
         const itemsPerPage = Math.min(args.itemsPerPage || 20, 50);
         const res = await fetch(`https://api.myshoptet.com/api/products?page=${page}&itemsPerPage=${itemsPerPage}`, {
@@ -354,7 +354,7 @@ export async function handleMcp(request, env) {
         return rpcError(id, -32602, 'Invalid pricelistId or empty items');
       }
       try {
-        const { apiAccessToken } = await getShoptetApiAccessToken({ db: env.DB, shopId: identity.shopId, fetchImpl: fetch });
+        const { apiAccessToken } = await getShoptetApiAccessToken({ db: env.DB, tokenKeys: env.SHOPTET_TOKEN_KEYS, shopId: identity.shopId, fetchImpl: fetch });
         const patches = [];
         for (const item of args.items) {
           const cap = resolveDiscountCap({ productCap: item.capPercent ?? null });

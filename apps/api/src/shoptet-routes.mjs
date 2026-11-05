@@ -66,6 +66,7 @@ export async function handleShoptetInstall(request, env) {
 
     await saveShoptetInstallation({
       db: env.DB,
+      tokenKeys: env.SHOPTET_TOKEN_KEYS,
       shopId: tokenResult.eshopId,
       accessToken: tokenResult.accessToken,
       eshopUrl: tokenResult.eshopUrl,
@@ -139,6 +140,7 @@ export async function handleShoptetApiTest(request, env) {
   try {
     const { apiAccessToken, expiresIn } = await getShoptetApiAccessToken({
       db: env.DB,
+      tokenKeys: env.SHOPTET_TOKEN_KEYS,
       shopId,
       fetchImpl: fetch
     });

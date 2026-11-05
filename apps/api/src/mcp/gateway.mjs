@@ -10,7 +10,7 @@ const result = value => ({ content:[{type:'text',text:JSON.stringify(value)}],st
 const json = (body,status) => new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json','cache-control':'no-store'}});
 export function createMerchantServer(identity, env) {
   const server = new McpServer({name:'lcode-loyalty-pricing',version:'0.2.0'});
-  const adapter = createShoptetAdapter({getToken:async()=> (await getShoptetApiAccessToken({db:env.DB,shopId:identity.shopId})).apiAccessToken});
+  const adapter = createShoptetAdapter({getToken:async()=> (await getShoptetApiAccessToken({db:env.DB,tokenKeys:env.SHOPTET_TOKEN_KEYS,shopId:identity.shopId})).apiAccessToken});
   const configs=createConfigurationService(env.DB,id=>adapter.verifyBrand(id));
   const can = scope => identity.scopes.has(scope);
   const capabilities = () => ({ configuration:'approved_proposals_only', catalog:can('catalog:read'), liveWrites:false, verifiedLiveState:false, reasons:['pricing_parity_not_verified','fenced_executor_not_implemented'], authorization:'revocable_header_bearer', mcpOAuth:false });
