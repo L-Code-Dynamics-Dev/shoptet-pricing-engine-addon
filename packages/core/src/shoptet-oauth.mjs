@@ -1,3 +1,4 @@
+import {digest} from './mcp-oauth.mjs';
 import { createTokenVault } from './token-vault.mjs';
 export function trustedShopOrigin(value) {
   let url; try { url = new URL(value); } catch { throw Error('Trusted shop URL required'); }
@@ -15,7 +16,8 @@ export async function exchangeAuthorizationCode({
   redirectUri,
   clientId,
   clientSecret,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  timeoutMs = 10000
 }) {
   if (!code || typeof code !== 'string') throw new Error('Missing authorization code');
   if (!clientId || !clientSecret) throw new Error('Missing client credentials');
@@ -26,7 +28,7 @@ export async function exchangeAuthorizationCode({
   const tokenEndpoint = `${baseUrl}/action/ApiOAuthServer/token`;
 
   const response = await fetchImpl(tokenEndpoint, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
     headers: {
       'Content-Type': 'application/json',
       'Accept': 'application/json'
@@ -58,16 +60,25 @@ export async function exchangeAuthorizationCode({
   };
 }
 
-export async function saveShoptetInstallation({ db, shopId, accessToken, eshopUrl, contactEmail, tokenKeys }) {
+export async function saveShoptetInstallation({ db, shopId, accessToken, eshopUrl, contactEmail, tokenKeys, callbackHash=null, capabilities=null, installationState='active' }) {
   if (!db || typeof shopId!=='string' || !/^[0-9]{1,12}$/.test(shopId)) throw Error('Invalid installation context');
+  if(!['pending','active'].includes(installationState))throw Error('Invalid installation state');
   const origin=trustedShopOrigin(eshopUrl);
   const envelope=await createTokenVault(tokenKeys).seal(shopId,'oauth',accessToken);
   // D1 batch is transactional: installation identity and secret cannot partially persist.
-  await db.batch([
-    db.prepare("INSERT INTO installations(shop_id,state,updated_at) VALUES(?,'active',CURRENT_TIMESTAMP) ON CONFLICT(shop_id) DO UPDATE SET state='active',updated_at=CURRENT_TIMESTAMP").bind(shopId),
+  const statements=[
+    db.prepare("INSERT INTO installations(shop_id,state,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(shop_id) DO UPDATE SET state=excluded.state,updated_at=CURRENT_TIMESTAMP").bind(shopId,installationState),
     db.prepare("INSERT INTO shoptet_oauth(shop_id,oauth_access_token,eshop_url,contact_email,oauth_envelope) VALUES(?,'',?,?,?) ON CONFLICT(shop_id) DO UPDATE SET oauth_access_token='',cached_api_token=NULL,api_envelope=NULL,api_token_expires_at=NULL,eshop_url=excluded.eshop_url,contact_email=excluded.contact_email,oauth_envelope=excluded.oauth_envelope,updated_at=CURRENT_TIMESTAMP").bind(shopId,origin,contactEmail??null,envelope),
-    db.prepare("INSERT INTO shoptet_installations(eshop_id,eshop_url,contact_email,oauth_token,status) VALUES(?,?,?,'','active') ON CONFLICT(eshop_id) DO UPDATE SET eshop_url=excluded.eshop_url,contact_email=excluded.contact_email,oauth_token='',status='active',updated_at=CURRENT_TIMESTAMP").bind(Number(shopId),origin,contactEmail??null)
-  ]);
+    db.prepare("INSERT INTO shoptet_installations(eshop_id,eshop_url,contact_email,oauth_token,status) VALUES(?,?,?,'',?) ON CONFLICT(eshop_id) DO UPDATE SET eshop_url=excluded.eshop_url,contact_email=excluded.contact_email,oauth_token='',status=excluded.status,updated_at=CURRENT_TIMESTAMP").bind(Number(shopId),origin,contactEmail??null,installationState),
+    db.prepare("INSERT INTO tenant_settings(shop_id,config_json,version) VALUES(?,'{}',0) ON CONFLICT(shop_id) DO NOTHING").bind(shopId)
+  ];
+  if(callbackHash!==null){
+    if(!/^[a-f0-9]{64}$/.test(callbackHash))throw Error('Invalid callback proof');
+    statements.push(db.prepare("UPDATE shoptet_install_callbacks SET state='succeeded',shop_id=?,completed_at=unixepoch() WHERE code_sha256=? AND state='processing'").bind(shopId,callbackHash));
+  }
+  if(capabilities!==null)statements.push(db.prepare('INSERT INTO tenant_capability_snapshots(shop_id,verified,capabilities_json,checked_at) VALUES(?,?,?,unixepoch()) ON CONFLICT(shop_id) DO UPDATE SET verified=excluded.verified,capabilities_json=excluded.capabilities_json,checked_at=excluded.checked_at').bind(shopId,capabilities.verified?1:0,JSON.stringify(capabilities)));
+  if(installationState==='pending')statements.push(db.prepare("INSERT INTO installation_verification_jobs(shop_id,oauth_sha256,state) VALUES(?,?,'queued') ON CONFLICT(shop_id) DO UPDATE SET oauth_sha256=excluded.oauth_sha256,state='queued',run_id=NULL,attempts=0,error_code=NULL,next_attempt_at=0,updated_at=unixepoch()").bind(shopId,await digest(envelope)));
+  await db.batch(statements);
   return {success:true,shopId};
 }
 

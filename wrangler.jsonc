@@ -27,5 +27,10 @@
         "script_name": "lcode-shoptet-sync-dev"
       }
     ]
+  },
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
   }
 }

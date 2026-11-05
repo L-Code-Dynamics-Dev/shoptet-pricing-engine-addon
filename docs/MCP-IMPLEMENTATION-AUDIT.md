@@ -1,3 +1,7 @@
+# Update: durable installation verification
+
+[INSTALLATION-ONBOARDING.md](INSTALLATION-ONBOARDING.md) documents callback capture within Shoptet's short timeout, operator-configured partner OAuth origin, encrypted pending tenants, asynchronous identity/permission verification, bounded scheduled recovery and reinstall-generation fencing. Migration 0014 was added and tested locally. Real partner settings, callback latency and sandbox installation remain unverified; unsigned uninstall is still denied pending the signed lifecycle integration.
+
 # Update: typed domain operations and diagnostics
 
 [DOMAIN-TOOLS.md](DOMAIN-TOOLS.md) documents the added tier/cap/policy/mapping tools, three additional scoped resources, real permission discovery and tenant diagnostics. These are proposal operations, not implicit native activation or customer assignment. The admin tier renderer no longer interpolates saved names into HTML.

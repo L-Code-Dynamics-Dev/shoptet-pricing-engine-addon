@@ -1,3 +1,4 @@
+import {verifyInstallation} from '../../../packages/core/src/installation-verification.mjs';
 import {createShoptetAdapter} from '../../../packages/core/src/shoptet-adapter.mjs';
 import {getShoptetApiAccessToken} from '../../../packages/core/src/shoptet-oauth.mjs';
 import {syncRuntime} from './sync/runtime.mjs';
@@ -101,7 +102,7 @@ async function sha256Hex(text) {
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-export async function handleAdminSettingsApi(request, env) {
+export async function handleAdminSettingsApi(request, env, ctx=null) {
   const url = new URL(request.url);
   const origin = request.headers.get('origin');
   if (origin && origin !== url.origin) return jsonRes({ error: 'origin_denied' }, 403);
@@ -110,6 +111,13 @@ export async function handleAdminSettingsApi(request, env) {
   if (!identity) return jsonRes({ error: 'unauthorized' }, 401);
   const shopId = identity.shopId;
   const route = url.pathname.replace(/^\/admin\/settings\/api/, '');
+
+  if(route==='/installation/retry'&&request.method==='POST'){
+    const changed=await env.DB.prepare("UPDATE installation_verification_jobs SET state='queued',run_id=NULL,attempts=0,error_code=NULL,next_attempt_at=0,updated_at=unixepoch() WHERE shop_id=? AND state IN('failed','queued') AND EXISTS(SELECT 1 FROM installations WHERE shop_id=? AND state='pending')").bind(shopId,shopId).run();
+    if(!changed.meta?.changes)return jsonRes({error:'verification_not_retryable'},409);
+    if(ctx?.waitUntil)ctx.waitUntil(verifyInstallation({db:env.DB,shopId,tokenKeys:env.SHOPTET_TOKEN_KEYS}));
+    return jsonRes({queued:true});
+  }
 
   if(route.startsWith('/catalog/')){
     const installed=await env.DB.prepare('SELECT state FROM installations WHERE shop_id=?').bind(shopId).first();if(installed?.state!=='active')return jsonRes({error:'inactive_installation'},403);
@@ -201,10 +209,12 @@ export async function handleAdminSettingsApi(request, env) {
 
     return jsonRes({
       shopId,
+      verification:await env.DB.prepare('SELECT state,attempts,error_code,next_attempt_at FROM installation_verification_jobs WHERE shop_id=?').bind(shopId).first(),
       installation: inst || null,
       tiers,
       rules,
       version,
+      currency:config.loyaltyProposal?.currency??null,
       mcpTokens: (tokens.results || []).map(t => ({
         fingerprint: t.fp,
         createdAt: t.created_at,
@@ -273,7 +283,7 @@ export async function handleAdminSettingsApi(request, env) {
 
   if (route === '/mcp-token' && request.method === 'POST') {
     let body;try{body=await request.json();}catch{return jsonRes({error:'invalid_json'},400);}
-    if(!body || Array.isArray(body) || Object.keys(body).some(k=>k!=='permissions') || (body.permissions!==undefined && (!Array.isArray(body.permissions)||body.permissions.some(k=>!['pricing:configure','pricing:execute','sync:execute'].includes(k)))))return jsonRes({error:'invalid_permissions'},400);
+    if(!body || Array.isArray(body) || Object.keys(body).some(k=>k!=='permissions') || (body.permissions!==undefined && (!Array.isArray(body.permissions)||body.permissions.some(k=>!['pricing:configure','pricing:execute','sync:execute','audit:read'].includes(k)))))return jsonRes({error:'invalid_permissions'},400);
     const scopes=[...MCP_UI_SCOPES,...new Set(body.permissions||[])];
     const raw = new Uint8Array(24);
     crypto.getRandomValues(raw);
@@ -765,7 +775,7 @@ export function renderAdminHtml(eshopId, auth) {
       </table>
 
       <div style="display: flex; gap: 10px; align-items: center; margin: 16px 0;">
-        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-sync"> Povolit spouštění synchronizačních úloh</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odvolat ruční klíče</button>
+        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-audit"> Povolit čtení historie změn</label><label><input type="checkbox" id="permission-sync"> Povolit spouštění synchronizačních úloh</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odvolat ruční klíče</button>
         <button type="button" class="btn-shoptet-green" id="token-new">Vygenerovat nový klíč pro MCP</button>
         <span style="color: #777777; font-size: 12px;">Vygenerováním se všechny dosavadní klíče automaticky zneplatní.</span>
       </div>
@@ -778,7 +788,7 @@ export function renderAdminHtml(eshopId, auth) {
     </section>
 
     <!-- Tab 4: Přehled -->
-    <section class="panel" id="panel-overview">
+    <section class="panel" id="panel-overview"><p id="onboarding-status" role="status"></p><button type="button" id="onboarding-retry" hidden>Zopakovat ověření připojení</button>
       <p class="tab-intro">Základní přehled o stavu propojení věrnostního systému s vaším e-shopem.</p>
 
       <div class="section-heading">Stav propojení s e-shopem</div>
@@ -877,18 +887,24 @@ export function renderAdminHtml(eshopId, auth) {
     /* Overview */
     function renderOverview() {
       const i = state.installation || {};
+      const onboarding=$('onboarding-status');onboarding.textContent=i.state==='active'?'Instalace ověřena.':i.state==='pending'?'Probíhá ověření instalace. AI přístup se povolí až po ověření obchodu.':'Instalace není aktivní.';
+      if(state.verification?.error_code)onboarding.textContent+=' Chyba: '+state.verification.error_code;
+      $('onboarding-retry').hidden=i.state!=='pending';$('token-new').disabled=i.state!=='active';
+      if(i.state==='pending'&&state.verification?.state!=='failed'){clearTimeout(window.onboardingTimer);window.onboardingTimer=setTimeout(async()=>{try{state=await api('/state');renderOverview();}catch{}},5000);}
+
       $('ov-url').value = i.eshop_url || 'https://' + BOOT.shopId + '.myshoptet.com/';
-      $('ov-email').value = i.contact_email || 'ceo@l-code-dynamics.com';
-      $('ov-tiers').textContent = state.tiers.length ? state.tiers.length + ' aktivních věrnostních ceníků' : 'Zatím nenastaveny';
+      $('ov-email').value = i.contact_email || '';
+      $('ov-tiers').textContent = state.tiers.length ? state.tiers.length + ' uložených návrhů úrovní' : 'Zatím nenastaveny';
     }
 
     /* Tiers table */
     function tierRow(t = { name: '', percent: '', minTurnover: '' }) {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td><input type="text" class="input-text w-full tier-name" placeholder="např. Věrnostní sleva 4 %" value="' + (t.name || '') + '"></td>' +
-        '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-small tier-percent" min="0.01" max="100" step="0.01" value="' + (t.percent ?? '') + '"><span class="unit">%</span></div></td>' +
-        '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-med tier-turnover" min="0" step="1" value="' + (t.minTurnover ?? '') + '"><span class="unit">Kč</span></div></td>' +
-        '<td><button type="button" class="btn-remove tier-remove" title="Smazat ceník">×</button></td>';
+      tr.innerHTML = '<td><input type="text" class="input-text w-full tier-name" placeholder="Název úrovně"></td>' +
+        '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-small tier-percent" min="0.01" max="100" step="0.01"><span class="unit">%</span></div></td>' +
+        '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-med tier-turnover" min="0" step="1"><span class="unit tier-currency"></span></div></td>' +
+        '<td><button type="button" class="btn-remove tier-remove" title="Smazat úroveň">×</button></td>';
+      tr.querySelector('.tier-name').value=t.name||'';tr.querySelector('.tier-percent').value=t.percent??'';tr.querySelector('.tier-turnover').value=t.minTurnover??'';tr.querySelector('.tier-currency').textContent=state.currency||'měna obchodu';
       tr.querySelector('.tier-remove').addEventListener('click', () => { tr.remove(); resize(); });
       return tr;
     }
@@ -1045,7 +1061,7 @@ export function renderAdminHtml(eshopId, auth) {
       if (state.mcpTokens.length && !confirm('Vygenerovat nový klíč pro MCP? Všechny dosavadní klíče přestanou fungovat.')) return;
       const btn = $('token-new'); btn.disabled = true;
       try {
-        const permissions=[];if($('permission-sync').checked)permissions.push('sync:execute');if($('permission-configure').checked)permissions.push('pricing:configure');if($('permission-execute').checked)permissions.push('pricing:execute');
+        const permissions=[];if($('permission-audit').checked)permissions.push('audit:read');if($('permission-sync').checked)permissions.push('sync:execute');if($('permission-configure').checked)permissions.push('pricing:configure');if($('permission-execute').checked)permissions.push('pricing:execute');
         const res = await api('/mcp-token', { method: 'POST', body: JSON.stringify({permissions}) });
         const fresh = await api('/state');
         state = fresh; renderTokens(); renderOverview();
@@ -1103,6 +1119,8 @@ export function renderAdminHtml(eshopId, auth) {
         const history=await api('/sync/history');for(const job of history.jobs){const row=document.createElement('p');row.textContent=job.job_id+' — '+job.mode+' — '+job.state+(job.error_code?' — '+job.error_code:'');root.append(row);}if(!data.approvals.length&&!history.jobs.length)root.append(document.createTextNode('Žádné plány ani synchronizační úlohy.'));
       }catch{root.append(document.createTextNode('Synchronizace není dostupná; ověřte migraci 0013 a konfiguraci koordinátoru.'));}resize();
     }
+
+    $('onboarding-retry').addEventListener('click',async()=>{try{await api('/installation/retry',{method:'POST',body:'{}'});state=await api('/state');renderOverview();}catch(e){flash(e.message,true);}});
 
     /* Boot */
     (async () => {

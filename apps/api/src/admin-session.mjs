@@ -76,12 +76,9 @@ async function loadInstalledShop(db, shopId) {
   `).bind(shopId).first();
 }
 
-function oauthBase(eshopUrl, shopId) {
-  try {
-    return `${new URL(eshopUrl).origin}/action/OAuthServer/`;
-  } catch {
-    return `https://${shopId}.myshoptet.com/action/OAuthServer/`;
-  }
+function oauthBase(eshopUrl,shopId){
+  if(!isValidShopId(shopId))throw Error('invalid_shop_id');
+  return `https://${shopId}.myshoptet.com/action/OAuthServer/`;
 }
 
 /**
@@ -94,12 +91,12 @@ export async function verifyShoptetAdmin({ code, shopId, env, redirectUri, fetch
   if (!env.SHOPTET_CLIENT_ID || !env.SHOPTET_CLIENT_SECRET) return { ok: false, reason: 'client_not_configured' };
 
   const shop = await loadInstalledShop(env.DB, shopId);
-  if (!shop || shop.state !== 'active') return { ok: false, reason: 'not_installed' };
+  if (!shop || !['active','pending'].includes(shop.state)) return { ok: false, reason: 'not_installed' };
 
   const base = oauthBase(shop.eshop_url, shopId);
 
   const tokenRes = await fetchImpl(`${base}token`, {
-    method: 'POST',
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: new URLSearchParams({
       code,
@@ -116,6 +113,7 @@ export async function verifyShoptetAdmin({ code, shopId, env, redirectUri, fetch
   if (!tokenData?.access_token) return { ok: false, reason: 'token_missing' };
 
   const resRes = await fetchImpl(`${base}resource?method=getBasicEshop`, {
+    redirect:'error',signal:AbortSignal.timeout(10000),
     headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: 'application/json' }
   });
   if (!resRes.ok) return { ok: false, reason: `resource_${resRes.status}` };

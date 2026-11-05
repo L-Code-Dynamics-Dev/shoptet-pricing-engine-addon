@@ -1,3 +1,4 @@
+import {retryInstallations} from '../../../packages/core/src/installation-verification.mjs';
 import {handleOAuth} from './oauth/routes.mjs';
 import { handleMerchantMcp } from './mcp/gateway.mjs';
 import { handleMcp, handleMcpSse, handleMcpMessage } from './mcp/server.mjs';
@@ -11,7 +12,8 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), {
 });
 
 export default {
-  async fetch(request, env) {
+  async scheduled(controller,env){await retryInstallations(env);},
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith('/oauth/') || url.pathname.startsWith('/.well-known/oauth-')) return handleOAuth(request,env);
@@ -29,7 +31,7 @@ export default {
       return handleAdminSettingsIframe(request, env);
     }
     if (url.pathname.startsWith('/admin/settings/api/')) {
-      return handleAdminSettingsApi(request, env);
+      return handleAdminSettingsApi(request, env, ctx);
     }
 
     // Health check
@@ -44,7 +46,7 @@ export default {
 
     // Shoptet OAuth installation endpoint (redirect_uri)
     if (url.pathname === '/shoptet/install') {
-      return handleShoptetInstall(request, env);
+      return handleShoptetInstall(request, env, fetch, ctx);
     }
 
     // Unauthenticated legacy shop-ID endpoints cannot manage or inspect tenants.
