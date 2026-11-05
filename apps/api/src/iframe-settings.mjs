@@ -392,11 +392,11 @@ function renderApp({ shopId, session, mode }) {
     </div>
 
     <div class="form-row">
-      <span class="label">Omezení kumulace kupónu s věrností</span>
+      <span class="label">Sčítání slevového kupónu s věrností</span>
       <div>
         <label style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
           <input type="checkbox" id="rule-coupon-min-price-ratio" checked style="width:16px;height:16px;cursor:pointer;">
-          <span>U nižších hladin omezit zbývající slevu na kupón tak, aby součet věrnostní slevy a kupónu nepřekročil povolený limit marže.</span>
+          <span>U nižších hladin omezit slevu z kupónu tak, aby sečtení obou slev nepřekročilo tvůj maržový strop na zboží.</span>
         </label>
       </div>
     </div>
