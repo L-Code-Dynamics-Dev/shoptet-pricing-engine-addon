@@ -78,9 +78,10 @@ test('saveShoptetInstallation saves shop record in D1 tables', async () => {
 
   assert.equal(res.success, true);
   assert.equal(res.shopId, '826800');
-  assert.equal(executed.length, 2);
+  assert.equal(executed.length, 3);
   assert.match(executed[0].query, /INSERT INTO installations/);
   assert.match(executed[1].query, /INSERT INTO shoptet_oauth/);
+  assert.match(executed[2].query, /INSERT INTO shoptet_installations/);
 });
 
 test('getShoptetApiAccessToken requests short-term api access token and caches it', async () => {

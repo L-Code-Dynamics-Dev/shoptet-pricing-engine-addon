@@ -1,465 +1,521 @@
 /**
- * L-Code Loyalty Pricing Engine — Native Shoptet Admin Console
- * Built for Shoptet Marketplace with native light administration aesthetic:
- * --bg-page: #f4f6f8; --primary: #008060; crisp metric cards, 1-click MCP copy,
- * active loyalty tiers table, and margin guardrails.
+ * L-Code Loyalty Pricing Engine — addon settings page embedded in Shoptet administration.
+ * Visual language mirrors Shoptet admin (light-blue headings, tabs, green "Uložit").
+ * Only real data from D1 is shown; tiers are editable; MCP tokens are shown once at creation.
  */
+import { authorizeSettingsPage, verifySession, bearerFrom } from './admin-session.mjs';
 
-export function verifyShoptetSignature(eshopId, timestamp, signature, clientSecret) {
-  return true;
+const FRAME_ANCESTORS = "'self' https://*.myshoptet.com https://*.shoptet.cz https://*.shoptet.sk https://admin.shoptet.cz";
+const MCP_UI_SCOPES = ['installation:read', 'pricing:preview', 'assets:preview', 'shoptet:read', 'shoptet:write', 'pricing:sync'];
+const MAX_TIERS = 10;
+
+const jsonRes = (data, status = 200) => new Response(JSON.stringify(data), {
+  status,
+  headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }
+});
+
+const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function htmlHeaders(nonce) {
+  return {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors ${FRAME_ANCESTORS};`,
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Cache-Control': 'no-store'
+  };
+}
+
+/* ---------------------------------------------------------------- validation */
+
+export function validateTiers(input) {
+  if (!Array.isArray(input) || input.length === 0) return { error: 'Zadejte alespoň jednu hladinu.' };
+  if (input.length > MAX_TIERS) return { error: `Maximálně ${MAX_TIERS} hladin.` };
+  const tiers = [];
+  const names = new Set();
+  for (let i = 0; i < input.length; i++) {
+    const t = input[i];
+    const row = `Řádek ${i + 1}: `;
+    if (!t || typeof t !== 'object' || Array.isArray(t)) return { error: row + 'neplatná data.' };
+    const extra = Object.keys(t).filter(k => !['name', 'percent', 'minTurnover'].includes(k));
+    if (extra.length) return { error: row + 'neznámá pole.' };
+    const name = typeof t.name === 'string' ? t.name.trim() : '';
+    if (name.length < 1 || name.length > 60) return { error: row + 'název musí mít 1–60 znaků.' };
+    if (names.has(name.toLowerCase())) return { error: row + 'duplicitní název.' };
+    names.add(name.toLowerCase());
+    const percent = Number(t.percent);
+    if (!Number.isFinite(percent) || percent <= 0 || percent > 100 || Math.abs(Math.round(percent * 100) - percent * 100) > 1e-9) {
+      return { error: row + 'sleva musí být číslo 0,01–100 (max. 2 desetinná místa).' };
+    }
+    const minTurnover = Number(t.minTurnover);
+    if (!Number.isSafeInteger(minTurnover) || minTurnover < 0) return { error: row + 'obrat musí být celé číslo ≥ 0.' };
+    if (tiers.length && minTurnover <= tiers[tiers.length - 1].minTurnover) {
+      return { error: row + 'obrat musí být vyšší než u předchozí hladiny.' };
+    }
+    tiers.push({ name, percent, minTurnover });
+  }
+  return { tiers };
+}
+
+/* ---------------------------------------------------------------- API */
+
+async function requireSession(request, env) {
+  const secret = env.ADMIN_SESSION_SECRET || env.VAULT_MASTER_KEY || env.SHOPTET_CLIENT_SECRET;
+  if (!secret) return null;
+  return verifySession(bearerFrom(request), secret);
+}
+
+function parseConfig(row) {
+  let config = {};
+  if (row?.config_json) { try { config = JSON.parse(row.config_json) || {}; } catch { config = {}; } }
+  return { config, version: row?.version ?? 0 };
+}
+
+async function sha256Hex(text) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function handleAdminSettingsApi(request, env) {
+  const url = new URL(request.url);
+  const origin = request.headers.get('origin');
+  if (origin && origin !== url.origin) return jsonRes({ error: 'origin_denied' }, 403);
+
+  const identity = await requireSession(request, env);
+  if (!identity) return jsonRes({ error: 'unauthorized' }, 401);
+  const shopId = identity.shopId;
+  const route = url.pathname.replace(/^\/admin\/settings\/api/, '');
+
+  if (route === '/state' && request.method === 'GET') {
+    const inst = await env.DB.prepare(`
+      SELECT i.state, i.created_at, i.updated_at, o.eshop_url, o.contact_email
+      FROM installations i LEFT JOIN shoptet_oauth o ON o.shop_id = i.shop_id
+      WHERE i.shop_id = ?
+    `).bind(shopId).first();
+    const { config, version } = parseConfig(await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(shopId).first());
+    const tokens = await env.DB.prepare(`
+      SELECT substr(token_sha256, 1, 8) AS fp, scopes_json, created_at, expires_at
+      FROM mcp_credentials
+      WHERE shop_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+      ORDER BY created_at DESC
+    `).bind(shopId).all();
+    return jsonRes({
+      shopId,
+      installation: inst || null,
+      tiers: Array.isArray(config.tiers) ? config.tiers : [],
+      version,
+      mcpTokens: (tokens.results || []).map(t => ({
+        fingerprint: t.fp,
+        createdAt: t.created_at,
+        expiresAt: t.expires_at,
+        scopes: (() => { try { return JSON.parse(t.scopes_json); } catch { return []; } })()
+      })),
+      mcpEndpoint: `${url.origin}/mcp/sse`
+    });
+  }
+
+  if (route === '/tiers' && request.method === 'PUT') {
+    let body;
+    try { body = await request.json(); } catch { return jsonRes({ error: 'Neplatný JSON.' }, 400); }
+    if (!body || !Number.isSafeInteger(body.version) || body.version < 0) return jsonRes({ error: 'Chybí verze nastavení.' }, 400);
+    const v = validateTiers(body.tiers);
+    if (v.error) return jsonRes({ error: v.error }, 422);
+
+    const current = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
+    const { config, version } = parseConfig(current);
+    if (version !== body.version) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.', version }, 409);
+    const next = { ...config, tiers: v.tiers };
+
+    let result;
+    if (current) {
+      result = await env.DB.prepare('UPDATE tenant_settings SET config_json = ?, version = version + 1 WHERE shop_id = ? AND version = ?')
+        .bind(JSON.stringify(next), shopId, version).run();
+    } else {
+      result = await env.DB.prepare('INSERT INTO tenant_settings (shop_id, config_json, version) VALUES (?, ?, 1) ON CONFLICT(shop_id) DO NOTHING')
+        .bind(shopId, JSON.stringify(next)).run();
+    }
+    if (!result?.meta?.changes) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.' }, 409);
+    return jsonRes({ status: 'saved', tiers: v.tiers, version: version + 1 });
+  }
+
+  if (route === '/mcp-token' && request.method === 'POST') {
+    const raw = new Uint8Array(24);
+    crypto.getRandomValues(raw);
+    const token = 'lcode_mcp_' + [...raw].map(b => b.toString(16).padStart(2, '0')).join('');
+    const digest = await sha256Hex(token);
+    await env.DB.batch([
+      env.DB.prepare('UPDATE mcp_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE shop_id = ? AND revoked_at IS NULL').bind(shopId),
+      env.DB.prepare('INSERT INTO mcp_credentials (token_sha256, shop_id, scopes_json) VALUES (?, ?, ?)').bind(digest, shopId, JSON.stringify(MCP_UI_SCOPES))
+    ]);
+    return jsonRes({ token, fingerprint: digest.slice(0, 8), scopes: MCP_UI_SCOPES });
+  }
+
+  return jsonRes({ error: 'not_found' }, 404);
+}
+
+/* ---------------------------------------------------------------- pages */
+
+const BASE_CSS = `
+  :root {
+    --blue: #25a9e0; --blue-dark: #1b8fc0;
+    --green: #79b928; --green-dark: #65a01c;
+    --border: #cfcfcf; --border-light: #e4e4e4;
+    --text: #333333; --muted: #777777;
+    --tab-bg: #f3f3f3; --row-alt: #fafafa; --red: #d9534f;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { background: #ffffff; color: var(--text); font: 13px/1.5 Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif; padding: 20px 22px 28px; }
+  h1 { margin: 0 0 22px; color: var(--blue); font-size: 32px; font-weight: 300; line-height: 1.2; }
+  .section-title { display: flex; align-items: center; gap: 14px; margin: 26px 0 14px; color: var(--blue); font-size: 20px; font-weight: 300; }
+  .section-title::after { content: ""; flex: 1; height: 1px; background: var(--border-light); }
+  .btn { display: inline-block; border: 0; border-radius: 0; padding: 7px 11px; font: 600 12px/1.2 inherit; font-family: inherit; color: #fff; cursor: pointer; text-decoration: none; }
+  .btn-green { background: var(--green); } .btn-green:hover { background: var(--green-dark); }
+  .btn-blue { background: var(--blue); } .btn-blue:hover { background: var(--blue-dark); }
+  .btn-link { background: none; color: var(--blue); padding: 0; font-weight: 400; }
+  .btn-link:hover { text-decoration: underline; }
+  .btn[disabled] { opacity: .55; cursor: default; }
+  .alert { display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--green); border-radius: 3px; padding: 13px 18px; margin-bottom: 18px; background: #fff; }
+  .alert-icon { color: var(--green); font-weight: 700; }
+  .alert.error { border-color: var(--red); } .alert.error .alert-icon { color: var(--red); }
+  .alert.warn { border-color: #f0a30a; } .alert.warn .alert-icon { color: #f0a30a; }
+  code { font-family: Menlo, Consolas, monospace; font-size: 12px; background: #f5f5f5; padding: 1px 4px; }
+`;
+
+function renderErrorPage(error, status) {
+  const nonce = crypto.randomUUID().replace(/-/g, '');
+  const messages = {
+    missing_code: 'Stránku otevřete z administrace Shoptetu: <strong>Propojení → L-Code Loyalty Pricing Engine</strong>. Přímý odkaz bez přihlášení nefunguje.',
+    missing_eshop_id: 'V adrese chybí parametr <code>eshopId</code>.',
+    not_installed: 'Doplněk není na tomto e-shopu nainstalovaný.',
+    invalid_preview_key: 'Neplatný náhledový klíč.',
+    shop_mismatch: 'Přihlášený uživatel nepatří k tomuto e-shopu.',
+    session_secret_not_configured: 'Server není nakonfigurovaný (chybí ADMIN_SESSION_SECRET).',
+    client_not_configured: 'Server není nakonfigurovaný (chybí OAuth klient).'
+  };
+  const msg = messages[error] || `Ověření uživatele se nezdařilo (<code>${escapeHtml(error)}</code>). Zkuste stránku otevřít znovu z administrace.`;
+  return new Response(`<!DOCTYPE html><html lang="cs"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>L-Code Loyalty Pricing Engine</title><style>${BASE_CSS}</style></head><body>
+<h1>L-Code Loyalty Pricing Engine</h1>
+<div class="alert error"><span class="alert-icon">!</span><div>${msg}</div></div>
+<script nonce="${nonce}">
+  function h(){window.parent.postMessage({action:'shoptet.resize',height:document.documentElement.scrollHeight},'*');}
+  addEventListener('load',h);
+</script></body></html>`, { status, headers: htmlHeaders(nonce) });
+}
+
+function renderApp({ shopId, session, mode }) {
+  const nonce = crypto.randomUUID().replace(/-/g, '');
+  const boot = JSON.stringify({ shopId, session, mode }).replace(/</g, '\\u003c');
+
+  return new Response(`<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>L-Code Loyalty Pricing Engine</title>
+<style>
+  ${BASE_CSS}
+  .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+  .tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  .tab { background: var(--tab-bg); border: 1px solid var(--border); border-bottom: 0; margin-right: -1px; padding: 9px 16px 8px; font: 12px/1.2 inherit; font-family: inherit; color: var(--text); cursor: pointer; border-top: 3px solid transparent; position: relative; top: 1px; }
+  .tab:hover { background: #fafafa; }
+  .tab.active { background: #fff; border-top-color: var(--green); padding-bottom: 9px; }
+  .panel { display: none; } .panel.active { display: block; }
+  .form-row { display: grid; grid-template-columns: minmax(160px, 300px) 1fr; gap: 6px 16px; align-items: center; padding: 6px 0; }
+  .form-row > label, .form-row > .label { text-align: right; font-size: 12px; }
+  .form-row .value { font-size: 12px; word-break: break-all; }
+  @media (max-width: 640px) { .form-row { grid-template-columns: 1fr; } .form-row > .label { text-align: left; color: var(--muted); } }
+  table.grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.grid th { text-align: left; font-weight: 700; background: #f2f2f2; padding: 9px 10px; border-bottom: 2px solid var(--blue); }
+  table.grid td { padding: 7px 10px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
+  table.grid tbody tr:nth-child(even) td { background: var(--row-alt); }
+  table.grid input { width: 100%; height: 26px; border: 1px solid var(--border); border-radius: 0; padding: 3px 7px; font: 12px inherit; font-family: inherit; color: var(--text); background: #fff; }
+  table.grid input:focus { outline: 0; border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
+  table.grid input.num { text-align: right; max-width: 140px; }
+  .unit { color: var(--muted); margin-left: 6px; }
+  .cell-inline { display: flex; align-items: center; }
+  .pill { display: inline-block; background: var(--green); color: #fff; border-radius: 9px; padding: 1px 8px; font-size: 11px; font-weight: 600; margin: 1px 2px 1px 0; }
+  .pill.grey { background: #9e9e9e; }
+  .remove { color: var(--red); background: none; border: 0; cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 6px; }
+  .actions { display: flex; gap: 6px; align-items: center; margin-top: 14px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  pre.snippet { background: #f7f7f7; border: 1px solid var(--border-light); padding: 12px 14px; font: 12px/1.5 Menlo, Consolas, monospace; overflow-x: auto; margin: 8px 0 0; white-space: pre; }
+  .token-box { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+  .token-box input { flex: 1; height: 28px; border: 1px solid var(--green); padding: 3px 8px; font: 12px Menlo, Consolas, monospace; }
+  .empty { color: var(--muted); padding: 14px 10px; }
+  .muted { color: var(--muted); }
+  .loading { color: var(--muted); padding: 30px 0; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>L-Code Loyalty Pricing Engine</h1>
+  </div>
+
+  <div id="flash"></div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="overview" role="tab">Přehled</button>
+    <button class="tab" data-tab="tiers" role="tab">Věrnostní hladiny</button>
+    <button class="tab" data-tab="mcp" role="tab">AI agent (MCP)</button>
+  </div>
+
+  <div id="loading" class="loading">Načítám…</div>
+
+  <section class="panel" id="panel-overview">
+    <div class="section-title">Stav instalace</div>
+    <div class="form-row"><span class="label">E-shop ID</span><span class="value" id="ov-shop"></span></div>
+    <div class="form-row"><span class="label">Adresa e-shopu</span><span class="value" id="ov-url"></span></div>
+    <div class="form-row"><span class="label">Stav doplňku</span><span class="value" id="ov-state"></span></div>
+    <div class="form-row"><span class="label">Nainstalováno</span><span class="value" id="ov-created"></span></div>
+    <div class="form-row"><span class="label">Poslední změna instalace</span><span class="value" id="ov-updated"></span></div>
+    <div class="form-row"><span class="label">Kontaktní e-mail</span><span class="value" id="ov-email"></span></div>
+    <div class="section-title">Souhrn</div>
+    <div class="form-row"><span class="label">Věrnostní hladiny</span><span class="value" id="ov-tiers"></span></div>
+    <div class="form-row"><span class="label">Aktivní MCP tokeny</span><span class="value" id="ov-tokens"></span></div>
+    <div class="form-row"><span class="label">Synchronizace cen</span><span class="value">Ceny se do Shoptetu zapisují vždy s DPH a explicitní sazbou (<code>includingVat</code> + <code>vatRate</code>).</span></div>
+  </section>
+
+  <section class="panel" id="panel-tiers">
+    <div class="section-title">Věrnostní hladiny</div>
+    <table class="grid">
+      <thead><tr><th style="width:38%">Název hladiny</th><th>Sleva</th><th>Obrat od</th><th style="width:40px"></th></tr></thead>
+      <tbody id="tiers-body"></tbody>
+    </table>
+    <p class="hint">Zákazník dostane slevu nejvyšší hladiny, jejíhož obratu dosáhl. Je-li akční cena produktu nižší než věrnostní, platí akční cena.</p>
+    <div class="actions">
+      <button class="btn btn-green" id="tiers-save">Uložit</button>
+      <button class="btn btn-blue" id="tiers-add">Přidat hladinu</button>
+      <span class="muted" id="tiers-version"></span>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-mcp">
+    <div class="section-title">Přístup pro AI agenta</div>
+    <p style="margin:0 0 10px">Připojte Claude Desktop, Cursor nebo jiného MCP klienta a spravujte hladiny a ceny přirozeným jazykem.</p>
+    <table class="grid">
+      <thead><tr><th>Token</th><th>Vytvořen</th><th>Oprávnění</th></tr></thead>
+      <tbody id="tokens-body"></tbody>
+    </table>
+    <div class="actions">
+      <button class="btn btn-blue" id="token-new">Vygenerovat nový token</button>
+      <span class="muted">Vygenerováním se všechny dosavadní tokeny zneplatní.</span>
+    </div>
+    <div id="token-result"></div>
+    <div class="section-title">Konfigurace klienta</div>
+    <p style="margin:0">Vložte do <code>claude_desktop_config.json</code> (Mac: <code>~/Library/Application Support/Claude/</code>, Windows: <code>%APPDATA%\\Claude\\</code>):</p>
+    <pre class="snippet" id="mcp-snippet"></pre>
+  </section>
+
+<script nonce="${nonce}">
+(() => {
+  const BOOT = ${boot};
+  const $ = id => document.getElementById(id);
+  let state = null;
+
+  function resize() {
+    window.parent.postMessage({ action: 'shoptet.resize', height: document.documentElement.scrollHeight }, '*');
+  }
+  addEventListener('load', resize);
+  addEventListener('resize', resize);
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(document.body);
+
+  function flash(msg, kind) {
+    const box = $('flash');
+    box.textContent = '';
+    if (!msg) return;
+    const el = document.createElement('div');
+    el.className = 'alert' + (kind === 'error' ? ' error' : kind === 'warn' ? ' warn' : '');
+    const icon = document.createElement('span');
+    icon.className = 'alert-icon';
+    icon.textContent = kind === 'error' || kind === 'warn' ? '!' : '✓';
+    const text = document.createElement('div');
+    text.textContent = msg;
+    el.append(icon, text);
+    box.append(el);
+    if (kind !== 'error') setTimeout(() => { if (box.firstChild === el) box.textContent = ''; }, 5000);
+  }
+
+  async function api(path, opts = {}) {
+    const res = await fetch('/admin/settings/api' + path, {
+      ...opts,
+      headers: { 'Authorization': 'Bearer ' + BOOT.session, 'Content-Type': 'application/json', ...(opts.headers || {}) }
+    });
+    let data = {};
+    try { data = await res.json(); } catch {}
+    if (res.status === 401) throw new Error('Platnost přihlášení vypršela. Otevřete doplněk znovu z administrace Shoptetu.');
+    if (!res.ok) throw new Error(data.error || ('Chyba serveru (' + res.status + ').'));
+    return data;
+  }
+
+  const fmtDate = s => {
+    if (!s) return '—';
+    const d = new Date(String(s).replace(' ', 'T') + 'Z');
+    return isNaN(d) ? s : d.toLocaleString('cs-CZ', { day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+  const stateLabel = { active: 'Aktivní', pending: 'Čeká na aktivaci', suspended: 'Pozastaveno', uninstalled: 'Odinstalováno' };
+
+  /* tabs */
+  document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + btn.dataset.tab));
+    resize();
+  }));
+
+  /* overview */
+  function renderOverview() {
+    const i = state.installation || {};
+    $('ov-shop').textContent = state.shopId;
+    $('ov-url').textContent = i.eshop_url || '—';
+    const st = document.createElement('span');
+    st.className = 'pill' + (i.state === 'active' ? '' : ' grey');
+    st.textContent = stateLabel[i.state] || i.state || 'Neznámý';
+    $('ov-state').replaceChildren(st);
+    $('ov-created').textContent = fmtDate(i.created_at);
+    $('ov-updated').textContent = fmtDate(i.updated_at);
+    $('ov-email').textContent = i.contact_email || '—';
+    $('ov-tiers').textContent = state.tiers.length ? state.tiers.length + ' (verze nastavení ' + state.version + ')' : 'Zatím nenastaveny';
+    $('ov-tokens').textContent = String(state.mcpTokens.length);
+  }
+
+  /* tiers */
+  function tierRow(t = { name: '', percent: '', minTurnover: '' }) {
+    const tr = document.createElement('tr');
+    const mk = (cls, val, type, unit, attrs = {}) => {
+      const td = document.createElement('td');
+      const wrap = document.createElement('div');
+      wrap.className = 'cell-inline';
+      const inp = document.createElement('input');
+      inp.type = type; inp.className = cls; inp.value = val;
+      Object.entries(attrs).forEach(([k, v]) => inp.setAttribute(k, v));
+      wrap.append(inp);
+      if (unit) { const u = document.createElement('span'); u.className = 'unit'; u.textContent = unit; wrap.append(u); }
+      td.append(wrap);
+      return td;
+    };
+    tr.append(
+      mk('name', t.name, 'text', '', { maxlength: '60', placeholder: 'např. VIP Zlato' }),
+      mk('num percent', t.percent, 'number', '%', { min: '0.01', max: '100', step: '0.01' }),
+      mk('num turnover', t.minTurnover, 'number', 'Kč', { min: '0', step: '1' })
+    );
+    const td = document.createElement('td');
+    const rm = document.createElement('button');
+    rm.className = 'remove'; rm.title = 'Odebrat'; rm.textContent = '×';
+    rm.addEventListener('click', () => { tr.remove(); if (!$('tiers-body').children.length) emptyTiers(); resize(); });
+    td.append(rm);
+    tr.append(td);
+    return tr;
+  }
+  function emptyTiers() {
+    const tr = document.createElement('tr'); tr.className = 'empty-row';
+    const td = document.createElement('td'); td.colSpan = 4; td.className = 'empty';
+    td.textContent = 'Zatím žádné hladiny. Klikněte na „Přidat hladinu“.';
+    tr.append(td); $('tiers-body').append(tr);
+  }
+  function renderTiers() {
+    const body = $('tiers-body');
+    body.textContent = '';
+    if (!state.tiers.length) emptyTiers();
+    state.tiers.forEach(t => body.append(tierRow(t)));
+    $('tiers-version').textContent = state.version ? 'Verze nastavení: ' + state.version : '';
+  }
+  $('tiers-add').addEventListener('click', () => {
+    const body = $('tiers-body');
+    body.querySelector('.empty-row')?.remove();
+    if (body.children.length >= 10) return flash('Maximálně 10 hladin.', 'warn');
+    const row = tierRow();
+    body.append(row);
+    row.querySelector('input').focus();
+    resize();
+  });
+  $('tiers-save').addEventListener('click', async () => {
+    const rows = [...$('tiers-body').querySelectorAll('tr:not(.empty-row)')];
+    const tiers = rows.map(r => ({
+      name: r.querySelector('.name').value,
+      percent: r.querySelector('.percent').value === '' ? NaN : Number(r.querySelector('.percent').value),
+      minTurnover: r.querySelector('.turnover').value === '' ? NaN : Number(r.querySelector('.turnover').value)
+    }));
+    const btn = $('tiers-save');
+    btn.disabled = true;
+    try {
+      const res = await api('/tiers', { method: 'PUT', body: JSON.stringify({ tiers, version: state.version }) });
+      state.tiers = res.tiers; state.version = res.version;
+      renderTiers(); renderOverview();
+      flash('Věrnostní hladiny byly uloženy.');
+    } catch (e) { flash(e.message, 'error'); }
+    finally { btn.disabled = false; resize(); }
+  });
+
+  /* mcp */
+  function snippet(token) {
+    return JSON.stringify({ mcpServers: { 'shoptet-pricing': { command: 'npx', args: ['-y', 'mcp-remote', state.mcpEndpoint, '--header', 'Authorization: Bearer ' + (token || '<VÁŠ_TOKEN>')] } } }, null, 2);
+  }
+  function renderTokens() {
+    const body = $('tokens-body');
+    body.textContent = '';
+    if (!state.mcpTokens.length) {
+      const tr = document.createElement('tr'); const td = document.createElement('td');
+      td.colSpan = 3; td.className = 'empty'; td.textContent = 'Žádný aktivní token.';
+      tr.append(td); body.append(tr);
+    }
+    state.mcpTokens.forEach(t => {
+      const tr = document.createElement('tr');
+      const a = document.createElement('td'); a.innerHTML = '<code></code>'; a.firstChild.textContent = 'lcode_mcp_…  (' + t.fingerprint + ')';
+      const b = document.createElement('td'); b.textContent = fmtDate(t.createdAt);
+      const c = document.createElement('td');
+      (t.scopes || []).forEach(s => { const p = document.createElement('span'); p.className = 'pill'; p.textContent = s; c.append(p); });
+      tr.append(a, b, c); body.append(tr);
+    });
+    $('mcp-snippet').textContent = snippet(null);
+  }
+  $('token-new').addEventListener('click', async () => {
+    if (state.mcpTokens.length && !confirm('Vygenerovat nový token? Všechny dosavadní tokeny přestanou fungovat.')) return;
+    const btn = $('token-new'); btn.disabled = true;
+    try {
+      const res = await api('/mcp-token', { method: 'POST', body: '{}' });
+      const fresh = await api('/state');
+      state = fresh; renderTokens(); renderOverview();
+      const box = $('token-result'); box.textContent = '';
+      const al = document.createElement('div'); al.className = 'alert'; al.style.marginTop = '14px';
+      const icon = document.createElement('span'); icon.className = 'alert-icon'; icon.textContent = '✓';
+      const inner = document.createElement('div'); inner.style.flex = '1';
+      inner.append('Token byl vytvořen. Zkopírujte si ho hned – znovu už zobrazit nepůjde.');
+      const tb = document.createElement('div'); tb.className = 'token-box';
+      const inp = document.createElement('input'); inp.readOnly = true; inp.value = res.token;
+      const cp = document.createElement('button'); cp.className = 'btn btn-green'; cp.textContent = 'Kopírovat';
+      cp.addEventListener('click', () => { inp.select(); navigator.clipboard?.writeText(res.token).then(() => { cp.textContent = 'Zkopírováno'; }).catch(() => document.execCommand('copy')); });
+      tb.append(inp, cp); inner.append(tb);
+      al.append(icon, inner); box.append(al);
+      $('mcp-snippet').textContent = snippet(res.token);
+    } catch (e) { flash(e.message, 'error'); }
+    finally { btn.disabled = false; resize(); }
+  });
+
+  /* boot */
+  (async () => {
+    try {
+      state = await api('/state');
+      $('loading').remove();
+      $('panel-overview').classList.add('active');
+      renderOverview(); renderTiers(); renderTokens();
+      if (BOOT.mode === 'preview') flash('Náhledový režim (bez přihlášení přes Shoptet).', 'warn');
+    } catch (e) {
+      $('loading').textContent = '';
+      flash(e.message, 'error');
+    }
+    resize();
+  })();
+})();
+</script>
+</body>
+</html>`, { status: 200, headers: htmlHeaders(nonce) });
 }
 
 export async function handleAdminSettingsIframe(request, env) {
-  const url = new URL(request.url);
-  const eshopId = url.searchParams.get('eshopId') || url.searchParams.get('eshopid') || '826800';
-  const language = url.searchParams.get('language') || 'cs';
-  const oauthCode = url.searchParams.get('oauth_code') || url.searchParams.get('code');
-  const signature = url.searchParams.get('signature');
-
-  let mcpTokenDisplay = 'lcode_mcp_2e84640fe257b62ecb3719bac8914d63cf2d553c90f4eed3';
-  let tiers = [
-    { name: 'VIP Bronz', percent: 5, minTurnover: 2000 },
-    { name: 'VIP Stříbro', percent: 10, minTurnover: 5000 },
-    { name: 'VIP Zlato', percent: 15, minTurnover: 10000 },
-    { name: 'VIP Platina', percent: 20, minTurnover: 25000 }
-  ];
-
-  if (env.DB) {
-    try {
-      const settingsRow = await env.DB.prepare('SELECT config_json FROM tenant_settings WHERE shop_id = ?').bind(eshopId).first();
-      if (settingsRow?.config_json) {
-        const parsed = JSON.parse(settingsRow.config_json);
-        if (Array.isArray(parsed.tiers) && parsed.tiers.length > 0) {
-          tiers = parsed.tiers;
-        }
-      }
-    } catch {}
-  }
-
-  const mcpConfigJson = JSON.stringify({
-    mcpServers: {
-      "shoptet-pricing": {
-        command: "npx",
-        args: [
-          "-y",
-          "mcp-remote",
-          "https://lcode-shoptet-pricing-dev.hlancaric.workers.dev/mcp/sse",
-          "--header",
-          `Authorization: Bearer ${mcpTokenDisplay}`
-        ]
-      }
-    }
-  }, null, 2);
-
-  const html = `<!DOCTYPE html>
-<html lang="cs">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>L-Code Loyalty Pricing Engine</title>
-  <style>
-    :root {
-      --bg-page: #f4f6f8;
-      --bg-card: #ffffff;
-      --border-color: #dfe3e8;
-      --text-main: #212b36;
-      --text-muted: #637381;
-      --primary: #008060;
-      --primary-hover: #006e52;
-      --success-bg: #e3f1df;
-      --success-text: #108043;
-      --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    }
-
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: var(--bg-page);
-      color: var(--text-main);
-      font-family: var(--font-family);
-      font-size: 13px;
-      line-height: 1.5;
-      padding: 16px 20px;
-    }
-
-    /* Horní lišta */
-    .header-bar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 16px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--border-color);
-    }
-    .header-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .header-title h1 { font-size: 18px; font-weight: 600; color: var(--text-main); }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .badge-gray { background: #e4e9ed; color: #454f5b; }
-    .badge-success { background: var(--success-bg); color: var(--success-text); }
-    .badge-dot::before {
-      content: "";
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: currentColor;
-      margin-right: 5px;
-    }
-
-    /* Tlačítka */
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 12px;
-      border-radius: 4px;
-      border: 1px solid var(--border-color);
-      background: #ffffff;
-      color: var(--text-main);
-      font-size: 12px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all .15s ease;
-    }
-    .btn:hover { background: #f9fafb; border-color: #c4cdd5; }
-    .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
-    .btn-primary:hover { background: var(--primary-hover); }
-
-    /* Sekce / Karty */
-    .section-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-color);
-      border-radius: 4px;
-      margin-bottom: 14px;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-    }
-    .section-header {
-      padding: 10px 16px;
-      border-bottom: 1px solid var(--border-color);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: #fafbfb;
-    }
-    .section-header h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #454f5b; }
-    .section-body { padding: 14px 16px; }
-
-    /* Metriky strip */
-    .metric-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 12px;
-    }
-    .metric-item {
-      border: 1px solid #edf0f2;
-      background: #fdfdfd;
-      padding: 10px 12px;
-      border-radius: 4px;
-    }
-    .metric-label { font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.3px; }
-    .metric-value { font-size: 13px; font-weight: 600; color: var(--text-main); }
-    .status-ok { color: var(--success-text); }
-
-    /* MCP Console Box */
-    .code-box {
-      background: #1e293b;
-      color: #e2e8f0;
-      padding: 12px 14px;
-      border-radius: 4px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 11px;
-      line-height: 1.45;
-      position: relative;
-      overflow-x: auto;
-      white-space: pre;
-    }
-    .code-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-      font-size: 11px;
-      color: var(--text-muted);
-    }
-
-    /* Grid 2 sloupce pro hladiny a pravidla */
-    .columns-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 14px;
-    }
-    @media (min-width: 800px) {
-      .columns-grid {
-        grid-template-columns: 1fr 1fr;
-      }
-    }
-
-    /* Tabulka hladin */
-    .table-clean {
-      width: 100%;
-      border-collapse: collapse;
-      text-align: left;
-    }
-    .table-clean th {
-      padding: 8px 12px;
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text-muted);
-      border-bottom: 1px solid var(--border-color);
-      background: #fafbfb;
-    }
-    .table-clean td {
-      padding: 10px 12px;
-      border-bottom: 1px solid #edf0f2;
-      font-size: 12px;
-    }
-    .table-clean tr:last-child td { border-bottom: none; }
-    .discount-pill {
-      background: #e8f5e9;
-      color: #2e7d32;
-      padding: 2px 7px;
-      border-radius: 4px;
-      font-weight: 600;
-      font-size: 11px;
-      font-family: ui-monospace, monospace;
-    }
-
-    /* Switch */
-    .toggle-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 10px 0;
-      border-bottom: 1px solid #edf0f2;
-    }
-    .toggle-row:last-child { border-bottom: none; }
-    .toggle-text strong { display: block; font-size: 12px; font-weight: 600; margin-bottom: 2px; }
-    .toggle-text span { font-size: 11px; color: var(--text-muted); }
-    .switch {
-      position: relative;
-      display: inline-block;
-      width: 34px;
-      height: 18px;
-      flex-shrink: 0;
-    }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .slider {
-      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-      background-color: #ccc; border-radius: 18px; transition: .2s;
-    }
-    .slider:before {
-      position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px;
-      background-color: white; border-radius: 50%; transition: .2s;
-    }
-    input:checked + .slider { background-color: var(--primary); }
-    input:checked + .slider:before { transform: translateX(16px); }
-
-    /* Toast */
-    .toast {
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      background: #212b36;
-      color: #ffffff;
-      padding: 10px 16px;
-      border-radius: 4px;
-      font-size: 12px;
-      opacity: 0;
-      transform: translateY(10px);
-      transition: all 0.2s ease;
-      pointer-events: none;
-      z-index: 100;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    }
-    .toast.show { opacity: 1; transform: translateY(0); }
-  </style>
-</head>
-<body>
-
-  <!-- Header -->
-  <div class="header-bar">
-    <div class="header-title">
-      <h1>L-Code Loyalty Pricing Engine</h1>
-      <span class="badge badge-gray">E-shop: ${eshopId}</span>
-      <span class="badge badge-success badge-dot">Sync Online</span>
-    </div>
-    <button class="btn" onclick="pingTelemetry()">
-      ↻ Obnovit stav
-    </button>
-  </div>
-
-  <!-- Telemetrie / Systémový stav -->
-  <div class="section-card">
-    <div class="section-header">
-      <h2>Edge Telemetrie & Běhový stav</h2>
-      <span style="font-size: 11px; color: var(--text-muted);">Poslední noční rekonciliace: Dnes v 04:00 (100% soulad)</span>
-    </div>
-    <div class="section-body">
-      <div class="metric-grid">
-        <div class="metric-item">
-          <span class="metric-label">Cloudflare D1</span>
-          <span class="metric-value status-ok">● lcode-shoptet-pricing-dev</span>
-        </div>
-        <div class="metric-item">
-          <span class="metric-label">Edge Latence</span>
-          <span class="metric-value" id="latency-val">~18 ms (PRG/VIE)</span>
-        </div>
-        <div class="metric-item">
-          <span class="metric-label">Circuit Breaker</span>
-          <span class="metric-value status-ok">Aktivní (max 30 %)</span>
-        </div>
-        <div class="metric-item">
-          <span class="metric-label">DPH Integrita</span>
-          <span class="metric-value status-ok">Vynuceno (INC-014)</span>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- MCP & AI Agent Console -->
-  <div class="section-card">
-    <div class="section-header">
-      <h2>MCP & AI Agent Console (Claude / Cursor / OpenCode)</h2>
-      <button class="btn btn-primary" onclick="copyConfig()">
-        📋 Kopírovat MCP konfiguraci
-      </button>
-    </div>
-    <div class="section-body">
-      <div class="code-header">
-        <span>Vložte do <code>claude_desktop_config.json</code> nebo Cursor MCP konfigurace:</span>
-        <span style="font-size: 10px; color: var(--text-muted)">Bearer token je předvyplněn</span>
-      </div>
-      <div class="code-box" id="raw-config">${mcpConfigJson}</div>
-      <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">
-        Mac: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code> &nbsp;|&nbsp; Win: <code>%APPDATA%\\Claude\\...</code>
-      </div>
-    </div>
-  </div>
-
-  <!-- Grid: Hladiny a Pravidla -->
-  <div class="columns-grid">
-    <!-- Tabulka hladin -->
-    <div class="section-card">
-      <div class="section-header">
-        <h2>Věrnostní Hladiny</h2>
-        <span class="badge badge-gray">${tiers.length} aktivní</span>
-      </div>
-      <div class="section-body" style="padding:0;">
-        <table class="table-clean">
-          <thead>
-            <tr>
-              <th>Hladina</th>
-              <th>Sleva</th>
-              <th>Obrat od</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${tiers.map(t => `
-              <tr>
-                <td><strong>${t.name}</strong></td>
-                <td><span class="discount-pill">-${t.percent} %</span></td>
-                <td style="font-family:ui-monospace, monospace; color:#454f5b;">${Number(t.minTurnover).toLocaleString('cs-CZ')} Kč</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Ochrana marže & Šablona -->
-    <div class="section-card">
-      <div class="section-header">
-        <h2>Ochrana Marže & Bezpečnost</h2>
-        <span class="badge badge-success badge-dot">Aktivní</span>
-      </div>
-      <div class="section-body">
-        <div class="toggle-row">
-          <div class="toggle-text">
-            <strong>Self-Healing Batch Retry</strong>
-            <span>Automatické vyřazení neexistujících SKU bez shození dávky</span>
-          </div>
-          <label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
-        </div>
-        <div class="toggle-row">
-          <div class="toggle-text">
-            <strong>Kupónový zámek nad 20 %</strong>
-            <span>Blokace kombinace kupónu s nejvyšší slevou</span>
-          </div>
-          <label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
-        </div>
-        <div class="toggle-row">
-          <div class="toggle-text">
-            <strong>VIP dynamický košík (vip_cart.js)</strong>
-            <span>Injekce přes Shoptet Addon Repository</span>
-          </div>
-          <label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="toast" id="toast"></div>
-
-  <script>
-    function sendHeightToShoptet() {
-      const height = document.documentElement.scrollHeight || document.body.scrollHeight;
-      window.parent.postMessage({
-        action: 'shoptet.resize',
-        height: height
-      }, '*');
-    }
-    window.addEventListener('load', sendHeightToShoptet);
-    window.addEventListener('resize', sendHeightToShoptet);
-    if (window.ResizeObserver) {
-      new ResizeObserver(sendHeightToShoptet).observe(document.body);
-    }
-
-    function showToast(msg) {
-      const t = document.getElementById('toast');
-      t.innerText = msg;
-      t.classList.add('show');
-      setTimeout(() => t.classList.remove('show'), 2600);
-    }
-
-    function copyConfig() {
-      const text = document.getElementById('raw-config').innerText;
-      navigator.clipboard.writeText(text).then(() => {
-        showToast('MCP konfigurace zkopírována do schránky');
-      }).catch(() => {
-        showToast('Označte JSON a zkopírujte ručně');
-      });
-    }
-
-    function pingTelemetry() {
-      showToast('Ověřuji spojení do Cloudflare Edge...');
-      const start = performance.now();
-      fetch('/health').then(() => {
-        const ms = Math.round(performance.now() - start);
-        document.getElementById('latency-val').innerText = '~' + ms + ' ms (PRG/VIE)';
-        showToast('Telemetrie ověřena: ' + ms + ' ms');
-      }).catch(() => {
-        showToast('Spojení v pořádku (~16 ms)');
-      });
-    }
-  </script>
-</body>
-</html>`;
-
-  return new Response(html, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Content-Security-Policy': "frame-ancestors 'self' https://*.myshoptet.com https://*.shoptet.cz https://*.shoptet.sk https://admin.shoptet.cz;",
-      'X-Content-Type-Options': 'nosniff',
-      'Referrer-Policy': 'no-referrer-when-downgrade',
-      'Cache-Control': 'no-store'
-    }
-  });
+  if (request.method !== 'GET') return new Response('Method Not Allowed', { status: 405 });
+  if (!env.DB) return renderErrorPage('db_not_bound', 503);
+  const auth = await authorizeSettingsPage(request, env);
+  if (auth.error) return renderErrorPage(auth.error, auth.status);
+  return renderApp(auth);
 }

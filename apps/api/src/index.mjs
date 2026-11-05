@@ -1,6 +1,6 @@
 import { handleMcp, handleMcpSse, handleMcpMessage } from './mcp/server.mjs';
 import { handleAdmin } from './admin.mjs';
-import { handleAdminSettingsIframe } from './iframe-settings.mjs';
+import { handleAdminSettingsIframe, handleAdminSettingsApi } from './iframe-settings.mjs';
 import { handleShoptetInstall, handleShoptetUninstall, handleShoptetStatus, handleShoptetApiTest } from './shoptet-routes.mjs';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -34,6 +34,9 @@ export default {
     // Shoptet Admin iFrame Settings UI
     if (url.pathname === '/admin/settings') {
       return handleAdminSettingsIframe(request, env);
+    }
+    if (url.pathname.startsWith('/admin/settings/api/')) {
+      return handleAdminSettingsApi(request, env);
     }
 
     // Health check
