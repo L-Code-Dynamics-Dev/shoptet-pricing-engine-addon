@@ -1,3 +1,7 @@
+# Update: configuration approval foundation
+
+The revision workflow described in [CONFIGURATION-APPROVALS.md](CONFIGURATION-APPROVALS.md) now supersedes the read-only configuration limitations in the original audit below. Nine additional tools implement draft creation/replacement, validation, preview, trusted approval request, approved proposal saving, verification, history and rollback proposal creation. These store proposals only; live Shoptet execution remains disabled. The admin can explicitly grant proposal permissions or revoke credentials. Migration 0010 and real SQLite integration tests were added; no remote migration was run.
+
 # Merchant MCP implementation audit — 2026-11-05
 
 ## Evidence and branch state

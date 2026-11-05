@@ -1,3 +1,4 @@
+import { createConfigurationService } from '../../../packages/core/src/configuration.mjs';
 /**
  * L-Code Loyalty Pricing Engine — addon settings page embedded in Shoptet administration.
  * High-fidelity native Shoptet administration theme with Shoptet tabs, cards, and buttons.
@@ -109,6 +110,26 @@ export async function handleAdminSettingsApi(request, env) {
   const shopId = identity.shopId;
   const route = url.pathname.replace(/^\/admin\/settings\/api/, '');
 
+  if (route.startsWith('/configuration/')) {
+    const installed=await env.DB.prepare('SELECT state FROM installations WHERE shop_id=?').bind(shopId).first();
+    if(installed?.state!=='active') return jsonRes({error:'inactive_installation'},403);
+    const service=createConfigurationService(env.DB);
+    try {
+      if(route==='/configuration/pending' && request.method==='GET') return jsonRes({approvals:await service.pending(shopId)});
+      if(route==='/configuration/preview' && request.method==='POST') {
+        const body=await request.json();
+        if(Object.keys(body).length!==1 || typeof body.revisionId!=='string') return jsonRes({error:'invalid_request'},400);
+        return jsonRes(await service.preview(shopId,body.revisionId));
+      }
+      if(route==='/configuration/approve' && request.method==='POST') {
+        const body=await request.json();
+        if(Object.keys(body).length!==1 || typeof body.approvalId!=='string') return jsonRes({error:'invalid_request'},400);
+        return jsonRes(await service.approve(shopId,body.approvalId,await sha256Hex(bearerFrom(request))));
+      }
+    } catch {return jsonRes({error:'configuration_action_failed'},409);}
+    return jsonRes({error:'not_found'},404);
+  }
+
   if (route === '/state' && request.method === 'GET') {
     const inst = await env.DB.prepare(`
       SELECT i.state, i.created_at, i.updated_at, o.eshop_url, o.contact_email
@@ -205,15 +226,18 @@ export async function handleAdminSettingsApi(request, env) {
   }
 
   if (route === '/mcp-token' && request.method === 'POST') {
+    let body;try{body=await request.json();}catch{return jsonRes({error:'invalid_json'},400);}
+    if(!body || Array.isArray(body) || Object.keys(body).some(k=>k!=='permissions') || (body.permissions!==undefined && (!Array.isArray(body.permissions)||body.permissions.some(k=>!['pricing:configure','pricing:execute'].includes(k)))))return jsonRes({error:'invalid_permissions'},400);
+    const scopes=[...MCP_UI_SCOPES,...new Set(body.permissions||[])];
     const raw = new Uint8Array(24);
     crypto.getRandomValues(raw);
     const token = 'lcode_mcp_' + [...raw].map(b => b.toString(16).padStart(2, '0')).join('');
     const digest = await sha256Hex(token);
     await env.DB.batch([
       env.DB.prepare('UPDATE mcp_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE shop_id = ? AND revoked_at IS NULL').bind(shopId),
-      env.DB.prepare("INSERT INTO mcp_credentials (token_sha256, shop_id, scopes_json, expires_at) VALUES (?, ?, ?, datetime('now', '+7 days'))").bind(digest, shopId, JSON.stringify(MCP_UI_SCOPES))
+      env.DB.prepare("INSERT INTO mcp_credentials (token_sha256, shop_id, scopes_json, expires_at) VALUES (?, ?, ?, datetime('now', '+7 days'))").bind(digest, shopId, JSON.stringify(scopes))
     ]);
-    return jsonRes({ token, fingerprint: digest.slice(0, 8), scopes: MCP_UI_SCOPES });
+    return jsonRes({ token, fingerprint: digest.slice(0, 8), scopes });
   }
 
   return jsonRes({ error: 'not_found' }, 404);
@@ -688,6 +712,7 @@ export function renderAdminHtml(eshopId, auth) {
       </table>
 
       <div style="display: flex; gap: 10px; align-items: center; margin: 16px 0;">
+        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odpojit asistenta</button>
         <button type="button" class="btn-shoptet-green" id="token-new">Vygenerovat nový klíč pro MCP</button>
         <span style="color: #777777; font-size: 12px;">Vygenerováním se všechny dosavadní klíče automaticky zneplatní.</span>
       </div>
@@ -950,11 +975,14 @@ export function renderAdminHtml(eshopId, auth) {
       $('mcp-snippet').textContent = snippet(null);
     }
 
+    $('token-revoke').addEventListener('click',async()=>{try{await api('/mcp-token',{method:'DELETE'});state.mcpTokens=[];renderTokens();$('token-result').textContent='Připojení odvoláno.';}catch(e){flash(e.message,true);}});
+
     $('token-new').addEventListener('click', async () => {
       if (state.mcpTokens.length && !confirm('Vygenerovat nový klíč pro MCP? Všechny dosavadní klíče přestanou fungovat.')) return;
       const btn = $('token-new'); btn.disabled = true;
       try {
-        const res = await api('/mcp-token', { method: 'POST', body: '{}' });
+        const permissions=[];if($('permission-configure').checked)permissions.push('pricing:configure');if($('permission-execute').checked)permissions.push('pricing:execute');
+        const res = await api('/mcp-token', { method: 'POST', body: JSON.stringify({permissions}) });
         const fresh = await api('/state');
         state = fresh; renderTokens(); renderOverview();
         const box = $('token-result');
@@ -974,12 +1002,32 @@ export function renderAdminHtml(eshopId, auth) {
       finally { btn.disabled = false; resize(); }
     });
 
+    async function renderConfigurationApprovals() {
+      const root=document.createElement('section');
+      const heading=document.createElement('h2'); heading.textContent='Návrhy ke schválení';root.append(heading);
+      $('panel-overview').append(root);
+      try {
+        const data=await api('/configuration/pending');
+        for(const approval of data.approvals) {
+          const preview=await api('/configuration/preview',{method:'POST',body:JSON.stringify({revisionId:approval.revision_id})});
+          const card=document.createElement('div');
+          const impact=document.createElement('p');impact.textContent=preview.impact;
+          const details=document.createElement('pre');details.style.cssText='max-height:320px;overflow:auto;white-space:pre-wrap';details.textContent=JSON.stringify({revision:preview.revisionId,baseVersion:preview.baseVersion,before:preview.before,after:preview.after},null,2);
+          const button=document.createElement('button');button.type='button';button.className='btn-shoptet-green';button.textContent='Schválit uložení této revize';
+          button.addEventListener('click',async()=>{button.disabled=true;try{await api('/configuration/approve',{method:'POST',body:JSON.stringify({approvalId:approval.approval_id})});button.textContent='Schváleno';}catch(e){button.disabled=false;flash(e.message,true);}});
+          card.append(impact,details,button);root.append(card);
+        }
+        if(!data.approvals.length)root.append(document.createTextNode('Žádné čekající návrhy.'));
+      }catch{root.append(document.createTextNode('Návrhy nelze načíst. Ověřte migraci 0010.'));}
+      resize();
+    }
+
     /* Boot */
     (async () => {
       try {
         state = await api('/state');
         $('loading').remove();
-        renderOverview(); renderTiers(); renderRules(); renderTokens();
+        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals();
       } catch (e) {
         $('loading').textContent = '';
         flash(e.message, true);

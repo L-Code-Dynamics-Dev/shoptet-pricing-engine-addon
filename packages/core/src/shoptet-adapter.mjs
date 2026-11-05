@@ -25,6 +25,11 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
   }
   const compact = item => Object.fromEntries(['guid','id','code','name','indexName','price','currency','active','variants'].filter(k=>item[k]!==undefined).map(k=>[k, k==='variants' && Array.isArray(item[k]) ? item[k].slice(0,50).map(v=>Object.fromEntries(['code','guid','name','price','active'].filter(k=>v[k]!==undefined).map(k=>[k,v[k]]))) : item[k]]));
   return {
+    async verifyBrand(id) {
+      if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)) throw new ShoptetError('invalid_brand_id',400);
+      const data=await read('/api/brands/'+encodeURIComponent(id));
+      return data.brand?.guid === id;
+    },
     async list(kind, {page=1, limit=30, query=''} = {}) {
       if (!collections[kind] || !Number.isSafeInteger(page) || page<1 || page>10000 || !Number.isSafeInteger(limit) || limit<1 || limit>50 || typeof query!=='string' || query.length>100) throw new ShoptetError('invalid_parameters',400);
       const data = await read('/api/'+collections[kind], kind==='pricelists'?{}:{page,itemsPerPage:limit});
