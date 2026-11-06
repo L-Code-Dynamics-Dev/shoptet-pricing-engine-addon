@@ -6,6 +6,7 @@ import { handleMcp, handleMcpSse, handleMcpMessage } from './mcp/server.mjs';
 import { handleAdmin } from './admin.mjs';
 import { handleAdminSettingsIframe, handleAdminSettingsApi } from './iframe-settings.mjs';
 import { handleShoptetInstall } from './shoptet-routes.mjs';
+import { handleStorefrontRoutes } from './storefront-routes.mjs';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
   status,
@@ -33,6 +34,11 @@ export default {
     }
     if (url.pathname.startsWith('/admin/settings/api/')) {
       return handleAdminSettingsApi(request, env, ctx);
+    }
+
+    // Storefront public endpoints & assets
+    if (url.pathname.startsWith('/storefront/') || url.pathname === '/v1/coupon-config') {
+      return handleStorefrontRoutes(request, env);
     }
 
     // Health check
