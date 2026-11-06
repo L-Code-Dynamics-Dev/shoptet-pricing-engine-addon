@@ -314,7 +314,22 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
         return jsonRes(res);
       }
     } catch (e) {
-      return jsonRes({ error: 'loyalty_action_failed', message: e?.message }, 409);
+      const code = e?.code || e?.message;
+      const safeMap = {
+        plan_not_found: 'Plán přepočtu nebyl nalezen.',
+        plan_already_processed: 'Tento plán byl již dříve zpracován nebo schválen.',
+        plan_expired: 'Platnost plánu vypršela. Vygenerujte prosím nový Dry Run.',
+        plan_stale_configuration_changed: 'Konfigurace pravidel nebo ceníků se od vytvoření plánu změnila. Vygenerujte prosím nový kontrolní Dry Run.',
+        plan_not_approved: 'Plán ještě nebyl schválen obchodníkem.',
+        pricelist_policy_required: 'Chybí nastavení věrnostních ceníků.',
+        upstream_unavailable: 'Shoptet API je dočasně nedostupné. Zkuste to prosím za chvíli.',
+        rate_limited: 'Byl dosažen limit volání Shoptet API. Počkejte chvíli a akci opakujte.'
+      };
+      const safeMessage = typeof code === 'string' && safeMap[code]
+        ? safeMap[code]
+        : 'Operaci se nepodařilo dokončit. Zkontrolujte nastavení a zkuste to znovu.';
+      const safeCode = typeof code === 'string' && safeMap[code] ? code : 'loyalty_action_failed';
+      return jsonRes({ error: safeCode, message: safeMessage }, 409);
     }
     return jsonRes({ error: 'not_found' }, 404);
   }

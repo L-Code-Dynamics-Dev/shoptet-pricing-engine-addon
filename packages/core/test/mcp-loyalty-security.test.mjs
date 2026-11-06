@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import { testD1 } from './helpers/d1.mjs';
 import { handleMerchantMcp } from '../../../apps/api/src/mcp/gateway.mjs';
 import { handleMcp, hashToken } from '../../../apps/api/src/mcp/server.mjs';
-import { savePricelistPolicy } from '../src/loyalty-repository.mjs';
+import { savePricelistPolicy, approveRecalculationPlan, getRecalculationPlanDetails } from '../src/loyalty-repository.mjs';
+import { generateCustomerRecalculationPlan } from '../src/loyalty-batch-runner.mjs';
+import { handleAdminSettingsApi } from '../../../apps/api/src/iframe-settings.mjs';
+import { issueSession } from '../../../apps/api/src/admin-session.mjs';
 import { createTokenVault } from '../src/token-vault.mjs';
+import { digest } from '../src/crypto.mjs';
 
 const SHOP_ID = '826800';
 const TOKEN = 's'.repeat(48);
@@ -384,6 +388,318 @@ test('MCP Security: Responses and error messages never leak tokens, envelopes or
     assert.equal(badPlanCall.result.isError, true);
     assert.equal(badPlanCall.result.structuredContent.error, 'plan_not_found');
     assert.doesNotMatch(JSON.stringify(badPlanCall), /\/Users\/|[a-f0-9]{32,64}/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Regression 1: Dry Run paginates customer orders across pages and accounts for credit notes', async () => {
+  const db = testD1();
+  try {
+    db.sql.exec(`
+      INSERT INTO installations (shop_id, state) VALUES ('${SHOP_ID}', 'active');
+    `);
+
+    await savePricelistPolicy(db, SHOP_ID, {
+      defaultPricelistId: 1,
+      managedPricelistIds: [2, 3],
+      protectedPricelistIds: [99],
+      engineMode: 'installation'
+    });
+
+    const tenantConfig = {
+      tiers: [
+        { id: 't1', name: 'VIP Bronz', percent: 5, minTurnover: 3000, pricelistId: 2 },
+        { id: 't2', name: 'VIP Stříbro', percent: 10, minTurnover: 5000, pricelistId: 3 }
+      ],
+      turnoverPolicy: {
+        period: { from: '2020-01-01T00:00:00Z', to: '2030-01-01T00:00:00Z' },
+        qualifyingStatusIds: [-3],
+        requirePaid: true,
+        shipping: 'exclude',
+        billing: 'exclude',
+        discounts: 'after_discounts',
+        vat: 'inclusive',
+        refunds: 'exclude_order_with_valid_credit_note',
+        guestCustomers: 'exclude',
+        itemStatuses: 'require_match_order',
+        upgrades: 'recalculate',
+        downgrades: 'keep_current'
+      }
+    };
+    db.sql.prepare('INSERT INTO tenant_settings (shop_id, config_json, version) VALUES (?, ?, 1)').run(SHOP_ID, JSON.stringify(tenantConfig));
+
+    const pagedCalls = [];
+    const testCustGuid = 'c0000000-0000-4000-8000-000000000001';
+    const mockAdapter = {
+      creditNotes: async ({ page = 1 } = {}) => {
+        pagedCalls.push(`creditNotes:page:${page}`);
+        if (page === 1) {
+          return { items: [{ code: 'CN-101' }], pagination: { page: 1, pageCount: 1, totalCount: 1 } };
+        }
+        return { items: [], pagination: { page: 2, pageCount: 1, totalCount: 1 } };
+      },
+      creditNote: async (code) => {
+        return {
+          code,
+          isValid: true,
+          orderCode: 'ORD-PAGE-1',
+          customer: { guid: testCustGuid },
+          creationTime: '2024-05-01T12:00:00Z'
+        };
+      },
+      list: async (kind, { page = 1 } = {}) => {
+        if (kind === 'customers') {
+          if (page === 1) {
+            return {
+              items: [{
+                guid: testCustGuid,
+                billingAddress: { fullName: 'Pavel Stránkovaný' },
+                accounts: [{ email: 'pavel@example.cz' }],
+                priceList: { id: 1 },
+                priceRatio: '1.0000'
+              }],
+              pagination: { page: 1, pageCount: 1, totalCount: 1 }
+            };
+          }
+          return { items: [], pagination: { page, pageCount: 1, totalCount: 1 } };
+        }
+        return { items: [] };
+      },
+      customer: async (guid) => ({
+        guid,
+        priceList: { id: 1, name: 'Základní' },
+        priceRatio: '1.0000'
+      }),
+      customerOrders: async (guid, { page = 1 } = {}) => {
+        pagedCalls.push(`customerOrders:page:${page}`);
+        if (page === 1) {
+          return {
+            items: [{ code: 'ORD-PAGE-1' }],
+            pagination: { page: 1, pageCount: 2, totalCount: 2 }
+          };
+        }
+        if (page === 2) {
+          return {
+            items: [{ code: 'ORD-PAGE-2' }],
+            pagination: { page: 2, pageCount: 2, totalCount: 2 }
+          };
+        }
+        return { items: [], pagination: { page, pageCount: 2, totalCount: 2 } };
+      },
+      order: async (code) => {
+        if (code === 'ORD-PAGE-1') {
+          return {
+            code: 'ORD-PAGE-1',
+            status: { id: -3 },
+            paid: true,
+            customerGuid: testCustGuid,
+            creationTime: '2024-05-01T12:00:00Z',
+            price: { currencyCode: 'CZK', withVat: '2000.00', withoutVat: '1652.89' },
+            items: [{ status: { id: -3 }, itemPrice: { withVat: '2000.00' } }]
+          };
+        }
+        if (code === 'ORD-PAGE-2') {
+          return {
+            code: 'ORD-PAGE-2',
+            status: { id: -3 },
+            paid: true,
+            customerGuid: testCustGuid,
+            creationTime: '2024-05-02T12:00:00Z',
+            price: { currencyCode: 'CZK', withVat: '3500.00', withoutVat: '2892.56' },
+            items: [{ status: { id: -3 }, itemPrice: { withVat: '3500.00' } }]
+          };
+        }
+      }
+    };
+
+    const plan = await generateCustomerRecalculationPlan({
+      db,
+      shopId: SHOP_ID,
+      adapter: mockAdapter,
+      policy: tenantConfig.turnoverPolicy,
+      tiers: tenantConfig.tiers
+    });
+
+    assert.ok(pagedCalls.includes('customerOrders:page:1'));
+    assert.ok(pagedCalls.includes('customerOrders:page:2'));
+    assert.ok(pagedCalls.includes('creditNotes:page:1'));
+
+    const details = await getRecalculationPlanDetails(db, SHOP_ID, plan.planId);
+    const targetItem = details.items.find(i => i.customer_guid === testCustGuid);
+    assert.ok(targetItem);
+    assert.equal(targetItem.target_pricelist_id, 2, 'Customer qualifies for VIP Bronz (3500 CZK) after ORD-PAGE-1 excluded by credit note');
+  } finally {
+    db.sql.close();
+  }
+});
+
+test('Regression 2: Stale plan rejection upon configuration update', async () => {
+  const db = testD1();
+  try {
+    db.sql.exec(`
+      INSERT INTO installations (shop_id, state) VALUES ('${SHOP_ID}', 'active');
+    `);
+
+    await savePricelistPolicy(db, SHOP_ID, {
+      defaultPricelistId: 1,
+      managedPricelistIds: [2, 3],
+      protectedPricelistIds: [99],
+      engineMode: 'installation'
+    });
+
+    const tenantConfig = {
+      tiers: [
+        { id: 't1', name: 'VIP Bronz', percent: 5, minTurnover: 1000, pricelistId: 2 }
+      ],
+      turnoverPolicy: {
+        period: { from: '2020-01-01T00:00:00Z', to: '2030-01-01T00:00:00Z' },
+        qualifyingStatusIds: [-3],
+        requirePaid: true
+      }
+    };
+    db.sql.prepare('INSERT INTO tenant_settings (shop_id, config_json, version) VALUES (?, ?, 1)').run(SHOP_ID, JSON.stringify(tenantConfig));
+
+    const mockAdapter = {
+      creditNotes: async () => ({ items: [], pagination: { page: 1, pageCount: 1, totalCount: 0 } }),
+      list: async () => ({ items: [], pagination: { page: 1, pageCount: 1, totalCount: 0 } })
+    };
+
+    const plan = await generateCustomerRecalculationPlan({
+      db,
+      shopId: SHOP_ID,
+      adapter: mockAdapter,
+      policy: tenantConfig.turnoverPolicy,
+      tiers: tenantConfig.tiers
+    });
+
+    const planRow = db.sql.prepare('SELECT plan_json FROM loyalty_recalculation_plans WHERE shop_id = ? AND plan_id = ?').get(SHOP_ID, plan.planId);
+    const planMeta = JSON.parse(planRow.plan_json);
+    assert.equal(planMeta.configVersion, 1);
+    assert.ok(planMeta.configSha256);
+
+    // Modify configuration to increment version
+    db.sql.prepare('UPDATE tenant_settings SET version = 2 WHERE shop_id = ?').run(SHOP_ID);
+
+    // Approval must fail closed with plan_stale_configuration_changed
+    await assert.rejects(
+      approveRecalculationPlan(db, SHOP_ID, plan.planId),
+      /plan_stale_configuration_changed/
+    );
+  } finally {
+    db.sql.close();
+  }
+});
+
+test('Regression 3: Admin settings API sanitizes errors into human-readable Czech messages', async () => {
+  const { env, cleanup } = await setupTestEnvironment();
+  try {
+    const envelope = env.DB.sql.prepare('SELECT oauth_envelope FROM shoptet_oauth WHERE shop_id = ?').get(SHOP_ID)?.oauth_envelope;
+    const session = await issueSession(SHOP_ID, env.ADMIN_SESSION_SECRET, undefined, envelope ? await digest(envelope) : undefined);
+
+    // 1. Non-existent plan
+    const nonExistentReq = new Request('https://addon.example/admin/settings/api/loyalty/approve', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer ' + session,
+        origin: 'https://addon.example',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ planId: 'plan-does-not-exist' })
+    });
+    const res1 = await handleAdminSettingsApi(nonExistentReq, env);
+    assert.equal(res1.status, 409);
+    const body1 = await res1.json();
+    assert.equal(body1.error, 'plan_not_found');
+    assert.equal(body1.message, 'Plán přepočtu nebyl nalezen.');
+    assert.equal(body1.stack, undefined);
+    assert.doesNotMatch(JSON.stringify(body1), /(?:\.js|\.mjs):\d+:\d+|\b(?:Traceback|at\s+\w+)\b/);
+
+    // 2. Stale plan rejection via admin API
+    const dryRunRes = await (await handleMerchantMcp(createMcpRequest('tools/call', {
+      name: 'loyalty_dry_run',
+      arguments: {}
+    }), env)).json();
+    const planId = dryRunRes.result.structuredContent.planId;
+
+    // Simulate config update in DB
+    env.DB.sql.prepare('UPDATE tenant_settings SET version = version + 1 WHERE shop_id = ?').run(SHOP_ID);
+
+    const staleReq = new Request('https://addon.example/admin/settings/api/loyalty/approve', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer ' + session,
+        origin: 'https://addon.example',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ planId })
+    });
+    const res2 = await handleAdminSettingsApi(staleReq, env);
+    assert.equal(res2.status, 409);
+    const body2 = await res2.json();
+    assert.equal(body2.error, 'plan_stale_configuration_changed');
+    assert.equal(body2.message, 'Konfigurace pravidel nebo ceníků se od vytvoření plánu změnila. Vygenerujte prosím nový kontrolní Dry Run.');
+    assert.equal(body2.stack, undefined);
+    assert.doesNotMatch(JSON.stringify(body2), /(?:\.js|\.mjs):\d+:\d+|\b(?:Traceback|at\s+\w+)\b/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Regression 4: sync_execute allows dry-run without approval, but strictly requires approvalId and pricing:execute in live mode', async () => {
+  const { db, env, cleanup } = await setupTestEnvironment();
+  try {
+    const syncToken = 'y'.repeat(48);
+    const syncTokenSha256 = await hashToken(syncToken);
+    db.sql.prepare(`
+      INSERT INTO mcp_credentials (shop_id, token_sha256, scopes_json)
+      VALUES (?, ?, ?)
+    `).run(SHOP_ID, syncTokenSha256, JSON.stringify(['sync:execute', 'pricing:read']));
+
+    const createSyncMcpReq = (args) => new Request('https://addon.example/mcp', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: 'Bearer ' + syncToken
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'sync_execute', arguments: args }
+      })
+    });
+
+    const testPlanId = '11111111-1111-4111-8111-111111111111';
+
+    // 1. Live mode WITHOUT approvalId -> must fail with approval_required_for_live_sync
+    const liveNoApproval = await (await handleMerchantMcp(createSyncMcpReq({
+      planId: testPlanId,
+      mode: 'live'
+    }), env)).json();
+    assert.equal(liveNoApproval.result?.isError, true);
+    assert.equal(liveNoApproval.result?.structuredContent?.error, 'approval_required_for_live_sync');
+
+    // 2. Live mode WITH approvalId but WITHOUT pricing:execute scope -> must fail with pricing_execute_scope_required
+    const liveNoScope = await (await handleMerchantMcp(createSyncMcpReq({
+      planId: testPlanId,
+      mode: 'live',
+      approvalId: '22222222-2222-4222-8222-222222222222'
+    }), env)).json();
+    assert.equal(liveNoScope.result?.isError, true);
+    assert.equal(liveNoScope.result?.structuredContent?.error, 'pricing_execute_scope_required');
+
+    // 3. Dry-run mode -> allowed without approvalId and without pricing:execute scope
+    const dryRunCall = await (await handleMerchantMcp(createSyncMcpReq({
+      planId: testPlanId,
+      mode: 'dry-run'
+    }), env)).json();
+    assert.equal(dryRunCall.result?.isError, true);
+    // Fails at coordinator level because sync coordinator isn't configured in test env, but passed approval checks!
+    assert.notEqual(dryRunCall.result?.structuredContent?.error, 'approval_required_for_live_sync');
+    assert.notEqual(dryRunCall.result?.structuredContent?.error, 'pricing_execute_scope_required');
+    assert.equal(dryRunCall.result?.structuredContent?.error, 'sync_coordinator_not_configured');
   } finally {
     cleanup();
   }

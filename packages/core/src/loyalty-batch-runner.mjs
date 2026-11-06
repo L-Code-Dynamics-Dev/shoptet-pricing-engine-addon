@@ -24,6 +24,27 @@ export async function generateCustomerRecalculationPlan({
   const pricelistPolicy = await getPricelistPolicy(db, shopId);
   if (!pricelistPolicy) throw new Error('pricelist_policy_required');
 
+  // 0. Prefetch store credit notes across all pages
+  const allCreditNotes = [];
+  if (typeof adapter.creditNotes === 'function' && typeof adapter.creditNote === 'function') {
+    for (let cnPage = 1; ; cnPage++) {
+      if (rateLimiter) await rateLimiter.waitBeforeNextRequest();
+      const cnRes = await adapter.creditNotes({ page: cnPage });
+      const batch = cnRes.items || [];
+      if (!batch.length) break;
+      for (const cn of batch) {
+        if (rateLimiter) await rateLimiter.waitBeforeNextRequest();
+        const detail = await adapter.creditNote(cn.code);
+        allCreditNotes.push(detail);
+      }
+      if (cnRes.pagination) {
+        if (cnPage >= (cnRes.pagination.pageCount || 1)) break;
+      } else if (batch.length < 50) {
+        break;
+      }
+    }
+  }
+
   const items = [];
   let totalCustomers = 0;
   let changesNeeded = 0;
@@ -78,18 +99,35 @@ export async function generateCustomerRecalculationPlan({
         continue;
       }
 
-      // Fetch customer orders
-      if (rateLimiter) await rateLimiter.waitBeforeNextRequest();
-      const ordersRes = await adapter.customerOrders(customer.guid, {
-        from: policy.period.from,
-        to: policy.period.to,
-        page: 1
-      });
+      // Fetch customer orders across all pages
       const orderList = [];
-      for (const o of ordersRes.items || []) {
+      const orderCodes = new Set();
+      for (let orderPage = 1; ; orderPage++) {
         if (rateLimiter) await rateLimiter.waitBeforeNextRequest();
-        orderList.push(await adapter.order(o.code));
+        const ordersRes = await adapter.customerOrders(customer.guid, {
+          from: policy.period.from,
+          to: policy.period.to,
+          page: orderPage
+        });
+        const batch = ordersRes.items || [];
+        if (!batch.length) break;
+        for (const o of batch) {
+          if (rateLimiter) await rateLimiter.waitBeforeNextRequest();
+          const detail = await adapter.order(o.code);
+          orderList.push(detail);
+          orderCodes.add(detail.code);
+        }
+        if (ordersRes.pagination) {
+          if (orderPage >= (ordersRes.pagination.pageCount || 1)) break;
+        } else if (batch.length < 50) {
+          break;
+        }
       }
+
+      // Filter relevant credit notes for this customer or their orders
+      const relevantCreditNotes = allCreditNotes.filter(
+        cn => cn.customer?.guid === customer.guid || orderCodes.has(cn.orderCode)
+      );
 
       const turnoverResult = calculateTurnover({
         customerGuid: customer.guid,
@@ -97,7 +135,7 @@ export async function generateCustomerRecalculationPlan({
         tiers,
         policy,
         orders: orderList,
-        creditNotes: [],
+        creditNotes: relevantCreditNotes,
         currentPricelistId
       });
 
@@ -129,19 +167,30 @@ export async function generateCustomerRecalculationPlan({
       }
     }
 
-    if (result.pagination && page >= (result.pagination.pageCount || 1)) break;
-    if (batch.length < 50) break;
+    if (result.pagination) {
+      if (page >= (result.pagination.pageCount || 1)) break;
+    } else if (batch.length < 50) {
+      break;
+    }
   }
+
+  const settingsRow = await db.prepare('SELECT version, config_json FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
+  const configVersion = settingsRow?.version ?? 0;
+  const configSha256 = settingsRow?.config_json ? await digest(settingsRow.config_json) : '';
 
   const planId = 'plan-' + crypto.randomUUID();
   const planJson = JSON.stringify({
     shopId,
     revisionId,
+    configVersion,
+    configSha256,
     totalCustomers,
     changesNeeded,
     b2bSkipped,
     priceRatioSkipped,
     noChangeCount,
+    policy,
+    tiers,
     items
   });
   const planSha256 = await digest(planJson);

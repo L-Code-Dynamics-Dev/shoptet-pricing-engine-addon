@@ -83,7 +83,13 @@ export function createMerchantServer(identity, env) {
   tool('configuration_get_history','pricing:read','Historie uložených revizí, nikoli důkaz aktivace.',{},()=>configs.history(identity.shopId));
   tool('sync_preview','sync:read','Vypočítá ceny ze skutečných variant bez zápisů.',syncSelectionSchema.shape,a=>sync.service.preview(identity.shopId,a));
   tool('sync_plan',['sync:read','pricing:configure'],'Vytvoří neměnný plán a žádost o potvrzení v administraci.',syncSelectionSchema.shape,a=>sync.service.plan(identity.shopId,a),false);
-  tool('sync_execute','sync:execute','Zařadí plán do trvalé fronty. Live vyžaduje další oprávnění, schválení a aktivovaný ověřený release.',{planId:z.string().uuid(),mode:z.enum(['dry-run','live']).default('dry-run'),approvalId:z.string().uuid().optional()},a=>{if(a.mode==='live'&&!can('pricing:execute'))throw new SyncError('pricing_execute_scope_required');return sync.execute(a.planId,a.mode,a.approvalId);},false);
+  tool('sync_execute','sync:execute','Zařadí plán synchronizace cen produktů do fronty. Režim live striktně vyžaduje potvrzení administrátorem (approvalId) a oprávnění pricing:execute. Bez schválení je povolen pouze režim dry-run.',{planId:z.string().uuid(),mode:z.enum(['dry-run','live']).default('dry-run'),approvalId:z.string().uuid().optional()},a=>{
+    if (a.mode === 'live') {
+      if (!a.approvalId) throw new SyncError('approval_required_for_live_sync');
+      if (!can('pricing:execute')) throw new SyncError('pricing_execute_scope_required');
+    }
+    return sync.execute(a.planId,a.mode,a.approvalId);
+  },false);
   tool('sync_get_progress','sync:read','Průběh a chyby konkrétní úlohy.',{jobId:z.string().uuid()},a=>sync.service.progress(identity.shopId,a.jobId));
   tool('sync_get_status','sync:read','Poslední synchronizace aktuálního obchodu.',{},()=>sync.service.history(identity.shopId));
   tool('sync_get_history','sync:read','Historie skutečných úloh, včetně chyb.',{},()=>sync.service.history(identity.shopId));

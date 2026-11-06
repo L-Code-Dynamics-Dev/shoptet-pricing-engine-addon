@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {digest} from './crypto.mjs';
 
 const positiveId = z.number().int().positive();
 const uuidSchema = z.string().uuid();
@@ -297,9 +298,25 @@ export async function getRecalculationPlanDetails(db, shopId, planId) {
 }
 
 export async function approveRecalculationPlan(db, shopId, planId) {
-  const plan = await db.prepare('SELECT state FROM loyalty_recalculation_plans WHERE shop_id = ? AND plan_id = ?').bind(shopId, planId).first();
+  const plan = await db.prepare('SELECT state, plan_json, revision_id, expires_at FROM loyalty_recalculation_plans WHERE shop_id = ? AND plan_id = ?').bind(shopId, planId).first();
   if (!plan) throw new Error('plan_not_found');
   if (plan.state !== 'draft') throw new Error('plan_already_processed');
+  if (plan.expires_at < Math.floor(Date.now() / 1000)) throw new Error('plan_expired');
+
+  // Verify plan is not stale against active configuration
+  const currentSettings = await db.prepare('SELECT version, config_json FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
+  const currentVersion = currentSettings?.version ?? 0;
+  let planMeta = {};
+  try { planMeta = JSON.parse(plan.plan_json); } catch {}
+  if (planMeta.configVersion !== undefined && planMeta.configVersion !== currentVersion) {
+    throw new Error('plan_stale_configuration_changed');
+  }
+  if (planMeta.configSha256 && currentSettings?.config_json) {
+    const currentSha256 = await digest(currentSettings.config_json);
+    if (planMeta.configSha256 !== currentSha256) {
+      throw new Error('plan_stale_configuration_changed');
+    }
+  }
 
   await db.batch([
     db.prepare("UPDATE loyalty_recalculation_plans SET state = 'approved' WHERE shop_id = ? AND plan_id = ?").bind(shopId, planId),
