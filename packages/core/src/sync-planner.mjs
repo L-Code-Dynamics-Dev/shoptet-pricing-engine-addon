@@ -1,6 +1,6 @@
 import {z} from 'zod';
 import {proposalSchema} from './configuration.mjs';
-import {evaluatePricing,grossApiPrice,activeActionMinor,formatApiPrice,shopDate} from './pricing-policy.mjs';
+import {evaluatePricing,grossApiPrice,activeActionMinor,formatApiPrice,parseApiPrice,shopDate} from './pricing-policy.mjs';
 export const syncSelectionSchema=z.object({revisionId:z.string().uuid(),tierName:z.string().min(1).max(60),targetPricelistId:z.number().int().positive(),sourcePricelistId:z.number().int().positive().optional(),products:z.array(z.object({guid:z.string().uuid(),codes:z.array(z.string().min(1).max(128)).min(1).max(20)}).strict()).min(1).max(25)}).strict().superRefine((v,c)=>{if(v.products.reduce((n,p)=>n+p.codes.length,0)>100)c.addIssue({code:'custom',path:['products'],message:'Maximum 100 variants per plan'});});
 export async function buildSyncPlan({adapter,proposal,selection,instant=new Date()}) {
  const policy=proposalSchema.parse(proposal),selected=syncSelectionSchema.parse(selection);
@@ -43,8 +43,25 @@ export async function buildSyncPlan({adapter,proposal,selection,instant=new Date
    const categoryCaps=policy.categoryCaps.filter(c=>categories.has(c.id)).map(c=>c.percent);
    const productCaps=policy.productCaps.filter(c=>c.id===product.guid&&(c.variantCode===undefined||c.variantCode===code)).map(c=>c.percent);
    const productCap=productCaps.length?Math.min(...productCaps):null;
-   const calculated=evaluatePricing({baseMinor,actionMinor,tierPercent:tier.percent,brandCap,categoryCaps,productCap,salePolicy:policy.salePolicy??'okfish_compatible',capPriority:policy.capPriority??'most_restrictive',rounding:currency.rounding,incrementMinor:10**(2-currency.priceDecimalPlaces)});
-   if(!calculated.valid||calculated.priceMinor===0)throw Error('zero_or_invalid_price_not_supported');
+   let minimumMinor=null;
+   if(policy.minMarginBps!==undefined){
+    const purchase=base.prices?.purchasePrice;
+    if(!purchase?.price)throw Error('purchase_cost_unavailable');
+    if(purchase.vatRate!==base.vatRate)throw Error('purchase_cost_vat_mismatch');
+    const vat=BigInt(parseApiPrice(base.vatRate));
+    const cost=BigInt(parseApiPrice(purchase.price));
+    if(cost<=0n)throw Error('zero_purchase_cost_requires_approved_policy');
+    // Compare amounts on the same gross, same-rate VAT basis. If the
+    // purchase VAT regime differs, fail closed above rather than guessing.
+    const grossCost=purchase.includingVat?cost:(cost*(10000n+vat)+9999n)/10000n;
+    const marginDenominator=10000n-BigInt(policy.minMarginBps);
+    const floor=(grossCost*10000n+marginDenominator-1n)/marginDenominator;
+    if(floor>BigInt(Number.MAX_SAFE_INTEGER))throw Error('minimum_price_overflow');
+    minimumMinor=Number(floor);
+   }
+   const calculated=evaluatePricing({baseMinor,actionMinor,tierPercent:tier.percent,brandCap,categoryCaps,productCap,minimumMinor,salePolicy:policy.salePolicy??'okfish_compatible',capPriority:policy.capPriority??'most_restrictive',rounding:currency.rounding,incrementMinor:10**(2-currency.priceDecimalPlaces)});
+   if(!calculated.valid)throw Error('minimum_margin_violation');
+   if(calculated.priceMinor===0)throw Error('zero_or_invalid_price_not_supported');
    const patch={code,priceWithVat:{price:formatApiPrice(calculated.priceMinor),commonPrice:formatApiPrice(baseMinor)},...(policy.couponPolicy==='no_loyalty_combination'&&calculated.loyaltyApplied?{sales:{discountCoupon:false}}:{})};
    const expected={price:patch.priceWithVat.price,commonPrice:patch.priceWithVat.commonPrice,discountCoupon:patch.sales?.discountCoupon??before.sales.discountCoupon};
    actions.push({productGuid:product.guid,brandId,categoryIds:[...categories].sort(),code,sourcePricelistId:source.id,targetPricelistId:target.id,baseSnapshot:base,beforeSnapshot:before,patch,expected,calculation:calculated});
