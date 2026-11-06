@@ -30,3 +30,14 @@ test('invalid money is rejected', () => {
 });
 
 test('most restrictive category and brand override larger product cap',()=>{assert.equal(resolveDiscountCap({productCap:20,categoryCap:8,brandCap:5}),5);assert.throws(()=>resolveDiscountCap({brandCap:-1}),/Invalid/);});
+
+test('tier discounts use exact minor-unit arithmetic for large safe integers', () => {
+  assert.equal(calculateTierPrice({baseMinor: 9999, tierPercent: 12.5}), 8749);
+  assert.equal(calculateTierPrice({baseMinor: 10000, tierPercent: 25, fixedDiscountMinor: 9000, capPercent: 10}), 9000);
+  assert.throws(() => calculateTierPrice({baseMinor: 10000, tierPercent: 12.345}), /tierPercent/);
+  assert.throws(() => calculateTierPrice({baseMinor: 10000, salePolicy: 'unknown'}), /salePolicy/);
+});
+
+test('price patch serializes integer minor units without floating-point formatting', () => {
+  assert.equal(createPricelistPricePatch({code:'big',priceMinor: Number.MAX_SAFE_INTEGER,vatRate:'21.00'}).price, '90071992547409.91');
+});
