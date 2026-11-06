@@ -168,6 +168,14 @@ export async function recordRefundToLedger(db, shopId, { orderCode, refundedAmou
     return { applied: false, reason: 'order_not_found' };
   }
 
+  // A refund delta is idempotent by the order's monotonic change timestamp.
+  // This protects against duplicate delivery of the same refund event.
+  if (!Number.isSafeInteger(refundedAmountMinor) || refundedAmountMinor < 0 ||
+      !Number.isFinite(Date.parse(changeTime))) throw new Error('invalid_refund');
+  if (Date.parse(changeTime) <= Date.parse(order.last_change_time)) {
+    return { applied: false, reason: 'stale_or_duplicate_refund' };
+  }
+
   const newRefunded = Math.min(order.qualifying_amount_minor, order.refunded_amount_minor + refundedAmountMinor);
   const newContributed = Math.max(0, order.qualifying_amount_minor - newRefunded);
   const exclusionReason = newContributed === 0 ? 'fully_refunded' : null;
