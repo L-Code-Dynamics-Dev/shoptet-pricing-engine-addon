@@ -17,3 +17,16 @@ test('fixed discount and fixed price use BigInt comparisons without throwing', (
   const zeroTier = evaluatePricing({baseMinor:10000,tierPercent:0,fixedDiscountMinor:2500});
   assert.equal(zeroTier.priceMinor,7500);
 });
+
+test('fixed discount and fixed price respect a product discount cap', () => {
+  const opts = {baseMinor:10000,tierPercent:20,productCap:10,capPriority:'hierarchy'};
+  assert.equal(evaluatePricing({...opts,fixedDiscountMinor:5000}).priceMinor,9000);
+  assert.equal(evaluatePricing({...opts,fixedPriceMinor:1000}).priceMinor,9000);
+  assert.equal(evaluatePricing({...opts,productCap:0,fixedDiscountMinor:5000}).priceMinor,10000);
+});
+
+test('minimum price gate blocks an over-discounted fixed price', () => {
+  const result=evaluatePricing({baseMinor:10000,fixedPriceMinor:3000,minimumMinor:7500});
+  assert.equal(result.valid,false);
+  assert.equal(result.blockedReason,'minimum_price_violation');
+});
