@@ -7,3 +7,13 @@ const golden=[
 for(const [name,options,expected] of golden)test('golden pricing: '+name,()=>assert.equal(evaluatePricing({baseMinor:10000,tierPercent:5,...options}).priceMinor,expected));
 test('minimum protection blocks unsafe prices and invalid data is rejected',()=>{assert.equal(evaluatePricing({baseMinor:10000,tierPercent:5,minimumMinor:9800}).blockedReason,'minimum_price_violation');for(const input of [{baseMinor:-1,tierPercent:5},{baseMinor:100,tierPercent:NaN},{baseMinor:100,tierPercent:1.234},{baseMinor:100,tierPercent:5,categoryCaps:[-1]}])assert.throws(()=>evaluatePricing(input));});
 test('VAT and ratios use explicit decimal metadata',()=>{const row={includingVat:false,vatRate:'21.00',price:{price:'100.00',priceRatio:'0.800',actionPrice:{price:'70.00',fromDate:'2026-01-01',toDate:'2026-12-31'}}};assert.equal(grossApiPrice(row,true),9680);assert.equal(grossApiPrice(row,false),8000);assert.equal(activeActionMinor(row,true,'2026-11-06'),8470);assert.equal(activeActionMinor(row,true,'2027-01-01'),null);assert.equal(formatApiPrice(parseApiPrice('123456.78')),'123456.78');assert.throws(()=>parseApiPrice('1.234'));});
+
+
+test('fixed discount and fixed price use BigInt comparisons without throwing', () => {
+  const fixedDiscount = evaluatePricing({baseMinor:10000,tierPercent:10,fixedDiscountMinor:1500});
+  assert.equal(fixedDiscount.priceMinor,8500);
+  const fixedPrice = evaluatePricing({baseMinor:10000,tierPercent:10,fixedPriceMinor:8000});
+  assert.equal(fixedPrice.priceMinor,8000);
+  const zeroTier = evaluatePricing({baseMinor:10000,tierPercent:0,fixedDiscountMinor:2500});
+  assert.equal(zeroTier.priceMinor,7500);
+});
