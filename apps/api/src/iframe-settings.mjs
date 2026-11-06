@@ -72,9 +72,16 @@ export function validateRules(input) {
     if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>100||Number(value.toFixed(2))!==value)return {error:'Sleva značky musí být 0–100 %.'};
     const id=key.toLowerCase();if(Object.hasOwn(brandLimits,id))return {error:'Duplicitní značka.'};brandLimits[id]=value;
   }
+  let couponLockMinPercent = null;
+  if (input.couponLockMinPercent !== undefined && input.couponLockMinPercent !== null && input.couponLockMinPercent !== '') {
+    const minP = Number(input.couponLockMinPercent);
+    if (!Number.isFinite(minP) || minP < 1 || minP > 100) return { error: 'Hranice slevy pro zákaz kupónů musí být 1–100 %.' };
+    couponLockMinPercent = Math.round(minP * 100) / 100;
+  }
   return {
     rules: {
       couponLockTopTiers: input.couponLockTopTiers !== false,
+      couponLockMinPercent,
       couponLockMaxRemaining: input.couponLockMaxRemaining !== false,
       highestDiscountWins: input.highestDiscountWins !== false,
       vatIntegrity: true,
@@ -209,6 +216,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
 
     const defaultRules = {
       couponLockTopTiers: true,
+      couponLockMinPercent: null,
       couponLockMaxRemaining: true,
       highestDiscountWins: true,
       vatIntegrity: true,
@@ -831,11 +839,13 @@ export function renderAdminHtml(eshopId, auth) {
       </div>
 
       <div class="form-row">
-        <label class="form-label">Zákaz kupónů pro nejvyšší slevy</label>
+        <label class="form-label">Zákaz slevových kupónů v košíku</label>
         <div class="form-field">
           <input type="checkbox" id="rule-coupon-lock-top" checked style="width: 16px; height: 16px; cursor: pointer;">
-          <label for="rule-coupon-lock-top" style="cursor: pointer;">Zákazníci s nejvyššími slevami (20 % a 25 %) nemohou v nákupním košíku uplatnit slevový kupón.</label>
-          <span class="info-icon" title="Ochrana před kombinováním vysoké věrnostní slevy se slevovými kupóny.">i</span>
+          <label for="rule-coupon-lock-top" style="cursor: pointer;">Zakázat zadání kupónu pro zákazníky s věrnostní slevou od:</label>
+          <input type="number" id="rule-coupon-min-percent" class="input-text w-small" min="1" max="100" step="1" placeholder="Všechny" style="margin: 0 4px;">
+          <span class="unit">%</span>
+          <span class="info-icon" title="Zákazníci se slevou od této hranice nebudou moci v košíku uplatnit kupón. Pokud necháte prázdné, zákaz platí pro všechny věrnostní úrovně.">i</span>
         </div>
       </div>
 
@@ -1164,6 +1174,8 @@ export function renderAdminHtml(eshopId, auth) {
       const r = state.rules || {};
       $('rule-highest-discount').checked = r.highestDiscountWins !== false;
       $('rule-coupon-lock-top').checked = r.couponLockTopTiers !== false;
+      $('rule-coupon-min-percent').value = (r.couponLockMinPercent !== undefined && r.couponLockMinPercent !== null) ? r.couponLockMinPercent : '';
+      $('rule-coupon-min-percent').disabled = !$('rule-coupon-lock-top').checked;
       $('rule-coupon-min-price-ratio').checked = r.couponLockMaxRemaining !== false;
       $('rule-post-write-verify').checked = r.postWriteVerify !== false;
 
@@ -1174,6 +1186,10 @@ export function renderAdminHtml(eshopId, auth) {
 
       $('rules-version').textContent = state.version ? 'Uloženo (verze: ' + state.version + ')' : '';
     }
+
+    $('rule-coupon-lock-top').addEventListener('change', () => {
+      $('rule-coupon-min-percent').disabled = !$('rule-coupon-lock-top').checked;
+    });
 
     $('btn-add-brand-limit').addEventListener('click', () => showBrandPicker(addBrandLimitRow()));
 
@@ -1186,9 +1202,11 @@ export function renderAdminHtml(eshopId, auth) {
         if (name && Number.isFinite(val)) brandLimits[name] = val;
       });
 
+      const minP = $('rule-coupon-min-percent').value.trim();
       const rules = {
         highestDiscountWins: $('rule-highest-discount').checked,
         couponLockTopTiers: $('rule-coupon-lock-top').checked,
+        couponLockMinPercent: $('rule-coupon-lock-top').checked && minP !== '' ? Number(minP) : null,
         couponLockMaxRemaining: $('rule-coupon-min-price-ratio').checked,
         postWriteVerify: $('rule-post-write-verify').checked,
         brandLimits
