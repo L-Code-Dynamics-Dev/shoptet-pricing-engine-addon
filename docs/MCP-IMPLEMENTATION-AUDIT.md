@@ -1,3 +1,7 @@
+# Update: bounded customer turnover preview
+
+[CUSTOMER-TURNOVER.md](CUSTOMER-TURNOVER.md) documents actual customer/group/order/credit-note reads, a separate opt-in `customers:read` scope, immutable turnover-policy proposals and exact turnover/tier previews. Unlinked refunds, mixed item statuses, missing references and incomplete pagination fail closed. Native assignments and event automation remain unimplemented and are explicitly reported as blocked by the missing executor. The local suite passes 183 tests; no remote writes occurred.
+
 # Update: signed lifecycle and installation-generation boundaries
 
 [SIGNED-LIFECYCLE.md](SIGNED-LIFECYCLE.md) documents tenant-encrypted signing keys, explicit trusted-admin setup, bounded raw-body HMAC verification, ordered idempotent receipts, suspend/uninstall revocation, independently verified resumption, reinstall fencing and vault-rotation preservation. Migration 0015 and local security tests are implemented. The complete local suite passes 173 tests at this checkpoint. Partner callback settings, actual delivery and Cloudflare runtime verification remain release gates; no deployment occurred. Earlier missing-lifecycle findings below are superseded only for this implementation.

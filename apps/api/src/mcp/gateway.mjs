@@ -1,4 +1,5 @@
 import {createDiagnostics} from '../../../../packages/core/src/diagnostics.mjs';
+import {turnoverPolicySchema,previewCustomerTurnover,TurnoverError} from '../../../../packages/core/src/turnover.mjs';
 import {syncRuntime} from '../sync/runtime.mjs';
 import {SyncError} from '../../../../packages/core/src/sync-service.mjs';
 import {syncSelectionSchema} from '../../../../packages/core/src/sync-planner.mjs';
@@ -16,7 +17,7 @@ const json = (body,status) => new Response(JSON.stringify(body),{status,headers:
 export function createMerchantServer(identity, env) {
   const server = new McpServer({name:'lcode-loyalty-pricing',version:'0.2.0'});
   const adapter = createShoptetAdapter({getToken:async()=> (await getShoptetApiAccessToken({db:env.DB,tokenKeys:env.SHOPTET_TOKEN_KEYS,shopId:identity.shopId})).apiAccessToken});
-  const configs=createConfigurationService(env.DB,id=>adapter.verifyBrand(id),async(kind,id,code)=>{const item=await adapter[kind](id);return kind==='pricelist'?item.id===id:kind==='category'?item.guid===id:item.guid===id&&(code===undefined||item.variants.some(v=>v.code===code));});
+  const configs=createConfigurationService(env.DB,id=>adapter.verifyBrand(id),async(kind,id,code)=>{if(kind==='orderStatus')return (await adapter.orderStatuses()).some(s=>s.id===id);const item=await adapter[kind](id);return kind==='pricelist'?item.id===id:kind==='category'?item.guid===id:item.guid===id&&(code===undefined||item.variants.some(v=>v.code===code));});
   const can = scope => Array.isArray(scope)?scope.every(s=>identity.scopes.has(s)):identity.scopes.has(scope);
   const sync=syncRuntime(env,identity.shopId);
   let oauthReady=false;try{oauthConfiguration(env);oauthReady=true;}catch{}
@@ -28,7 +29,7 @@ export function createMerchantServer(identity, env) {
     if (!can(scope)) return;
     server.registerTool(name,{description,inputSchema:z.object(schema).strict(),annotations:{readOnlyHint:readOnly,destructiveHint:!readOnly,openWorldHint:true}},async args=>{
       try { return result(await run(args)); }
-      catch(e) { return {...result({error:e instanceof ShoptetError?e.code:e instanceof ConfigurationError||e instanceof SyncError?e.message:'operation_failed',applied:false}),isError:true}; }
+      catch(e) { return {...result({error:e instanceof ShoptetError?e.code:e instanceof ConfigurationError||e instanceof SyncError||e instanceof TurnoverError?e.message:'operation_failed',applied:false}),isError:true}; }
     });
   }
   tool('shop_get_status','shop:read','Stav přihlášeného obchodu a skutečně dostupné funkce.',{},async()=>({installed:true,capabilities:await capabilities()}));
@@ -58,6 +59,11 @@ export function createMerchantServer(identity, env) {
   const savedPolicy=async()=>{const data=await configuration();return data.configuration.loyaltyProposal??null;};
   async function mutateDraft(revisionId,change){const preview=await configs.preview(identity.shopId,revisionId);const proposal=preview.after.loyaltyProposal;if(!proposal)throw new ConfigurationError('proposal_schema_required');return configs.update(identity.shopId,revisionId,change(proposal));}
   const revisionArg={revisionId:z.string().uuid()},capPercent=z.number().min(0).max(100).refine(n=>Number(n.toFixed(2))===n),tierSchema=proposalSchema.shape.tiers.element;
+  tool('customer_groups_list','customers:read','Skutečné skupiny zákazníků bez osobních údajů.',{},async()=>({groups:await adapter.customerGroups()}));
+  tool('shop_get_order_statuses','customers:read','Skutečné identifikátory stavů objednávek pro návrh obratu.',{},async()=>({statuses:await adapter.orderStatuses()}));
+  tool('loyalty_turnover_policy_get','pricing:read','Uložená politika obratu; není důkazem přiřazení zákazníků.',{},async()=>({policy:(await savedPolicy())?.turnoverPolicy??null,liveAssignmentsVerified:false}));
+  tool('loyalty_turnover_policy_set',['pricing:configure','customers:read'],'Navrhne přesnou politiku obratu v nové revizi, ověří skutečné stavy objednávek.',{...revisionArg,policy:turnoverPolicySchema},a=>mutateDraft(a.revisionId,p=>({...p,turnoverPolicy:a.policy})),false);
+  tool('loyalty_recalculate_preview',['pricing:read','customers:read'],'Omezený náhled skutečného obratu: nejvýše 5 zákazníků, 25 objednávek a 50 dobropisů obchodu. Neúplná data výpočet zastaví; žádné zápisy.',{...revisionArg,customers:z.array(z.string().uuid()).min(1).max(5)},async a=>{const p=await configs.preview(identity.shopId,a.revisionId);return previewCustomerTurnover({adapter,proposal:p.after.loyaltyProposal,customers:a.customers});});
   tool('brand_get','catalog:read','Ověřený detail značky podle GUID.',{brandId:z.string().uuid()},a=>adapter.brand(a.brandId));
   tool('product_get','catalog:read','Detail produktu a jeho variant; bez interních poznámek.',{productId:z.string().uuid()},a=>adapter.product(a.productId));
   tool('pricelist_get','catalog:read','Skutečný detail ceníku.',{pricelistId:z.number().int().positive()},a=>adapter.pricelist(a.pricelistId));

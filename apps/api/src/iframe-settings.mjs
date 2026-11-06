@@ -296,7 +296,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
   if (route === '/mcp-token' && request.method === 'POST') {
     const installed=await env.DB.prepare('SELECT oauth_envelope FROM shoptet_oauth WHERE shop_id=?').bind(shopId).first();if(installed&&!(await lifecycleReady(env.DB,shopId)).ready)return jsonRes({error:'signed_lifecycle_required',message:'Nejdřív v Přehledu zapněte bezpečná oznámení Shoptetu.'},409);
     let body;try{body=await request.json();}catch{return jsonRes({error:'invalid_json'},400);}
-    if(!body || Array.isArray(body) || Object.keys(body).some(k=>k!=='permissions') || (body.permissions!==undefined && (!Array.isArray(body.permissions)||body.permissions.some(k=>!['pricing:configure','pricing:execute','sync:execute','audit:read'].includes(k)))))return jsonRes({error:'invalid_permissions'},400);
+    if(!body || Array.isArray(body) || Object.keys(body).some(k=>k!=='permissions') || (body.permissions!==undefined && (!Array.isArray(body.permissions)||body.permissions.some(k=>!['pricing:configure','pricing:execute','sync:execute','audit:read','customers:read'].includes(k)))))return jsonRes({error:'invalid_permissions'},400);
     const scopes=[...MCP_UI_SCOPES,...new Set(body.permissions||[])];
     const raw = new Uint8Array(24);
     crypto.getRandomValues(raw);
@@ -787,8 +787,8 @@ export function renderAdminHtml(eshopId, auth) {
         <tbody id="tokens-body"></tbody>
       </table>
 
-      <div style="display: flex; gap: 10px; align-items: center; margin: 16px 0;">
-        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-audit"> Povolit čtení historie změn</label><label><input type="checkbox" id="permission-sync"> Povolit spouštění synchronizačních úloh</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odvolat ruční klíče</button>
+      <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0;">
+        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-customers"> Povolit čtení objednávek pro výpočet obratu</label><label><input type="checkbox" id="permission-audit"> Povolit čtení historie změn</label><label><input type="checkbox" id="permission-sync"> Povolit spouštění synchronizačních úloh</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odvolat ruční klíče</button>
         <button type="button" class="btn-shoptet-green" id="token-new">Vygenerovat nový klíč pro MCP</button>
         <span style="color: #777777; font-size: 12px;">Vygenerováním se všechny dosavadní klíče automaticky zneplatní.</span>
       </div>
@@ -1074,7 +1074,7 @@ export function renderAdminHtml(eshopId, auth) {
       if (state.mcpTokens.length && !confirm('Vygenerovat nový klíč pro MCP? Všechny dosavadní klíče přestanou fungovat.')) return;
       const btn = $('token-new'); btn.disabled = true;
       try {
-        const permissions=[];if($('permission-audit').checked)permissions.push('audit:read');if($('permission-sync').checked)permissions.push('sync:execute');if($('permission-configure').checked)permissions.push('pricing:configure');if($('permission-execute').checked)permissions.push('pricing:execute');
+        const permissions=[];if($('permission-customers').checked)permissions.push('customers:read');if($('permission-audit').checked)permissions.push('audit:read');if($('permission-sync').checked)permissions.push('sync:execute');if($('permission-configure').checked)permissions.push('pricing:configure');if($('permission-execute').checked)permissions.push('pricing:execute');
         const res = await api('/mcp-token', { method: 'POST', body: JSON.stringify({permissions}) });
         const fresh = await api('/state');
         state = fresh; renderTokens(); renderOverview();

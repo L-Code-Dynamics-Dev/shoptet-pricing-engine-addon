@@ -27,6 +27,13 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
   }
   const compact = item => Object.fromEntries(['guid','id','code','name','indexName','price','currency','active','variants'].filter(k=>item[k]!==undefined).map(k=>[k, k==='variants' && Array.isArray(item[k]) ? item[k].slice(0,50).map(v=>Object.fromEntries(['code','guid','name','price','active'].filter(k=>v[k]!==undefined).map(k=>[k,v[k]]))) : item[k]]));
   return {
+    async customerGroups(){const data=await read('/api/customers/groups');return z.array(z.object({id:z.number().int().safe(),name:z.string(),customerGroupCode:z.string().nullable(),defaultPricelistId:positiveId.nullable()})).max(1000).parse(data.customerGroups);},
+    async orderStatuses(){const data=await read('/api/eshop',{include:'orderStatuses'});return z.array(z.object({id:z.number().int().safe(),name:z.string()})).max(200).parse(data.orderStatuses?.statuses);},
+    async customer(guid){uuidSchema.parse(guid);const data=await read('/api/customers/'+guid);const customer=customerSchema.parse(data.customer);if(customer.guid!==guid)throw new ShoptetError('customer_reference_mismatch');return customer;},
+    async customerOrders(guid,{page=1,from,to}={}){uuidSchema.parse(guid);positiveId.parse(page);instantSchema.parse(from);instantSchema.parse(to);const data=await read('/api/orders',{customerGuid:guid,creationTimeFrom:from,creationTimeTo:to,page,itemsPerPage:50});return {items:z.array(z.object({code:documentCode,changeTime:instantSchema})).max(50).parse(data.orders),pagination:paginatorSchema.parse(data.paginator)};},
+    async order(code){documentCode.parse(code);const data=await read('/api/orders/'+encodeURIComponent(code));const order=orderSchema.parse(data.order);if(order.code!==code)throw new ShoptetError('order_reference_mismatch');return order;},
+    async creditNotes({page=1}={}){positiveId.parse(page);const data=await read('/api/credit-notes',{page,itemsPerPage:50});return {items:z.array(z.object({code:documentCode})).max(50).parse(data.creditNotes),pagination:paginatorSchema.parse(data.paginator)};},
+    async creditNote(code){documentCode.parse(code);const data=await read('/api/credit-notes/'+encodeURIComponent(code));const note=z.object({code:documentCode,isValid:z.boolean(),orderCode:documentCode.nullable(),customer:z.object({guid:uuidSchema.nullable()}),creationTime:instantSchema}).parse(data.creditNote);if(note.code!==code)throw new ShoptetError('credit_note_reference_mismatch');return note;},
     async verifyBrand(id) {
       if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)) throw new ShoptetError('invalid_brand_id',400);
       const data=await read('/api/brands/'+encodeURIComponent(id));
@@ -98,3 +105,8 @@ const productSchema=z.object({guid:uuidSchema,name:z.string().nullable(),visibil
 const pricelistSchema=z.object({id:positiveId,name:z.string(),currency:z.string().nullable(),isDefault:z.boolean()});
 const paginatorSchema=z.object({page:z.number().int().nonnegative(),pageCount:z.number().int().nonnegative(),totalCount:z.number().int().nonnegative()});
 const profileSchema=z.object({id:positiveId,name:z.string(),vatPayer:z.boolean(),defaultPricelistId:positiveId,timezone:z.string(),currencies:z.array(z.object({code:z.string(),priceDecimalPlaces:z.number().int().min(0).max(4),rounding:z.enum(['none','up','down','math'])})).max(100)});
+const instantSchema=z.string().min(1).max(64).refine(v=>Number.isFinite(Date.parse(v)));
+const documentCode=z.string().min(1).max(128).refine(v=>v!=='.'&&v!=='..');
+const signedMoney=z.string().regex(/^-?\d+\.\d{2}$/).max(24).nullable();
+const customerSchema=z.object({guid:uuidSchema,customerGroup:z.object({id:z.number().int().safe(),name:z.string()}).nullable(),priceList:z.object({id:positiveId,name:z.string()}).nullable(),priceRatio:z.string().regex(/^\d+\.\d{4}$/)});
+const orderSchema=z.object({code:documentCode,creationTime:instantSchema,changeTime:instantSchema,customerGuid:uuidSchema.nullable(),status:z.object({id:z.number().int().safe()}).nullable(),paid:z.boolean().nullable(),price:z.object({currencyCode:z.string().regex(/^[A-Z]{3}$/),withVat:signedMoney,withoutVat:signedMoney}),items:z.array(z.object({itemType:z.enum(['product','bazar','service','shipping','billing','discount-coupon','volume-discount','gift','gift-certificate','generic-item','product-set','product-set-item','deposit']),status:z.object({id:z.number().int().safe()}),itemPrice:z.object({withVat:signedMoney,withoutVat:signedMoney})})).max(1000)});

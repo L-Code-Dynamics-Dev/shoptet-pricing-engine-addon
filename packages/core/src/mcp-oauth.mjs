@@ -1,7 +1,7 @@
 import {randomSecret,digest,pkce} from './crypto.mjs';
 export {randomSecret,digest,pkce} from './crypto.mjs';
 import {lifecycleReady} from './webhooks.mjs';
-export const MCP_SCOPES=['shop:read','catalog:read','pricing:read','pricing:configure','pricing:execute','sync:read','sync:execute','audit:read'];
+export const MCP_SCOPES=['shop:read','catalog:read','customers:read','pricing:read','pricing:configure','pricing:execute','sync:read','sync:execute','audit:read'];
 export class OAuthError extends Error {constructor(code){super(code);this.code=code;}}
 export function oauthConfiguration(env) {
  let origin,clients;try{origin=new URL(env.MCP_PUBLIC_ORIGIN);clients=JSON.parse(env.MCP_OAUTH_CLIENTS);}catch{throw new OAuthError('server_not_configured');}
