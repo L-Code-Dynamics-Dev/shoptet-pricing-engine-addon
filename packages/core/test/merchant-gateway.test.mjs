@@ -20,3 +20,13 @@ test('customer data requires an explicit separate scope and rejects tenant injec
  const scoped=env(['pricing:read','customers:read']),tools=await call('tools/list',{},scoped);assert.ok(tools.result.tools.some(t=>t.name==='loyalty_recalculate_preview'));
  const denied=await call('tools/call',{name:'loyalty_recalculate_preview',arguments:{revisionId:crypto.randomUUID(),customers:[crypto.randomUUID()],shopId:'tenant-B'}},scoped);assert.equal(denied.result.isError,true);
 });
+test('chunked MCP bodies are bounded while streaming, without trusting Content-Length',async()=>{
+ let cancelled=false,chunks=0;
+ const body=new ReadableStream({pull(controller){chunks++;controller.enqueue(new Uint8Array(40000));},cancel(){cancelled=true;}});
+ const response=await handleMerchantMcp(new Request('https://addon.example/mcp',{method:'POST',duplex:'half',headers:{'content-type':'application/json',authorization:'Bearer '+token},body}),env());
+ assert.equal(response.status,413);assert.equal(cancelled,true);assert.ok(chunks<=3);
+});
+test('MCP rejects invalid UTF-8 before handing a body to the SDK',async()=>{
+ const response=await handleMerchantMcp(new Request('https://addon.example/mcp',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+token},body:new Uint8Array([0xff])}),env());
+ assert.equal(response.status,400);assert.equal((await response.json()).error,'invalid_utf8');
+});

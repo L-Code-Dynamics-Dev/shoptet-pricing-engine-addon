@@ -1,3 +1,7 @@
+# Update: bounded MCP request streams
+
+The gateway now enforces its 64 KiB request limit while reading, including chunked bodies without Content-Length, and rejects malformed UTF-8 before SDK dispatch. Stream cancellation is covered by regression tests. The local suite passes 185 tests. Both Worker dry-run bundles pass; actual Cloudflare runtime and native integration remain unverified.
+
 # Update: bounded customer turnover preview
 
 [CUSTOMER-TURNOVER.md](CUSTOMER-TURNOVER.md) documents actual customer/group/order/credit-note reads, a separate opt-in `customers:read` scope, immutable turnover-policy proposals and exact turnover/tier previews. Unlinked refunds, mixed item statuses, missing references and incomplete pagination fail closed. Native assignments and event automation remain unimplemented and are explicitly reported as blocked by the missing executor. The local suite passes 183 tests; no remote writes occurred.
