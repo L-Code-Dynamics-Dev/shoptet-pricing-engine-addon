@@ -41,7 +41,8 @@ export async function handleShoptetOrderWebhook(request,env,fetchImpl=fetch,ctx=
     const settingsRow=await env.DB.prepare('SELECT config_json FROM tenant_settings WHERE shop_id=?')
       .bind(verifiedShopId).first();
     const config=settingsRow?JSON.parse(settingsRow.config_json):{};
-    const policy=config.turnoverPolicy||{
+    const proposal=config.loyaltyProposal ?? config;
+    const policy=proposal.turnoverPolicy || config.turnoverPolicy || {
      period:{from:'2020-01-01T00:00:00Z',to:'2030-01-01T00:00:00Z'},
      qualifyingStatusIds:[-3],
      requirePaid:true,
@@ -57,7 +58,7 @@ export async function handleShoptetOrderWebhook(request,env,fetchImpl=fetch,ctx=
     };
     const policyRow=await getPricelistPolicy(env.DB,verifiedShopId);
     const mode=policyRow?.engineMode==='active'?'live':'staging';
-    return {policy,tiers:config.tiers||[],mode};
+    return {policy,tiers:proposal.tiers ?? config.tiers ?? [],mode};
    }
   });
   return json(result,result.accepted?200:503);
