@@ -9,8 +9,14 @@ import {
 } from './loyalty-repository.mjs';
 
 function moneyMinor(value) {
-  if (typeof value !== 'string' || !/^-?\d+\.\d{2}$/.test(value)) return 0;
-  return Number(BigInt(value.replace('.', '')));
+  if (typeof value !== 'string' || !/^-?\d+\.\d{2}$/.test(value) || value.length > 24) {
+    throw new Error('order_amount_invalid');
+  }
+  const integer = BigInt(value.replace('.', ''));
+  if (integer > BigInt(Number.MAX_SAFE_INTEGER) || integer < -BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error('order_amount_overflow');
+  }
+  return Number(integer);
 }
 
 export async function processOrderWebhook({
@@ -77,6 +83,15 @@ export async function processOrderWebhook({
   if (!order.customerGuid) {
     await db.prepare("UPDATE loyalty_webhook_events SET state='processed' WHERE shop_id=? AND event_hash=?").bind(shopId, eventHash).run();
     return { accepted: true, guestOrder: true, orderCode };
+  }
+
+  // Ledger monetary values cannot be summed across currencies without a
+  // verified conversion policy. Webhook processing has no conversion snapshot.
+  const existingCurrency = await db.prepare(
+    'SELECT currency FROM loyalty_customer_states WHERE shop_id=? AND customer_guid=?'
+  ).bind(shopId, order.customerGuid).first();
+  if (existingCurrency?.currency && existingCurrency.currency !== order.price?.currencyCode) {
+    throw new Error('turnover_currency_mismatch');
   }
 
   // 4. Calculate clean qualifying amount based on configured turnover policy
