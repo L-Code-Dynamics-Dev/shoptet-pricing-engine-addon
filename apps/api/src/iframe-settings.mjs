@@ -884,7 +884,7 @@ const SHOPTET_STYLES = `
 function renderErrorPage(error, status) {
   const nonce = crypto.randomUUID().replace(/-/g, '');
   const messages = {
-    missing_code: 'Stránku otevřete z administrace Shoptetu: <strong>Propojení → Věrnostní slevy a ceníky</strong>.',
+    missing_code: 'Stránku otevřete z administrace Shoptetu: <strong>Propojení → L-Code Loyalty Pricing Engine B2C</strong>.',
     missing_eshop_id: 'V adrese chybí parametr <code>eshopId</code>.',
     not_installed: 'Doplněk není na tomto e-shopu nainstalovaný.',
     invalid_preview_key: 'Neplatný náhledový klíč.',
@@ -894,8 +894,8 @@ function renderErrorPage(error, status) {
   };
   const msg = messages[error] || `Ověření uživatele se nezdařilo (${escapeHtml(error)}). Zkuste stránku otevřít znovu z administrace.`;
   return new Response(`<!DOCTYPE html><html lang="cs"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Věrnostní slevy a ceníky</title><style>${SHOPTET_STYLES}</style></head><body><div class="page-card">
-<div class="title-row"><h1 class="page-title">Věrnostní slevy a ceníky</h1></div>
+<title>L-Code Loyalty Pricing Engine B2C</title><style>${SHOPTET_STYLES}</style></head><body><div class="page-card">
+<div class="title-row"><h1 class="page-title">L-Code Loyalty Pricing Engine B2C</h1></div>
 <div class="alert-error">${msg}</div>
 </div>
 <script nonce="${nonce}">
@@ -913,7 +913,7 @@ export function renderAdminHtml(eshopId, auth) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Věrnostní slevy a ceníky</title>
+  <title>L-Code Loyalty Pricing Engine B2C</title>
   <style>
     ${SHOPTET_STYLES}
   </style>
@@ -926,12 +926,12 @@ export function renderAdminHtml(eshopId, auth) {
       <span class="sep">&gt;</span>
       <span>Propojení</span>
       <span class="sep">&gt;</span>
-      <span class="current">Věrnostní slevy a ceníky</span>
+      <span class="current">L-Code Loyalty Pricing Engine B2C</span>
     </div>
 
     <!-- Title Row -->
     <div class="title-row">
-      <h1 class="page-title">Věrnostní slevy a ceníky</h1>
+      <h1 class="page-title">L-Code Loyalty Pricing Engine B2C</h1>
       <div class="top-actions">
         <button type="button" class="btn-shoptet-green" id="btn-top-save">Uložit</button>
       </div>
