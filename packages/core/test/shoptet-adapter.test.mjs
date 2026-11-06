@@ -19,3 +19,74 @@ test('native PATCH timeout is unknown, never retried; default adapter forbids wr
  const off=createShoptetAdapter({getToken:async()=>'x',fetchImpl:async()=>{assert.fail('no fetch allowed');}});await assert.rejects(off.writePrices(2,[patch]),/write_not_authorized/);
  const a=createShoptetAdapter({getToken:async()=>'x',authorizeWrite:async()=>{},fetchImpl:async()=>{calls++;throw Error('timeout');}});assert.equal((await a.writePrices(2,[patch])).outcome,'unknown');assert.equal(calls,1);
 });
+
+test('updateCustomerPricelist validates customer state, permissions, destination pricelist, patches and verifies readback', async () => {
+  const customerGuid = '1f676f66-d9ea-11f1-a35a-bc241195dd28';
+  let customerPricelistId = 1;
+  let priceRatio = '1.0000';
+  let patchCalls = 0;
+  let authorizeCalls = 0;
+
+  const fetchImpl = async (url, options = {}) => {
+    if (url === 'https://api.myshoptet.com/api/customers/' + customerGuid) {
+      if (options.method === 'PATCH') {
+        patchCalls++;
+        const body = JSON.parse(options.body);
+        assert.equal(body.data.pricelistId, 2);
+        customerPricelistId = body.data.pricelistId;
+        return response({ customer: { guid: customerGuid, priceList: { id: 2, name: 'VIP 1' }, priceRatio } });
+      }
+      return response({ customer: { guid: customerGuid, customerGroup: null, priceList: { id: customerPricelistId, name: 'Pricelist ' + customerPricelistId }, priceRatio } });
+    }
+    if (url === 'https://api.myshoptet.com/api/price-lists/2') {
+      return response({ priceList: { id: 2, name: 'VIP 1', currency: 'CZK', isDefault: false } });
+    }
+    throw Error('unexpected url: ' + url);
+  };
+
+  // 1. Without authorizeWrite: fails closed
+  const unauth = createShoptetAdapter({ getToken: async () => 'token', fetchImpl });
+  await assert.rejects(unauth.updateCustomerPricelist(customerGuid, 2), /write_not_authorized/);
+
+  // 2. Individual price ratio blocks assignment
+  priceRatio = '0.9000';
+  const adapter = createShoptetAdapter({
+    getToken: async () => 'token',
+    authorizeWrite: async () => { authorizeCalls++; },
+    fetchImpl
+  });
+  const blockedRes = await adapter.updateCustomerPricelist(customerGuid, 2);
+  assert.equal(blockedRes.outcome, 'blocked');
+  assert.equal(blockedRes.reason, 'price_ratio_locked');
+  assert.equal(patchCalls, 0);
+
+  // 3. Normal customer promotion: patches and readback verifies
+  priceRatio = '1.0000';
+  customerPricelistId = 1;
+  const successRes = await adapter.updateCustomerPricelist(customerGuid, 2);
+  assert.equal(successRes.outcome, 'accepted');
+  assert.equal(successRes.previousPricelistId, 1);
+  assert.equal(successRes.pricelistId, 2);
+  assert.equal(successRes.verified, true);
+  assert.equal(patchCalls, 1);
+
+  // 4. If customer already on target pricelist: no_change, no PATCH
+  const noChangeRes = await adapter.updateCustomerPricelist(customerGuid, 2);
+  assert.equal(noChangeRes.outcome, 'no_change');
+  assert.equal(patchCalls, 1); // Not incremented!
+
+  // 5. Timeout on PATCH returns outcome: unknown without retry
+  let timeoutAdapter = createShoptetAdapter({
+    getToken: async () => 'token',
+    authorizeWrite: async () => {},
+    fetchImpl: async (url, options = {}) => {
+      if (options.method === 'PATCH') throw Error('timeout');
+      if (url.includes('/api/customers/')) return response({ customer: { guid: customerGuid, customerGroup: null, priceList: { id: 1, name: 'Standard' }, priceRatio: '1.0000' } });
+      if (url.includes('/api/price-lists/2')) return response({ priceList: { id: 2, name: 'VIP 1', currency: 'CZK', isDefault: false } });
+      throw Error('unexpected');
+    }
+  });
+  const timeoutRes = await timeoutAdapter.updateCustomerPricelist(customerGuid, 2);
+  assert.equal(timeoutRes.outcome, 'unknown');
+  assert.equal(timeoutRes.requiresReadback, true);
+});

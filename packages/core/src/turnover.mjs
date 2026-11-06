@@ -117,3 +117,11 @@ export async function previewCustomerTurnover({adapter,proposal,customers}){
  }
  return {customers:results,policy,snapshotOnly:true,retrievedAt:new Date().toISOString(),limits:{customers:5,orders:25,shopCreditNotes:50},applied:false,liveAssignmentsVerified:false};
 }
+
+const uuid=z.string().uuid();
+const positive=z.number().int().positive();
+export async function executeCustomerTierAssignment({ adapter, customerGuid, targetPricelistId }) {
+ uuid.parse(customerGuid);
+ positive.parse(targetPricelistId);
+ return adapter.updateCustomerPricelist(customerGuid, targetPricelistId);
+}

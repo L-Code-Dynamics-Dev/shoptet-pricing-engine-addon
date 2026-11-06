@@ -5,7 +5,7 @@ export const NATIVE_PRICING_POLICY_VERSION='native-price-policy-v1';
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const now=()=>Math.floor(Date.now()/1000);
 export async function ownsSyncFence(db,shop,job,fence){return !!await db.prepare('SELECT 1 FROM sync_shop_fences WHERE shop_id=? AND active_job_id=? AND epoch=?').bind(shop,job,fence).first();}
-export function matchesExpectedPrice(row,action,p){return row?.code===action.code&&row.currencyCode===p.currency&&row.price.priceRatio==='1.000'&&activeActionMinor(row,p.vatPayer,p.date)===null&&formatApiPrice(grossApiPrice(row,p.vatPayer))===action.expected.price&&row.sales.discountCoupon===action.expected.discountCoupon;}
+export function matchesExpectedPrice(row,action,p){return row?.code===action.code&&row.currencyCode===p.currency&&row.price.priceRatio==='1.000'&&activeActionMinor(row,p.vatPayer,p.date)===null&&formatApiPrice(grossApiPrice(row,p.vatPayer))===action.expected.price&&(action.expected.commonPrice===undefined||row.price.commonPrice===action.expected.commonPrice)&&row.sales.discountCoupon===action.expected.discountCoupon;}
 export function createSyncRunner({db,adapterFactory,assertLiveAllowed=async()=>{throw new SyncError('live_execution_not_activated');}}){
  async function job(shop,id){const j=await db.prepare('SELECT * FROM sync_jobs WHERE shop_id=? AND job_id=?').bind(shop,id).first();if(!j)throw new SyncError('job_not_found');return j;}
  async function check(shop,id,fence){if(!await ownsSyncFence(db,shop,id,fence))throw new SyncError('stale_sync_worker');}

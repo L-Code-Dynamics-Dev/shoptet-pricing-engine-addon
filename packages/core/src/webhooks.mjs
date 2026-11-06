@@ -9,7 +9,7 @@ export async function initializeWebhookKey({db,shopId,tokenKeys,fetchImpl=fetch}
  const token=await getShoptetApiAccessToken({db,shopId,tokenKeys,fetchImpl,expectedOAuthEnvelope:row.oauth_envelope});
  const claimed=await db.prepare("INSERT INTO webhook_key_operations(shop_id,oauth_sha256,state) SELECT ?,?,'processing' WHERE EXISTS(SELECT 1 FROM shoptet_oauth o JOIN installations i ON i.shop_id=o.shop_id WHERE o.shop_id=? AND o.oauth_envelope=? AND i.state='active') ON CONFLICT(shop_id,oauth_sha256) DO NOTHING").bind(shopId,hash,shopId,row.oauth_envelope).run();if(!claimed.meta?.changes)throw Error('webhook_setup_requires_attention');
  try{
-  const response=await fetchImpl('https://api.myshoptet.com/api/webhooks/renew-signature-key',{method:'POST',redirect:'error',signal:AbortSignal.timeout(10000),headers:{'Shoptet-Access-Token':token.apiAccessToken,'Content-Type':'application/json'}});
+  const response=await fetchImpl('https://api.myshoptet.com/api/webhooks/renew-signature-key',{method:'POST',redirect:'manual',signal:AbortSignal.timeout(10000),headers:{'Shoptet-Access-Token':token.apiAccessToken,'Content-Type':'application/json'}});
   if(!response.ok)throw Error('webhook_key_unavailable');const body=await response.json();if(body.errors?.length||typeof body.data?.signatureKey!=='string'||!body.data.signatureKey||body.data.signatureKey.length>512)throw Error('invalid_webhook_key');
   const envelope=await createTokenVault(tokenKeys).seal(shopId,'webhook',body.data.signatureKey);
   const result=await db.batch([

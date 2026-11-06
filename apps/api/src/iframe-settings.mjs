@@ -5,6 +5,16 @@ import {getShoptetApiAccessToken} from '../../../packages/core/src/shoptet-oauth
 import {syncRuntime} from './sync/runtime.mjs';
 import {createMcpOAuth,oauthConfiguration,digest,OAuthError} from '../../../packages/core/src/mcp-oauth.mjs';
 import { createConfigurationService } from '../../../packages/core/src/configuration.mjs';
+import {
+  getPricelistPolicy,
+  getLatestRecalculationPlan,
+  getRecalculationPlanDetails,
+  approveRecalculationPlan
+} from '../../../packages/core/src/loyalty-repository.mjs';
+import {
+  generateCustomerRecalculationPlan,
+  executeCustomerRecalculationBatch
+} from '../../../packages/core/src/loyalty-batch-runner.mjs';
 /**
  * L-Code Loyalty Pricing Engine — addon settings page embedded in Shoptet administration.
  * High-fidelity native Shoptet administration theme with Shoptet tabs, cards, and buttons.
@@ -224,6 +234,89 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       }
     } catch {return jsonRes({error:'configuration_action_failed'},409);}
     return jsonRes({error:'not_found'},404);
+  }
+
+  if (route.startsWith('/loyalty/')) {
+    const installed = await env.DB.prepare('SELECT state FROM installations WHERE shop_id=?').bind(shopId).first();
+    if (installed?.state !== 'active') return jsonRes({ error: 'inactive_installation' }, 403);
+
+    const adapter = createShoptetAdapter({
+      getToken: async () => (await getShoptetApiAccessToken({ db: env.DB, shopId, tokenKeys: env.SHOPTET_TOKEN_KEYS })).apiAccessToken,
+      authorizeWrite: async () => true
+    });
+
+    try {
+      if (route === '/loyalty/status' && request.method === 'GET') {
+        const policyRow = await getPricelistPolicy(env.DB, shopId);
+        const engineMode = policyRow?.engineMode || 'installation';
+        const latestPlan = await getLatestRecalculationPlan(env.DB, shopId);
+        return jsonRes({ engineMode, latestPlan });
+      }
+
+      if (route === '/loyalty/dry-run' && request.method === 'POST') {
+        const settingsRow = await env.DB.prepare('SELECT config_json FROM tenant_settings WHERE shop_id=?').bind(shopId).first();
+        const config = settingsRow ? JSON.parse(settingsRow.config_json) : {};
+        const policy = config.turnoverPolicy || {
+          period: { from: '2020-01-01T00:00:00Z', to: '2030-01-01T00:00:00Z' },
+          qualifyingStatusIds: [-3],
+          requirePaid: true,
+          shipping: 'exclude',
+          billing: 'exclude',
+          discounts: 'after_discounts',
+          vat: 'inclusive',
+          refunds: 'exclude_order_with_valid_credit_note',
+          guestCustomers: 'exclude',
+          itemStatuses: 'require_match_order',
+          upgrades: 'recalculate',
+          downgrades: 'keep_current'
+        };
+        const tiers = config.tiers || [];
+        const plan = await generateCustomerRecalculationPlan({
+          db: env.DB,
+          shopId,
+          adapter,
+          policy,
+          tiers
+        });
+        return jsonRes(plan);
+      }
+
+      if (route === '/loyalty/plan' && request.method === 'GET') {
+        const url = new URL(request.url);
+        const planId = url.searchParams.get('planId');
+        let targetPlanId = planId;
+        if (!targetPlanId) {
+          const latest = await getLatestRecalculationPlan(env.DB, shopId);
+          targetPlanId = latest?.plan_id;
+        }
+        if (!targetPlanId) return jsonRes({ plan: null, items: [] });
+        const details = await getRecalculationPlanDetails(env.DB, shopId, targetPlanId);
+        return jsonRes(details || { plan: null, items: [] });
+      }
+
+      if (route === '/loyalty/approve' && request.method === 'POST') {
+        const body = await request.json();
+        if (!body.planId || typeof body.planId !== 'string') return jsonRes({ error: 'invalid_request' }, 400);
+        const res = await approveRecalculationPlan(env.DB, shopId, body.planId);
+        return jsonRes(res);
+      }
+
+      if (route === '/loyalty/sync' && request.method === 'POST') {
+        const body = await request.json();
+        if (!body.planId || typeof body.planId !== 'string') return jsonRes({ error: 'invalid_request' }, 400);
+        const res = await executeCustomerRecalculationBatch({
+          db: env.DB,
+          shopId,
+          planId: body.planId,
+          adapter,
+          batchSize: 50
+        });
+        return jsonRes(res);
+      }
+    } catch (e) {
+      return jsonRes({ error: 'loyalty_action_failed', message: e?.message }, 409);
+    }
+    return jsonRes({ error: 'not_found' }, 404);
   }
 
   if (route === '/state' && request.method === 'GET') {
@@ -1131,6 +1224,7 @@ export function renderAdminHtml(eshopId, auth) {
         </div>
       </div>
 
+      <div id="loyalty-onboarding-container"></div>
       <div id="approvals-container"></div>
       <div id="sync-approvals-container"></div>
     </section>
@@ -1678,6 +1772,199 @@ export function renderAdminHtml(eshopId, auth) {
       resize();
     }
 
+    async function renderLoyaltyOnboarding() {
+      const root = $('loyalty-onboarding-container');
+      if (!root) return;
+      root.textContent = '';
+
+      try {
+        const status = await api('/loyalty/status');
+        const card = document.createElement('div');
+        card.style.cssText = 'background: #ffffff; border: 1px solid #d9d9d9; border-radius: 4px; padding: 18px 20px; margin-top: 18px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);';
+
+        const heading = document.createElement('div');
+        heading.className = 'section-heading';
+        heading.style.marginTop = '0';
+        heading.textContent = 'Inicializace věrnostního systému (Onboarding & Schválení)';
+
+        const modeBadge = document.createElement('div');
+        modeBadge.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 3px; font-size: 13px; font-weight: 600; margin-bottom: 12px;';
+        
+        const modeLabels = {
+          installation: { text: '1. Instalační režim (automatické změny pozastaveny)', bg: '#fcf8e3', color: '#8a6d3b', border: '#faebcc' },
+          dry_run_ready: { text: '2. Analýza dokončena (čeká na schválení změn)', bg: '#e8f4fc', color: '#31708f', border: '#bce8f1' },
+          approved: { text: '3. Schváleno obchodníkem (připraveno k synchronizaci)', bg: '#dff0d8', color: '#3c763d', border: '#d6e9c6' },
+          syncing: { text: '4. Probíhá synchronizace zákazníků do Shoptetu…', bg: '#f2dede', color: '#a94442', border: '#ebccd1' },
+          active: { text: '5. Automatický přepočet aktivní (živý provoz)', bg: '#dff0d8', color: '#3c763d', border: '#d6e9c6' }
+        };
+        const m = modeLabels[status.engineMode] || modeLabels.installation;
+        modeBadge.style.background = m.bg;
+        modeBadge.style.color = m.color;
+        modeBadge.style.border = '1px solid ' + m.border;
+        modeBadge.textContent = m.text;
+
+        const desc = document.createElement('p');
+        desc.style.cssText = 'font-size: 13px; color: #555555; line-height: 1.5; margin-bottom: 16px;';
+
+        const actionsDiv = document.createElement('div');
+        actionsDiv.style.cssText = 'display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap;';
+
+        if (status.engineMode === 'installation') {
+          desc.textContent = 'Věrnostní engine je v bezpečném instalačním režimu. Žádné automatické změny zákaznických ceníků se neprovádějí. Spusťte hromadnou analýzu obratu vašich zákazníků (Dry Run) pro výpočet navrhovaných VIP hladin bez jakýchkoliv zápisů do e-shopu.';
+          const btnDryRun = document.createElement('button');
+          btnDryRun.type = 'button';
+          btnDryRun.className = 'btn-shoptet-green';
+          btnDryRun.textContent = 'Spustit hromadnou analýzu (Dry Run)';
+          btnDryRun.addEventListener('click', async () => {
+            btnDryRun.disabled = true;
+            btnDryRun.textContent = 'Analyzuji zákazníky…';
+            try {
+              await api('/loyalty/dry-run', { method: 'POST', body: '{}' });
+              flash('Hromadná analýza (Dry Run) byla úspěšně dokončena.');
+              await renderLoyaltyOnboarding();
+            } catch (err) {
+              btnDryRun.disabled = false;
+              btnDryRun.textContent = 'Spustit hromadnou analýzu (Dry Run)';
+              flash(err.message, true);
+            }
+          });
+          actionsDiv.append(btnDryRun);
+        } else if (status.engineMode === 'dry_run_ready' || status.engineMode === 'approved') {
+          desc.textContent = 'Hromadná analýza byla dokončena. Níže naleznete přesný přehled všech navrhovaných změn zákaznických ceníků k vašemu schválení.';
+
+          const planData = await api('/loyalty/plan');
+          const plan = planData.plan;
+          const items = planData.items || [];
+
+          if (plan) {
+            const summaryBox = document.createElement('div');
+            summaryBox.style.cssText = 'display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px;';
+            summaryBox.innerHTML = '<div style="background: #f7f9fa; border: 1px solid #e2e5e8; border-radius: 3px; padding: 8px 12px; text-align: center;"><div style="font-size: 11px; color: #777;">Celkem zákazníků</div><div style="font-size: 18px; font-weight: bold; color: #333;">' + plan.total_customers + '</div></div>' +
+              '<div style="background: #f7f9fa; border: 1px solid #e2e5e8; border-radius: 3px; padding: 8px 12px; text-align: center;"><div style="font-size: 11px; color: #777;">Ke změně ceníku</div><div style="font-size: 18px; font-weight: bold; color: #2e6da4;">' + plan.changes_needed + '</div></div>' +
+              '<div style="background: #f7f9fa; border: 1px solid #e2e5e8; border-radius: 3px; padding: 8px 12px; text-align: center;"><div style="font-size: 11px; color: #777;">Beze změny</div><div style="font-size: 18px; font-weight: bold; color: #3c763d;">' + (plan.total_customers - plan.changes_needed - plan.b2b_skipped) + '</div></div>' +
+              '<div style="background: #f7f9fa; border: 1px solid #e2e5e8; border-radius: 3px; padding: 8px 12px; text-align: center;"><div style="font-size: 11px; color: #777;">Chráněno (B2B/zámek)</div><div style="font-size: 18px; font-weight: bold; color: #8a6d3b;">' + plan.b2b_skipped + '</div></div>';
+            card.append(summaryBox);
+
+            const tableWrap = document.createElement('div');
+            tableWrap.className = 'shoptet-table-responsive';
+            tableWrap.style.maxHeight = '280px';
+            tableWrap.style.overflowY = 'auto';
+            tableWrap.style.marginBottom = '14px';
+
+            const table = document.createElement('table');
+            table.className = 'shoptet-table';
+            const tbodyHtml = items.map(it => {
+              const statusBadges = {
+                ready_to_patch: '<span style="color: #2e6da4; font-weight: 600;">Ke změně</span>',
+                no_change: '<span style="color: #777;">Beze změny</span>',
+                b2b_locked: '<span style="color: #8a6d3b;">Chráněno B2B</span>',
+                verified: '<span style="color: #3c763d; font-weight: 600;">Zapsáno</span>'
+              };
+              const statusHtml = statusBadges[it.status] || it.status;
+              const curPlName = (state.pricelists && state.pricelists.find(p => p.id === it.current_pricelist_id)?.name) || (it.current_pricelist_id ? 'Ceník #' + it.current_pricelist_id : 'Výchozí');
+              const tgtPlName = (state.pricelists && state.pricelists.find(p => p.id === it.target_pricelist_id)?.name) || (it.target_pricelist_id ? 'Ceník #' + it.target_pricelist_id : 'Výchozí');
+              const turnoverKc = (it.calculated_turnover_minor / 100).toLocaleString('cs-CZ') + ' Kč';
+              return '<tr><td><strong>' + escapeHtml(it.customer_name || 'Zákazník') + '</strong></td><td>' + escapeHtml(it.customer_email || '—') + '</td><td>' + escapeHtml(curPlName) + '</td><td><strong style="color: #2e6da4;">' + escapeHtml(tgtPlName) + '</strong></td><td>' + turnoverKc + '</td><td>' + statusHtml + '</td></tr>';
+            }).join('');
+
+            table.innerHTML = '<thead><tr><th>Zákazník</th><th>E-mail</th><th>Stávající ceník</th><th>Navržený ceník</th><th>Započtený obrat</th><th>Stav</th></tr></thead><tbody>' + tbodyHtml + '</tbody>';
+            tableWrap.append(table);
+            card.append(tableWrap);
+
+            if (status.engineMode === 'dry_run_ready') {
+              const btnApprove = document.createElement('button');
+              btnApprove.type = 'button';
+              btnApprove.className = 'btn-shoptet-green';
+              btnApprove.textContent = 'Schválit a provést synchronizaci';
+              btnApprove.addEventListener('click', async () => {
+                btnApprove.disabled = true;
+                btnApprove.textContent = 'Schvaluji…';
+                try {
+                  await api('/loyalty/approve', { method: 'POST', body: JSON.stringify({ planId: plan.plan_id }) });
+                  flash('Plán byl schválen. Spouštím dávkovou synchronizaci…');
+                  await api('/loyalty/sync', { method: 'POST', body: JSON.stringify({ planId: plan.plan_id }) });
+                  flash('Synchronizace zákazníků byla úspěšně dokončena a automatický přepočet je aktivní.');
+                  await renderLoyaltyOnboarding();
+                } catch (err) {
+                  btnApprove.disabled = false;
+                  btnApprove.textContent = 'Schválit a provést synchronizaci';
+                  flash(err.message, true);
+                }
+              });
+              actionsDiv.append(btnApprove);
+            } else if (status.engineMode === 'approved') {
+              const btnSync = document.createElement('button');
+              btnSync.type = 'button';
+              btnSync.className = 'btn-shoptet-green';
+              btnSync.textContent = 'Spustit synchronizaci ceníků';
+              btnSync.addEventListener('click', async () => {
+                btnSync.disabled = true;
+                btnSync.textContent = 'Synchronizuji…';
+                try {
+                  await api('/loyalty/sync', { method: 'POST', body: JSON.stringify({ planId: plan.plan_id }) });
+                  flash('Synchronizace byla dokončena a automatický přepočet aktivován.');
+                  await renderLoyaltyOnboarding();
+                } catch (err) {
+                  btnSync.disabled = false;
+                  btnSync.textContent = 'Spustit synchronizaci ceníků';
+                  flash(err.message, true);
+                }
+              });
+              actionsDiv.append(btnSync);
+            }
+
+            const btnReDryRun = document.createElement('button');
+            btnReDryRun.type = 'button';
+            btnReDryRun.className = 'btn-secondary';
+            btnReDryRun.textContent = 'Analyzovat znovu (Nový Dry Run)';
+            btnReDryRun.addEventListener('click', async () => {
+              btnReDryRun.disabled = true;
+              btnReDryRun.textContent = 'Počítám…';
+              try {
+                await api('/loyalty/dry-run', { method: 'POST', body: '{}' });
+                flash('Nový Dry Run byl vygenerován.');
+                await renderLoyaltyOnboarding();
+              } catch (err) {
+                btnReDryRun.disabled = false;
+                btnReDryRun.textContent = 'Analyzovat znovu (Nový Dry Run)';
+                flash(err.message, true);
+              }
+            });
+            actionsDiv.append(btnReDryRun);
+          }
+        } else if (status.engineMode === 'active') {
+          desc.innerHTML = '<span style="color: #3c763d; font-weight: 600;">✓ Inicializace a synchronizace byla úspěšně dokončena.</span><br>' +
+            'Automatický přepočet věrnostních ceníků je v živém provozu. Jakákoli nová nebo upravená objednávka okamžitě aktualizuje zařazení zákazníka.';
+          
+          const btnNewAudit = document.createElement('button');
+          btnNewAudit.type = 'button';
+          btnNewAudit.className = 'btn-secondary';
+          btnNewAudit.textContent = 'Spustit novou hromadnou kontrolu (Dry Run)';
+          btnNewAudit.addEventListener('click', async () => {
+            btnNewAudit.disabled = true;
+            btnNewAudit.textContent = 'Počítám…';
+            try {
+              await api('/loyalty/dry-run', { method: 'POST', body: '{}' });
+              flash('Kontrolní Dry Run byl vygenerován.');
+              await renderLoyaltyOnboarding();
+            } catch (err) {
+              btnNewAudit.disabled = false;
+              btnNewAudit.textContent = 'Spustit novou hromadnou kontrolu (Dry Run)';
+              flash(err.message, true);
+            }
+          });
+          actionsDiv.append(btnNewAudit);
+        }
+
+        card.prepend(heading, modeBadge, desc);
+        card.append(actionsDiv);
+        root.append(card);
+      } catch (e) {
+        // Fallback
+      }
+      resize();
+    }
+
     $('onboarding-retry').addEventListener('click',async()=>{try{await api('/installation/retry',{method:'POST',body:'{}'});state=await api('/state');renderOverview();}catch(e){flash(e.message,true);}});
 
     async function renderWebhookStatus(){try{const result=await api('/webhooks/status');$('webhook-status').textContent=result.ready?'Podpisový klíč je nastaven. Doručení oznámení je třeba ověřit.':'Bezpečná oznámení nejsou nastavená.';$('webhook-enable').disabled=result.ready||state.installation?.state!=='active';if(!result.ready)$('token-new').disabled=true;}catch{$('webhook-status').textContent='Stav bezpečných oznámení nelze načíst.';}}
@@ -1689,7 +1976,7 @@ export function renderAdminHtml(eshopId, auth) {
         state = await api('/state');
         try { const plData = await api('/catalog/pricelists'); state.pricelists = plData.items || []; } catch { state.pricelists = []; }
         $('loading').remove();
-        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals(); renderWebhookStatus();
+        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals(); renderWebhookStatus(); renderLoyaltyOnboarding();
       } catch (e) {
         $('loading').textContent = '';
         flash(e.message, true);

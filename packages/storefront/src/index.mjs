@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const __filename = typeof import.meta.url === 'string' && import.meta.url ? fileURLToPath(import.meta.url) : '';
+const __dirname = __filename ? dirname(__filename) : '';
 
 export const STOREFRONT_FILE_NAMES = [
   'vip_catalog.js',
@@ -15,8 +15,13 @@ export const STOREFRONT_FILE_NAMES = [
 
 export function getStorefrontAssets() {
   const assets = {};
+  if (!__dirname) return assets;
   for (const name of STOREFRONT_FILE_NAMES) {
-    assets[name] = readFileSync(join(__dirname, name), 'utf-8');
+    try {
+      assets[name] = readFileSync(join(__dirname, name), 'utf-8');
+    } catch {
+      assets[name] = '';
+    }
   }
   return assets;
 }

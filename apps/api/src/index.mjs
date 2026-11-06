@@ -1,4 +1,4 @@
-import {handleShoptetLifecycle} from './shoptet-webhooks.mjs';
+import {handleShoptetLifecycle, handleShoptetOrderWebhook} from './shoptet-webhooks.mjs';
 import {retryInstallations} from '../../../packages/core/src/installation-verification.mjs';
 import {handleOAuth} from './oauth/routes.mjs';
 import { handleMerchantMcp } from './mcp/gateway.mjs';
@@ -57,6 +57,7 @@ export default {
     }
 
     if(['/shoptet/uninstall','/shoptet/lifecycle'].includes(url.pathname))return handleShoptetLifecycle(request,env,ctx);
+    if(['/shoptet/webhook','/api/webhooks/order'].includes(url.pathname))return handleShoptetOrderWebhook(request,env,fetch,ctx);
 
     // Unauthenticated legacy shop-ID endpoints cannot manage or inspect tenants.
     if (['/shoptet/status','/shoptet/api-test'].includes(url.pathname)) return json({ error: 'trusted_lifecycle_authentication_required' }, 403);

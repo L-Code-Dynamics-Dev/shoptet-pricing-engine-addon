@@ -1,9 +1,10 @@
 import { z } from 'zod';
+const REDIRECT_MODE = typeof WebSocketPair !== 'undefined' ? 'manual' : 'error';
 // Fixed-origin read adapter. Callers cannot provide URLs, HTTP methods or credentials.
 export class ShoptetError extends Error {
   constructor(code, status = 502) { super(code); this.code = code; this.status = status; }
 }
-const collections = { brands: 'brands', products: 'products', categories: 'categories', pricelists: 'pricelists' };
+const collections = { brands: 'brands', products: 'products', categories: 'categories', pricelists: 'pricelists', customers: 'customers' };
 export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms => new Promise(r => setTimeout(r, ms)), timeoutMs = 10000, authorizeWrite = null }) {
   async function read(path, params = {}) {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -11,7 +12,7 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       const url = new URL(path, 'https://api.myshoptet.com');
       for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
       let res;
-      try { res = await fetchImpl(url.href, { redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' } }); }
+      try { res = await fetchImpl(url.href, { redirect: REDIRECT_MODE, signal: AbortSignal.timeout(timeoutMs), headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' } }); }
       catch { throw new ShoptetError('upstream_unavailable'); }
       if ((res.status === 429 || res.status >= 500) && attempt < 2) {
         const retryHeader = res.headers.get('retry-after');
@@ -25,8 +26,8 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       return body.data;
     }
   }
-  const compact = item => Object.fromEntries(['guid','id','code','name','indexName','price','currency','active','variants'].filter(k=>item[k]!==undefined).map(k=>[k, k==='variants' && Array.isArray(item[k]) ? item[k].slice(0,50).map(v=>Object.fromEntries(['code','guid','name','price','active'].filter(k=>v[k]!==undefined).map(k=>[k,v[k]]))) : item[k]]));
-  return {
+  const compact = item => Object.fromEntries(['guid','id','code','name','indexName','price','currency','active','variants','customerGroup','priceList','priceRatio'].filter(k=>item[k]!==undefined).map(k=>[k, k==='variants' && Array.isArray(item[k]) ? item[k].slice(0,50).map(v=>Object.fromEntries(['code','guid','name','price','active'].filter(k=>v[k]!==undefined).map(k=>[k,v[k]]))) : item[k]]));
+  const adapter = {
     async customerGroups(){const data=await read('/api/customers/groups');return z.array(z.object({id:z.number().int().safe(),name:z.string(),customerGroupCode:z.string().nullable(),defaultPricelistId:positiveId.nullable()})).max(1000).parse(data.customerGroups);},
     async orderStatuses(){const data=await read('/api/eshop',{include:'orderStatuses'});return z.array(z.object({id:z.number().int().safe(),name:z.string()})).max(200).parse(data.orderStatuses?.statuses);},
     async customer(guid){uuidSchema.parse(guid);const data=await read('/api/customers/'+guid);const customer=customerSchema.parse(data.customer);if(customer.guid!==guid)throw new ShoptetError('customer_reference_mismatch');return customer;},
@@ -73,7 +74,7 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       const token=await getToken();
       await authorizeWrite({pricelistId:id,items});let response;
       // Mutations are never automatically retried: a timeout may mean the server applied them.
-      try{response=await fetchImpl('https://api.myshoptet.com/api/price-lists/'+id+'/prices',{method:'PATCH',redirect:'error',signal:AbortSignal.timeout(timeoutMs),headers:{'Shoptet-Access-Token':token,'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({data:items})});}
+      try{response=await fetchImpl('https://api.myshoptet.com/api/price-lists/'+id+'/prices',{method:'PATCH',redirect:REDIRECT_MODE,signal:AbortSignal.timeout(timeoutMs),headers:{'Shoptet-Access-Token':token,'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({data:items})});}
       catch{return {outcome:'unknown',error:'write_outcome_unknown',requiresReadback:true};}
       let body;try{body=await response.json();}catch{return {outcome:'unknown',error:'invalid_write_response',requiresReadback:true};}
       if(!response.ok && response.status>=500)return {outcome:'unknown',error:'write_outcome_unknown',requiresReadback:true};
@@ -90,16 +91,56 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       const items = data[collections[kind]].slice(0, kind==='pricelists'?500:limit).map(compact);
       return { items: items.filter(x=>!query || [x.name,x.code,x.guid].some(v=>String(v??'').toLocaleLowerCase('cs').includes(query.toLocaleLowerCase('cs')))), page, limit, searchScope:'returned_page_only', pagination: data.paginator || null };
     },
-    async profile() { const data=await read('/api/eshop'); return profileSchema.parse({id:data.contactInformation?.eshopId,name:data.contactInformation?.eshopName,vatPayer:data.settings?.vatPayer,defaultPricelistId:data.settings?.defaultPricelist?.id,timezone:data.settings?.timezone,currencies:data.currencies}); }
+    async profile() { const data=await read('/api/eshop'); return profileSchema.parse({id:data.contactInformation?.eshopId,name:data.contactInformation?.eshopName,vatPayer:data.settings?.vatPayer,defaultPricelistId:data.settings?.defaultPricelist?.id,timezone:data.settings?.timezone,currencies:data.currencies}); },
+    async updateCustomerPricelist(guid, pricelistId) {
+      uuidSchema.parse(guid);
+      positiveId.parse(pricelistId);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ customerGuid: guid, pricelistId });
+      const current = await adapter.customer(guid);
+      if (current.priceRatio !== '1.0000') {
+        return { outcome: 'blocked', reason: 'price_ratio_locked', priceRatio: current.priceRatio, requiresReadback: false };
+      }
+      if (current.priceList?.id === pricelistId) {
+        return { outcome: 'no_change', currentPricelistId: pricelistId, requiresReadback: false };
+      }
+      await adapter.pricelist(pricelistId);
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/customers/' + guid, {
+          method: 'PATCH',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { pricelistId } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown', requiresReadback: true };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response', requiresReadback: true }; }
+      if (!response.ok && response.status >= 500) return { outcome: 'unknown', error: 'write_outcome_unknown', requiresReadback: true };
+      if (!body || typeof body !== 'object' || !Object.hasOwn(body, 'data')) return { outcome: 'unknown', error: 'invalid_write_response', requiresReadback: true };
+      const errors = z.array(z.object({ errorCode: z.string().max(128), instance: z.string().optional(), message: z.string().optional() })).safeParse(body.errors ?? []);
+      if (!errors.success) return { outcome: 'unknown', error: 'invalid_write_response', requiresReadback: true };
+      if (!response.ok || errors.data.length) return { outcome: 'failed', errors: errors.data, status: response.status, requiresReadback: true };
+      const verified = await adapter.customer(guid);
+      if (verified.priceList?.id !== pricelistId) {
+        return { outcome: 'failed', error: 'readback_mismatch', expectedPricelistId: pricelistId, actualPricelistId: verified.priceList?.id ?? null, requiresReadback: true };
+      }
+      return { outcome: 'accepted', customerGuid: guid, previousPricelistId: current.priceList?.id ?? null, pricelistId, verified: true, requiresReadback: false };
+    }
   };
+  return adapter;
 }
 
 const positiveId=z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const uuidSchema=z.string().uuid();
 const decimal=z.string().regex(/^\d+\.\d{2}$/).max(24);
 const actionSchema=z.object({price:decimal,fromDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),toDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable()}).nullable();
-export const priceRowSchema=z.object({code:z.string().min(1).max(128),currencyCode:z.string().regex(/^[A-Z]{3}$/),includingVat:z.boolean(),vatRate:decimal,price:z.object({price:decimal.nullable(),priceRatio:z.string().regex(/^\d+\.\d{3}$/),actionPrice:actionSchema}),sales:z.object({discountCoupon:z.boolean()})});
-const pricePatchSchema=z.object({code:z.string().min(1).max(128),priceWithVat:z.object({price:decimal.refine(v=>BigInt(v.replace('.',''))>0n,'Zero price requires a verified shop capability')}).strict(),sales:z.object({discountCoupon:z.boolean()}).strict().optional()}).strict();
+export const priceRowSchema=z.object({code:z.string().min(1).max(128),currencyCode:z.string().regex(/^[A-Z]{3}$/),includingVat:z.boolean(),vatRate:decimal,price:z.object({price:decimal.nullable(),commonPrice:decimal.nullable().optional(),priceRatio:z.string().regex(/^\d+\.\d{3}$/),actionPrice:actionSchema}),sales:z.object({discountCoupon:z.boolean()})});
+const pricePatchSchema=z.object({code:z.string().min(1).max(128),priceWithVat:z.object({price:decimal.refine(v=>BigInt(v.replace('.',''))>0n,'Zero price requires a verified shop capability'),commonPrice:decimal.optional()}).strict(),sales:z.object({discountCoupon:z.boolean()}).strict().optional()}).strict();
 const brandSchema=z.object({guid:uuidSchema,name:z.string().max(500),indexName:z.string().max(500)});
 const productSchema=z.object({guid:uuidSchema,name:z.string().nullable(),visibility:z.string(),brand:z.object({code:z.string(),name:z.string()}).nullable(),categories:z.array(z.object({guid:uuidSchema.nullable()})).optional(),defaultCategory:z.object({guid:uuidSchema.nullable()}),variants:z.array(z.object({code:z.string(),visible:z.boolean()}))});
 const pricelistSchema=z.object({id:positiveId,name:z.string(),currency:z.string().nullable(),isDefault:z.boolean()});

@@ -43,10 +43,10 @@ export async function buildSyncPlan({adapter,proposal,selection,instant=new Date
    const categoryCaps=policy.categoryCaps.filter(c=>categories.has(c.id)).map(c=>c.percent);
    const productCaps=policy.productCaps.filter(c=>c.id===product.guid&&(c.variantCode===undefined||c.variantCode===code)).map(c=>c.percent);
    const productCap=productCaps.length?Math.min(...productCaps):null;
-   const calculated=evaluatePricing({baseMinor,actionMinor,tierPercent:tier.percent,brandCap,categoryCaps,productCap,rounding:currency.rounding,incrementMinor:10**(2-currency.priceDecimalPlaces)});
+   const calculated=evaluatePricing({baseMinor,actionMinor,tierPercent:tier.percent,brandCap,categoryCaps,productCap,salePolicy:policy.salePolicy??'okfish_compatible',capPriority:policy.capPriority??'most_restrictive',rounding:currency.rounding,incrementMinor:10**(2-currency.priceDecimalPlaces)});
    if(!calculated.valid||calculated.priceMinor===0)throw Error('zero_or_invalid_price_not_supported');
-   const patch={code,priceWithVat:{price:formatApiPrice(calculated.priceMinor)},...(policy.couponPolicy==='no_loyalty_combination'&&calculated.loyaltyApplied?{sales:{discountCoupon:false}}:{})};
-   const expected={price:patch.priceWithVat.price,discountCoupon:patch.sales?.discountCoupon??before.sales.discountCoupon};
+   const patch={code,priceWithVat:{price:formatApiPrice(calculated.priceMinor),commonPrice:formatApiPrice(baseMinor)},...(policy.couponPolicy==='no_loyalty_combination'&&calculated.loyaltyApplied?{sales:{discountCoupon:false}}:{})};
+   const expected={price:patch.priceWithVat.price,commonPrice:patch.priceWithVat.commonPrice,discountCoupon:patch.sales?.discountCoupon??before.sales.discountCoupon};
    actions.push({productGuid:product.guid,brandId,categoryIds:[...categories].sort(),code,sourcePricelistId:source.id,targetPricelistId:target.id,baseSnapshot:base,beforeSnapshot:before,patch,expected,calculation:calculated});
   }
  }

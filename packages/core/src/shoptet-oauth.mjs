@@ -1,5 +1,6 @@
 import {digest} from './crypto.mjs';
 import { createTokenVault } from './token-vault.mjs';
+const REDIRECT_MODE = typeof WebSocketPair !== 'undefined' ? 'manual' : 'error';
 export function trustedShopOrigin(value) {
   let url; try { url = new URL(value); } catch { throw Error('Trusted shop URL required'); }
   if (url.protocol !== 'https:' || !/^[0-9]{1,12}\.myshoptet\.com$/.test(url.hostname) || url.port || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Trusted shop URL required');
@@ -28,7 +29,7 @@ export async function exchangeAuthorizationCode({
   const tokenEndpoint = `${baseUrl}/action/ApiOAuthServer/token`;
 
   const response = await fetchImpl(tokenEndpoint, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
+    method: 'POST', redirect: REDIRECT_MODE, signal: AbortSignal.timeout(timeoutMs),
     headers: {
       'Content-Type': 'application/json',
       'Accept': 'application/json'
@@ -96,7 +97,7 @@ export async function getShoptetApiAccessToken({ db, shopId, tokenKeys, fetchImp
   const nowSec=Math.floor(Date.now()/1000);
   if(row.api_envelope && row.api_token_expires_at>nowSec+60)return {apiAccessToken:await vault.open(shopId,'api',row.api_envelope),expiresIn:row.api_token_expires_at-nowSec};
   const oauth=await vault.open(shopId,'oauth',row.oauth_envelope);
-  const response=await fetchImpl(trustedShopOrigin(row.eshop_url)+'/action/ApiOAuthServer/getAccessToken',{method:'GET',redirect:'error',signal:AbortSignal.timeout(10000),headers:{Authorization:'Bearer '+oauth}});
+  const response=await fetchImpl(trustedShopOrigin(row.eshop_url)+'/action/ApiOAuthServer/getAccessToken',{method:'GET',redirect:REDIRECT_MODE,signal:AbortSignal.timeout(10000),headers:{Authorization:'Bearer '+oauth}});
   if(!response.ok)throw Error('API token renewal failed ('+response.status+')');
   const data=await response.json();
   if(typeof data.access_token!=='string'||!data.access_token||!Number.isSafeInteger(data.expires_in)||data.expires_in<=0||data.expires_in>86400)throw Error('Invalid API token response');

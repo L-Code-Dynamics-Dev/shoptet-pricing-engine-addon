@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {calculateTurnover,previewCustomerTurnover,turnoverPolicySchema} from '../src/turnover.mjs';
+import {calculateTurnover,previewCustomerTurnover,executeCustomerTierAssignment,turnoverPolicySchema} from '../src/turnover.mjs';
 import {createShoptetAdapter} from '../src/shoptet-adapter.mjs';
 import {createConfigurationService} from '../src/configuration.mjs';
 import {testD1} from './helpers/d1.mjs';
@@ -80,4 +80,22 @@ test('turnover policy references are validated before immutable draft creation, 
   assert.deepEqual((await service.preview('101',draft.revisionId)).after.loyaltyProposal.turnoverPolicy,policy);
   await assert.rejects(service.preview('202',draft.revisionId),/revision_not_found/);
  }finally{db.sql.close();}
+});
+test('executeCustomerTierAssignment delegates to adapter.updateCustomerPricelist after input validation', async () => {
+  let updated = null;
+  const mockAdapter = {
+    async updateCustomerPricelist(guid, pricelistId) {
+      updated = { guid, pricelistId };
+      return { outcome: 'accepted', customerGuid: guid, pricelistId, verified: true };
+    }
+  };
+  const res = await executeCustomerTierAssignment({
+    adapter: mockAdapter,
+    customerGuid: '1f676f66-d9ea-11f1-a35a-bc241195dd28',
+    targetPricelistId: 2
+  });
+  assert.equal(res.outcome, 'accepted');
+  assert.deepEqual(updated, { guid: '1f676f66-d9ea-11f1-a35a-bc241195dd28', pricelistId: 2 });
+  await assert.rejects(executeCustomerTierAssignment({ adapter: mockAdapter, customerGuid: 'invalid-guid', targetPricelistId: 2 }));
+  await assert.rejects(executeCustomerTierAssignment({ adapter: mockAdapter, customerGuid: '1f676f66-d9ea-11f1-a35a-bc241195dd28', targetPricelistId: -1 }));
 });

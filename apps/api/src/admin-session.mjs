@@ -98,7 +98,7 @@ export async function verifyShoptetAdmin({ code, shopId, env, redirectUri, fetch
   const base = oauthBase(shop.eshop_url, shopId);
 
   const tokenRes = await fetchImpl(`${base}token`, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
+    method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10000),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: new URLSearchParams({
       code,
@@ -115,7 +115,7 @@ export async function verifyShoptetAdmin({ code, shopId, env, redirectUri, fetch
   if (!tokenData?.access_token) return { ok: false, reason: 'token_missing' };
 
   const resRes = await fetchImpl(`${base}resource?method=getBasicEshop`, {
-    redirect:'error',signal:AbortSignal.timeout(10000),
+    redirect:'manual',signal:AbortSignal.timeout(10000),
     headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: 'application/json' }
   });
   if (!resRes.ok) return { ok: false, reason: `resource_${resRes.status}` };

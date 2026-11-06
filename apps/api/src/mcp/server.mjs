@@ -163,7 +163,16 @@ const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(b
   headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers }
 });
 
-const rpcError = (id, code, message, status = 200) => json({ jsonrpc: '2.0', id, error: { code, message } }, status);
+function sanitizeRpcMessage(msg) {
+  if (typeof msg !== 'string') return 'Unknown error';
+  return msg
+    .replace(/Bearer\s+[A-Za-z0-9_-]+/gi, 'Bearer [REDACTED]')
+    .replace(/[a-f0-9]{32,64}/gi, '[REDACTED]')
+    .replace(/\/Users\/[^\s:]+/g, '[INTERNAL_PATH]')
+    .replace(/https?:\/\/[^\s]+/g, '[URL]');
+}
+
+const rpcError = (id, code, message, status = 200) => json({ jsonrpc: '2.0', id, error: { code, message: sanitizeRpcMessage(message) } }, status);
 const toolResult = (value) => ({ content: [{ type: 'text', text: JSON.stringify(value) }], isError: false });
 const hex = (bytes) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 
@@ -253,7 +262,7 @@ export async function handleMcp(request, env) {
     const required = toolScope[name] || 'installation:read';
     if (!identity.scopes.has(required)) return rpcError(id, -32603, 'Forbidden', 403);
 
-    if (['shoptet_configure_tiers', 'shoptet_sync_tier_price', 'frontend_assets_install'].includes(name)) return rpcError(id, -32603, 'Execution disabled: trusted revision approval and fencing required', 403);
+    if (['shoptet_configure_tiers', 'shoptet_sync_tier_price', 'frontend_assets_install'].includes(name)) return rpcError(id, -32603, 'Execution disabled: direct pricelist modifications are forbidden. Propose changes via Dry Run and obtain merchant approval.', 403);
 
     // 1. Installation Status
     if (name === 'installation_status') {
