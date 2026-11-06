@@ -51,11 +51,11 @@ export function evaluatePricing({baseMinor,actionMinor=null,tierPercent=0,fixedD
   const fixedD=money(fixedDiscountMinor,'fixed discount');
   let fixedLoyalty=base>fixedD?base-fixedD:0n;
   fixedLoyalty=divide(fixedLoyalty,step,rounding==='none'?'math':rounding)*step;
-  loyalty=tier>0n?Math.min(loyalty,fixedLoyalty):fixedLoyalty;
+  loyalty=tier>0n?(loyalty<fixedLoyalty?loyalty:fixedLoyalty):fixedLoyalty;
  }
  if(fixedPriceMinor!==null&&allowLoyaltyDiscount){
   const fixedP=money(fixedPriceMinor,'fixed price');
-  loyalty=Math.min(loyalty,fixedP);
+  loyalty=(loyalty<fixedP?loyalty:fixedP);
  }
  if(loyalty>base)loyalty=base;
  let action=null;
