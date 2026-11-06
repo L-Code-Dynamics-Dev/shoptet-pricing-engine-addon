@@ -322,6 +322,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
         plan_stale_configuration_changed: 'Konfigurace pravidel nebo ceníků se od vytvoření plánu změnila. Vygenerujte prosím nový kontrolní Dry Run.',
         plan_not_approved: 'Plán ještě nebyl schválen obchodníkem.',
         pricelist_policy_required: 'Chybí nastavení věrnostních ceníků.',
+        permission_missing: 'Aplikace nemá v Shoptetu potřebná oprávnění (zkontrolujte práva v Shoptet Partner portálu).',
         upstream_unavailable: 'Shoptet API je dočasně nedostupné. Zkuste to prosím za chvíli.',
         rate_limited: 'Byl dosažen limit volání Shoptet API. Počkejte chvíli a akci opakujte.'
       };

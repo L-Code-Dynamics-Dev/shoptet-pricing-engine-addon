@@ -35,36 +35,51 @@ export async function generateCustomerRecalculationPlan({
   let planCurrency = configuredCurrency;
   if (!planCurrency && typeof adapter.profile === 'function') {
     const profile = await adapter.profile();
-    if (profile?.defaultPricelistId && typeof adapter.pricelist === 'function') {
-      const basePricelist = await adapter.pricelist(profile.defaultPricelistId);
-      if (/^[A-Z]{3}$/.test(basePricelist?.currency ?? '')) {
-        planCurrency = basePricelist.currency;
-      }
+    const defaultId = profile?.defaultPricelist?.id ?? profile?.settings?.defaultPricelist?.id ?? profile?.defaultPricelistId ?? pricelistPolicy?.defaultPricelistId;
+    if (defaultId && typeof adapter.pricelist === 'function') {
+      try {
+        const basePricelist = await adapter.pricelist(defaultId);
+        const code = basePricelist?.currencyCode ?? basePricelist?.currency;
+        if (/^[A-Z]{3}$/.test(code ?? '')) planCurrency = code;
+      } catch {}
     }
-    if (!planCurrency && profile?.currencies?.length === 1) {
-      const onlyCurrency = profile.currencies[0]?.code;
-      if (/^[A-Z]{3}$/.test(onlyCurrency ?? '')) planCurrency = onlyCurrency;
+    if (!planCurrency && Array.isArray(profile?.currencies)) {
+      for (const c of profile.currencies) {
+        const code = typeof c === 'string' ? c : (c?.isDefault ? c?.code : null);
+        if (/^[A-Z]{3}$/.test(code ?? '')) {
+          planCurrency = code;
+          break;
+        }
+      }
+      if (!planCurrency && profile.currencies.length === 1) {
+        const code = typeof profile.currencies[0] === 'string' ? profile.currencies[0] : profile.currencies[0]?.code;
+        if (/^[A-Z]{3}$/.test(code ?? '')) planCurrency = code;
+      }
     }
   }
 
   // 0. Prefetch store credit notes across all pages
   const allCreditNotes = [];
   if (typeof adapter.creditNotes === 'function' && typeof adapter.creditNote === 'function') {
-    for (let cnPage = 1; ; cnPage++) {
-      if (rateLimiter) await rateLimiter.waitBeforeNextRequest();
-      const cnRes = await adapter.creditNotes({ page: cnPage });
-      const batch = cnRes.items || [];
-      if (!batch.length) break;
-      for (const cn of batch) {
+    try {
+      for (let cnPage = 1; ; cnPage++) {
         if (rateLimiter) await rateLimiter.waitBeforeNextRequest();
-        const detail = await adapter.creditNote(cn.code);
-        allCreditNotes.push(detail);
+        const cnRes = await adapter.creditNotes({ page: cnPage });
+        const batch = cnRes.items || [];
+        if (!batch.length) break;
+        for (const cn of batch) {
+          if (rateLimiter) await rateLimiter.waitBeforeNextRequest();
+          const detail = await adapter.creditNote(cn.code);
+          allCreditNotes.push(detail);
+        }
+        if (cnRes.pagination) {
+          if (cnPage >= (cnRes.pagination.pageCount || 1)) break;
+        } else if (batch.length < 50) {
+          break;
+        }
       }
-      if (cnRes.pagination) {
-        if (cnPage >= (cnRes.pagination.pageCount || 1)) break;
-      } else if (batch.length < 50) {
-        break;
-      }
+    } catch (e) {
+      if (e?.code !== 'permission_missing' && e?.status !== 403) throw e;
     }
   }
 
@@ -156,12 +171,16 @@ export async function generateCustomerRecalculationPlan({
       // currency, a single unambiguous order currency is required across the plan.
       const orderCurrencies = new Set(orderList.map(order => order.price.currencyCode));
       if (planCurrency === null) {
-        if (orderCurrencies.size !== 1) throw new Error('turnover_currency_not_configured');
-        planCurrency = [...orderCurrencies][0];
+        if (orderCurrencies.size === 1) {
+          planCurrency = [...orderCurrencies][0];
+        } else if (orderCurrencies.size > 1) {
+          throw new Error('turnover_currency_not_configured');
+        }
       }
+      const customerCurrency = planCurrency || (orderCurrencies.size === 1 ? [...orderCurrencies][0] : 'CZK');
       const turnoverResult = calculateTurnover({
         customerGuid: customer.guid,
-        currency: planCurrency,
+        currency: customerCurrency,
         tiers,
         policy,
         orders: orderList,

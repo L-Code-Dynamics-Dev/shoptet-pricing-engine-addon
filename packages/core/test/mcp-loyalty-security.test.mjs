@@ -185,9 +185,9 @@ async function setupTestEnvironment() {
     if (urlStr.includes('/api/eshop')) {
       return Response.json({
         data: {
-          contactInformation: { eshopId: SHOP_ID, eshopName: 'Test Shop' },
+          contactInformation: { eshopId: Number(SHOP_ID), eshopName: 'Test Shop' },
           settings: { vatPayer: true, defaultPricelist: { id: 1 }, timezone: 'Europe/Prague' },
-          currencies: ['CZK']
+          currencies: [{ code: 'CZK', priceDecimalPlaces: 2, rounding: 'math' }]
         }
       });
     }
