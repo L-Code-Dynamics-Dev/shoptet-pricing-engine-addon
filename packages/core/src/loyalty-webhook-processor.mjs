@@ -107,12 +107,10 @@ export async function processOrderWebhook({
 
   // Ledger monetary values cannot be summed across currencies without a
   // verified conversion policy. Webhook processing has no conversion snapshot.
-  const existingCurrency = await db.prepare(
-    'SELECT currency FROM loyalty_customer_states WHERE shop_id=? AND customer_guid=?'
-  ).bind(shopId, order.customerGuid).first();
-  if (existingCurrency?.currency && existingCurrency.currency !== order.price?.currencyCode) {
-    throw new Error('turnover_currency_mismatch');
-  }
+  const otherCurrency = await db.prepare(
+    'SELECT currency FROM loyalty_order_ledger WHERE shop_id=? AND customer_guid=? AND currency<>? LIMIT 1'
+  ).bind(shopId, order.customerGuid, order.price?.currencyCode).first();
+  if (otherCurrency) throw new Error('turnover_currency_mismatch');
 
   // 4. Calculate clean qualifying amount based on configured turnover policy
   const isQualifyingStatus = policy.qualifyingStatusIds.includes(order.status?.id);
