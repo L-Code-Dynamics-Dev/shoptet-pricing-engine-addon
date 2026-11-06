@@ -71,6 +71,11 @@ export async function processOrderWebhook({
   });
 
   if (webhookRecord.duplicate) {
+    // A pending event is not a durably completed side effect. Ask the
+    // sender to retry rather than acknowledging a potentially lost delivery.
+    if (webhookRecord.state === 'pending') {
+      return { accepted: false, retryable: true, error: 'event_still_processing', eventHash };
+    }
     return { accepted: true, duplicate: true, eventHash };
   }
 
