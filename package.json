@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test packages/core/test/*.test.mjs",
-    "check": "node --check apps/api/src/index.mjs && npm test"
+    "check": "node --check apps/api/src/index.mjs && node --check packages/storefront/src/vip_cart.js && npm test"
   },
   "engines": {
     "node": ">=22"
