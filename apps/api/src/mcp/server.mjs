@@ -156,6 +156,7 @@ export async function handleMcp(request, env) {
       }
       return json({ jsonrpc: '2.0', id, result: toolResult({ version: row?.version || 1, config }) });
     }
+  }
 
   return rpcError(id, -32601, 'Method not found');
 }
