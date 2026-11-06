@@ -360,6 +360,19 @@ export async function recordWebhookEvent(db, shopId, {
 }) {
   const existing = await db.prepare('SELECT event_hash, state FROM loyalty_webhook_events WHERE shop_id = ? AND event_hash = ?').bind(shopId, eventHash).first();
   if (existing) {
+    // Failed deliveries can be retried; abandoned pending work may be reclaimed
+    // after a conservative lease. Claiming is conditional, preventing two workers
+    // from concurrently processing the same event hash.
+    if (mode === 'live' && (existing.state === 'failed' || existing.state === 'pending')) {
+      const claimed = await db.prepare(`
+        UPDATE loyalty_webhook_events
+        SET state='pending', attempts=attempts+1, received_at=unixepoch()
+        WHERE shop_id=? AND event_hash=?
+          AND (state='failed' OR (state='pending' AND received_at < unixepoch()-300))
+        RETURNING event_hash
+      `).bind(shopId, eventHash).first();
+      if (claimed) return { duplicate: false, resumed: true, eventHash, state: 'pending' };
+    }
     return { duplicate: true, eventHash, state: existing.state };
   }
 
