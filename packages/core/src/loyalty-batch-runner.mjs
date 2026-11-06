@@ -33,6 +33,19 @@ export async function generateCustomerRecalculationPlan({
     }
   }
   let planCurrency = configuredCurrency;
+  if (!planCurrency && typeof adapter.profile === 'function') {
+    const profile = await adapter.profile();
+    if (profile?.defaultPricelistId && typeof adapter.pricelist === 'function') {
+      const basePricelist = await adapter.pricelist(profile.defaultPricelistId);
+      if (/^[A-Z]{3}$/.test(basePricelist?.currency ?? '')) {
+        planCurrency = basePricelist.currency;
+      }
+    }
+    if (!planCurrency && profile?.currencies?.length === 1) {
+      const onlyCurrency = profile.currencies[0]?.code;
+      if (/^[A-Z]{3}$/.test(onlyCurrency ?? '')) planCurrency = onlyCurrency;
+    }
+  }
 
   // 0. Prefetch store credit notes across all pages
   const allCreditNotes = [];
