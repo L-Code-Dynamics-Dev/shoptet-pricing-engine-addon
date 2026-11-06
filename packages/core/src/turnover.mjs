@@ -14,7 +14,7 @@ export const turnoverPolicySchema=z.object({
  itemStatuses:z.literal('require_match_order'),
  upgrades:z.literal('recalculate'),
  downgrades:z.enum(['recalculate','keep_current']),
- exchangeRates:z.record(z.string().regex(/^[A-Z]{3}$/), z.number().positive()).optional(),
+ exchangeRates:z.record(z.string().regex(/^[A-Z]{3}$/), z.number().positive().finite().max(1000000).refine(v=>Number(v.toFixed(4))===v,'Exchange rate supports at most 4 decimal places')).optional(),
  multiCurrency:z.enum(['fail_on_mismatch','convert_explicit','accumulate_separate']).optional()
 }).strict().superRefine((p,c)=>{
  if(Date.parse(p.period.from)>=Date.parse(p.period.to))c.addIssue({code:'custom',message:'Period must increase'});
@@ -66,7 +66,9 @@ export function calculateTurnover({customerGuid,currency,tiers,policy,orders,cre
    total+=value;
   }else if(p.exchangeRates&&typeof p.exchangeRates[orderCur]==='number'){
    const rate=p.exchangeRates[orderCur];
-   const rateScaled=BigInt(Math.round(rate*10000));
+   // The schema validated the decimal scale. Convert from decimal text,
+   // never via a binary-float multiplication of monetary values.
+   const rateScaled=BigInt(rate.toFixed(4).replace('.',''));
    const converted=(value*rateScaled+5000n)/10000n;
    total+=converted;
   }
