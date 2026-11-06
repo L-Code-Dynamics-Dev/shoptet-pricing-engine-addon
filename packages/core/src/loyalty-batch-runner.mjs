@@ -314,6 +314,14 @@ export async function executeCustomerRecalculationBatch({
     const check = await adapter.customer(item.customer_guid);
     if (check.priceList?.id === item.target_pricelist_id) {
       await updateRecalculationItemStatus(db, shopId, planId, item.customer_guid, { status: 'verified' });
+      await db.prepare(`
+        INSERT INTO loyalty_customer_states (shop_id, customer_guid, current_pricelist_id, calculated_turnover_minor, updated_at)
+        VALUES (?, ?, ?, ?, unixepoch())
+        ON CONFLICT(shop_id, customer_guid) DO UPDATE SET
+          current_pricelist_id=excluded.current_pricelist_id,
+          calculated_turnover_minor=excluded.calculated_turnover_minor,
+          updated_at=unixepoch()
+      `).bind(shopId, item.customer_guid, item.target_pricelist_id, item.calculated_turnover_minor).run();
       completedInThisBatch++;
     } else {
       await updateRecalculationItemStatus(db, shopId, planId, item.customer_guid, {
