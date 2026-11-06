@@ -396,3 +396,39 @@ test('Webhook does not acknowledge an in-progress duplicate as completed', async
     assert.equal(result.error,'event_still_processing');
   } finally { db.sql.close(); }
 });
+
+test('Failed customer assignment blocks plan completion and engine activation', async () => {
+  const db = testD1();
+  try {
+    await setupShopWithWebhookCredentials(db);
+    const customerGuid = '11111111-1111-1111-1111-111111111111';
+    const mockAdapter = {
+      async list(kind, {page}={}) {
+        return {items:page===1?[{guid:customerGuid,priceList:{id:1},priceRatio:'1.0000'}]:[],
+          pagination:{page:page??1,pageCount:1,totalCount:1}};
+      },
+      async customerOrders() { return {items:[{code:'FAILED-ORDER'}],pagination:{page:1,pageCount:1,totalCount:1}}; },
+      async order(code) {
+        return {code,customerGuid,status:{id:-3},paid:true,
+          creationTime:'2026-11-06T12:00:00Z',changeTime:'2026-11-06T12:00:00Z',
+          price:{currencyCode:'CZK',withVat:'6000.00',withoutVat:'4958.68'},
+          items:[{itemType:'product',status:{id:-3},
+            itemPrice:{withVat:'6000.00',withoutVat:'4958.68'}}]};
+      },
+      async customer() { return {guid:customerGuid,priceList:{id:1},priceRatio:'1.0000'}; },
+      async updateCustomerPricelist() { return {outcome:'failed',error:'mock_write_rejected'}; }
+    };
+    const generated = await generateCustomerRecalculationPlan({
+      db,shopId:SHOP_ID,adapter:mockAdapter,policy,tiers
+    });
+    await approveRecalculationPlan(db,SHOP_ID,generated.planId);
+    const result = await executeCustomerRecalculationBatch({
+      db,shopId:SHOP_ID,planId:generated.planId,adapter:mockAdapter
+    });
+    assert.equal(result.planCompleted,false);
+    assert.equal(result.unresolvedCount,1);
+    const mode = await db.prepare('SELECT engine_mode FROM loyalty_pricelist_policies WHERE shop_id=?')
+      .bind(SHOP_ID).first();
+    assert.equal(mode.engine_mode,'syncing');
+  } finally { db.sql.close(); }
+});
