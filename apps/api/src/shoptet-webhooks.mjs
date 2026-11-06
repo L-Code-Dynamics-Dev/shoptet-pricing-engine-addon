@@ -59,6 +59,9 @@ export async function handleShoptetOrderWebhook(request,env,fetchImpl=fetch,ctx=
     const {policy,tiers}=resolveOrderWebhookConfiguration(config);
     const policyRow=await getPricelistPolicy(env.DB,verifiedShopId);
     const mode=policyRow?.engineMode==='active'?'live':'staging';
+    // Never demote customers to the default pricelist when an active shop
+    // has no valid loyalty tiers configured.
+    if(mode==='live' && tiers.length===0)throw new Error('active_loyalty_tiers_missing');
     return {policy,tiers,mode};
    }
   });
