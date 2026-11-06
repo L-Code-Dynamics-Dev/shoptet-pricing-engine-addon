@@ -300,3 +300,34 @@ test('multi-currency: buildSyncPlan creates independent plans for CZK and EUR wi
   assert.equal(planEur.currency, 'EUR');
   assert.equal(planEur.actions[0].expected.price, '36.00'); // 40 - 10% = 36.00 €
 });
+
+test('configured minimum margin uses Shoptet purchase cost and fails closed on missing cost', async () => {
+  const sku='MARGIN-001';
+  let purchasePrice='600.00';
+  const adapter={
+    async profile() {return {defaultPricelistId:1,vatPayer:true,timezone:'Europe/Prague',
+      currencies:[{code:'CZK',priceDecimalPlaces:2,rounding:'math'}]};},
+    async pricelist(id) {return {id,name:'Pricelist '+id,currency:'CZK',isDefault:id===1};},
+    async product(guid) {return {guid,visibility:'normal',brand:null,
+      defaultCategory:{guid:'123e4567-e89b-42d3-a456-426614174011'},categories:[],
+      variants:[{code:sku,visible:true}]};},
+    async prices(id) {return {items:[{
+      code:sku,currencyCode:'CZK',vatRate:'21.00',includingVat:true,
+      price:{price:'1000.00',priceRatio:'1.000',actionPrice:null},
+      prices:purchasePrice===null?{}:{purchasePrice:{price:purchasePrice,vatRate:'21.00',includingVat:true}},
+      sales:{discountCoupon:true}
+    }]};}
+  };
+  const proposal={currency:'CZK',minMarginBps:2000,
+    tiers:[{name:'VIP',percent:10,minTurnover:0,pricelistId:2}],
+    brandCaps:[],categoryCaps:[],productCaps:[],couponPolicy:'unchanged'};
+  const selection={revisionId:'123e4567-e89b-42d3-a456-426614174000',
+    tierName:'VIP',targetPricelistId:2,
+    products:[{guid:'123e4567-e89b-42d3-a456-426614174001',codes:[sku]}]};
+  const safe=await buildSyncPlan({adapter,proposal,selection});
+  assert.equal(safe.actions[0].expected.price,'900.00');
+  purchasePrice='900.00';
+  await assert.rejects(buildSyncPlan({adapter,proposal,selection}),/minimum_margin_violation/);
+  purchasePrice=null;
+  await assert.rejects(buildSyncPlan({adapter,proposal,selection}),/purchase_cost_unavailable/);
+});
