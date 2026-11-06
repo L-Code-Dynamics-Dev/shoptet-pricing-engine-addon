@@ -23,6 +23,16 @@ export async function generateCustomerRecalculationPlan({
 }) {
   const pricelistPolicy = await getPricelistPolicy(db, shopId);
   if (!pricelistPolicy) throw new Error('pricelist_policy_required');
+  const currencyRow = await db.prepare('SELECT config_json FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
+  let configuredCurrency = null;
+  if (currencyRow?.config_json) {
+    const settings = JSON.parse(currencyRow.config_json);
+    configuredCurrency = settings.loyaltyProposal?.currency ?? settings.currency ?? null;
+    if (configuredCurrency !== null && !/^[A-Z]{3}$/.test(configuredCurrency)) {
+      throw new Error('turnover_currency_invalid');
+    }
+  }
+  let planCurrency = configuredCurrency;
 
   // 0. Prefetch store credit notes across all pages
   const allCreditNotes = [];
@@ -129,9 +139,16 @@ export async function generateCustomerRecalculationPlan({
         cn => cn.customer?.guid === customer.guid || orderCodes.has(cn.orderCode)
       );
 
+      // Never silently value EUR orders as CZK. Without a configured base
+      // currency, a single unambiguous order currency is required across the plan.
+      const orderCurrencies = new Set(orderList.map(order => order.price.currencyCode));
+      if (planCurrency === null) {
+        if (orderCurrencies.size !== 1) throw new Error('turnover_currency_not_configured');
+        planCurrency = [...orderCurrencies][0];
+      }
       const turnoverResult = calculateTurnover({
         customerGuid: customer.guid,
-        currency: 'CZK',
+        currency: planCurrency,
         tiers,
         policy,
         orders: orderList,
@@ -139,7 +156,9 @@ export async function generateCustomerRecalculationPlan({
         currentPricelistId
       });
 
-      const turnoverMinor = Number(BigInt((turnoverResult.turnover || '0.00').replace('.', '')));
+      const turnoverValue = BigInt(turnoverResult.turnover.replace('.', ''));
+      if (turnoverValue > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('turnover_overflow');
+      const turnoverMinor = Number(turnoverValue);
       const targetPricelistId = turnoverResult.pricelistId ?? pricelistPolicy.defaultPricelistId;
 
       if (currentPricelistId === targetPricelistId) {
