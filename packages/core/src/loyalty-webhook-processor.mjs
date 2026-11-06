@@ -27,7 +27,8 @@ export async function processOrderWebhook({
   adapter,
   policy,
   tiers,
-  mode = 'live'
+  mode = 'live',
+  loadVerifiedContext = null
 }) {
   if (typeof signature !== 'string' || !/^[a-f0-9]{40}$/i.test(signature)) {
     throw new Error('invalid_signature');
@@ -56,6 +57,16 @@ export async function processOrderWebhook({
   const proof = Uint8Array.from(signature.match(/../g), s => parseInt(s, 16));
   if (!await crypto.subtle.verify('HMAC', key, proof, bytes)) {
     throw new Error('invalid_signature');
+  }
+
+  if (loadVerifiedContext !== null) {
+    if (typeof loadVerifiedContext !== 'function') throw new Error('invalid_verified_context_loader');
+    const verified = await loadVerifiedContext(shopId);
+    if (!verified || !verified.policy || !Array.isArray(verified.tiers) ||
+        !['live', 'staging'].includes(verified.mode)) throw new Error('invalid_verified_context');
+    policy = verified.policy;
+    tiers = verified.tiers;
+    mode = verified.mode;
   }
 
   // No event receives a successful acknowledgement before HMAC verification,
