@@ -42,11 +42,9 @@ export async function processOrderWebhook({
 
   const shopId = String(event?.eshopId ?? '');
   if (!/^[1-9][0-9]{0,11}$/.test(shopId)) throw new Error('invalid_event');
-  if (!['order:update', 'order:create'].includes(event?.event)) {
-    return { accepted: true, ignored: true, reason: 'unsupported_event_type' };
-  }
+  const supportedEvent = ['order:update', 'order:create'].includes(event?.event);
   const orderCode = String(event.eventInstance ?? '');
-  if (!orderCode) throw new Error('invalid_event');
+  if (supportedEvent && !orderCode) throw new Error('invalid_event');
 
   // 1. Signature Verification with shop webhook credentials
   const record = await db.prepare('SELECT k.envelope, k.oauth_sha256, o.oauth_envelope FROM shop_webhook_credentials k JOIN shoptet_oauth o ON o.shop_id=k.shop_id WHERE k.shop_id=?').bind(shopId).first();
@@ -58,6 +56,12 @@ export async function processOrderWebhook({
   const proof = Uint8Array.from(signature.match(/../g), s => parseInt(s, 16));
   if (!await crypto.subtle.verify('HMAC', key, proof, bytes)) {
     throw new Error('invalid_signature');
+  }
+
+  // No event receives a successful acknowledgement before HMAC verification,
+  // including events this processor intentionally ignores.
+  if (!supportedEvent) {
+    return { accepted: true, ignored: true, reason: 'unsupported_event_type' };
   }
 
   // 2. D1 Event Ledger deduplication
