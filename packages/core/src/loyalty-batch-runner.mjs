@@ -260,6 +260,25 @@ export async function executeCustomerRecalculationBatch({
   for (const item of pending) {
     if (rateLimiter) await rateLimiter.waitBeforeNextRequest();
 
+    // Reconcile before retrying an uncertain external write. A concurrent
+    // merchant edit must never be overwritten by a stale recalculation plan.
+    const beforeWrite = await adapter.customer(item.customer_guid);
+    const actualPricelistId = beforeWrite.priceList?.id ?? null;
+    if (beforeWrite.priceRatio !== '1.0000' ||
+        (actualPricelistId !== (item.current_pricelist_id ?? null) &&
+         actualPricelistId !== item.target_pricelist_id)) {
+      await updateRecalculationItemStatus(db, shopId, planId, item.customer_guid, {
+        status: 'failed',
+        errorCode: 'customer_pricelist_changed_since_plan'
+      });
+      continue;
+    }
+    if (actualPricelistId === item.target_pricelist_id) {
+      await updateRecalculationItemStatus(db, shopId, planId, item.customer_guid, { status: 'verified' });
+      completedInThisBatch++;
+      continue;
+    }
+
     const patchResult = await adapter.updateCustomerPricelist(item.customer_guid, item.target_pricelist_id);
     if (rateLimiter) rateLimiter.observeResponse(patchResult);
 
