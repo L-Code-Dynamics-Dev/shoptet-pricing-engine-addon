@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleMcp, handleMcpSse } from '../../apps/api/src/mcp/server.mjs';
+import { handleMcp, handleMcpSse } from '../../../apps/api/src/mcp/server.mjs';
 
 const token = 'A'.repeat(48);
 const credentials = {
