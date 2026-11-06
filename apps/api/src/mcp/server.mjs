@@ -1,23 +1,9 @@
-import { createInstallServices } from './install-services.mjs';
-import { executeApprovedInstall } from '../../../../packages/core/src/approved-install.mjs';
-import { deploymentPreview } from '../../../../packages/core/src/asset-deployment.mjs';
-import { calculateTierPrice, resolveDiscountCap, createPricelistPricePatch } from '../../../../packages/core/src/pricing.mjs';
-import { getShoptetApiAccessToken } from '../../../../packages/core/src/shoptet-oauth.mjs';
+import { calculateTierPrice, resolveDiscountCap } from '../../../../packages/core/src/pricing.mjs';
 
 const protocol = '2025-03-26';
 const publicStatus = (row) => ({ active: row?.state === 'active' });
 
-const toolScope = {
-  installation_status: 'installation:read',
-  pricing_preview: 'pricing:preview',
-  frontend_assets_preview: 'assets:preview',
-  frontend_assets_install: 'assets:install',
-  shoptet_get_info: 'shoptet:read',
-  shoptet_get_products: 'shoptet:read',
-  shoptet_get_tiers: 'shoptet:read',
-  shoptet_configure_tiers: 'shoptet:write',
-  shoptet_sync_tier_price: 'pricing:sync'
-};
+const toolScope = { installation_status: 'installation:read', pricing_preview: 'pricing:preview', shoptet_get_tiers: 'shoptet:read' };
 
 const definitions = [
   {
@@ -40,122 +26,15 @@ const definitions = [
     }
   },
   {
-    name: 'frontend_assets_preview',
-    description: 'Preview the approved frontend asset filenames before installation. No upload is performed.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['manifest'],
-      properties: {
-        manifest: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 5,
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['name', 'sha256'],
-            properties: { name: { type: 'string' }, sha256: { type: 'string' } }
-          }
-        }
-      }
-    }
-  },
-  {
-    name: 'frontend_assets_install',
-    description: 'Install a previously approved frontend release. Requires an approval issued by the shop administrator.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['approvalId'],
-      properties: { approvalId: { type: 'string', minLength: 16, maxLength: 96 } }
-    }
-  },
-  {
     name: 'installation_status',
     description: 'Check whether the connected shop is active.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} }
-  },
-  {
-    name: 'shoptet_get_info',
-    description: 'Get connected shop metadata, currencies, settings and pricelists from Shoptet API.',
-    inputSchema: { type: 'object', additionalProperties: false, properties: {} }
-  },
-  {
-    name: 'shoptet_get_products',
-    description: 'List products and prices from the connected Shoptet shop.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        page: { type: 'integer', minimum: 1 },
-        itemsPerPage: { type: 'integer', minimum: 1, maximum: 50 }
-      }
-    }
   },
   {
     name: 'shoptet_get_tiers',
     description: 'Get the current loyalty tier configuration and discount caps for the connected shop.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} }
   },
-  {
-    name: 'shoptet_configure_tiers',
-    description: 'Save loyalty tier definitions, turnover limits, and margin caps for the connected shop.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['tiers'],
-      properties: {
-        tiers: {
-          type: 'array',
-          minItems: 1,
-          items: {
-            type: 'object',
-            required: ['name', 'percent', 'minTurnover'],
-            properties: {
-              id: { type: 'string' },
-              name: { type: 'string' },
-              percent: { type: 'number', minimum: 0, maximum: 100 },
-              minTurnover: { type: 'number', minimum: 0 },
-              pricelistId: { type: ['integer', 'null'] }
-            }
-          }
-        },
-        brandCaps: { type: 'object' },
-        categoryCaps: { type: 'object' },
-        productCaps: { type: 'object' }
-      }
-    }
-  },
-  {
-    name: 'shoptet_sync_tier_price',
-    description: 'Calculate and apply tier prices to a Shoptet pricelist with strict VAT rules.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['pricelistId', 'items'],
-      properties: {
-        pricelistId: { type: 'integer', minimum: 1 },
-        items: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 100,
-          items: {
-            type: 'object',
-            required: ['code', 'baseMinor', 'tierPercent', 'vatRate'],
-            properties: {
-              code: { type: 'string' },
-              baseMinor: { type: 'integer', minimum: 0 },
-              actionMinor: { type: ['integer', 'null'], minimum: 0 },
-              tierPercent: { type: 'number', minimum: 0, maximum: 100 },
-              capPercent: { type: ['number', 'null'], minimum: 0, maximum: 100 },
-              vatRate: { type: 'string', pattern: '^[0-9]{1,2}\\.[0-9]{2}$' }
-            }
-          }
-        }
-      }
-    }
-  }
 ];
 
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), {
@@ -177,14 +56,6 @@ async function authenticate(request, env) {
   const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/.exec(auth);
   if (match) {
     token = match[1];
-  } else {
-    try {
-      const url = new URL(request.url);
-      const qToken = url.searchParams.get('token');
-      if (qToken && /^[A-Za-z0-9_-]{32,256}$/.test(qToken)) {
-        token = qToken;
-      }
-    } catch {}
   }
 
   if (!token || !env.DB) return null;
@@ -276,55 +147,6 @@ export async function handleMcp(request, env) {
       return json({ jsonrpc: '2.0', id, result: toolResult(result) });
     }
 
-    // 3. Frontend Assets Preview
-    if (name === 'frontend_assets_preview') {
-      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length !== 1 || !('manifest' in args)) return rpcError(id, -32602, 'Invalid arguments');
-      try { return json({ jsonrpc: '2.0', id, result: toolResult(deploymentPreview(args.manifest)) }); } catch { return rpcError(id, -32602, 'Invalid asset manifest'); }
-    }
-
-    // 4. Frontend Assets Install
-    if (name === 'frontend_assets_install') {
-      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length !== 1 || typeof args.approvalId !== 'string' || !/^[a-zA-Z0-9_-]{16,96}$/.test(args.approvalId)) return rpcError(id, -32602, 'Invalid arguments');
-      const services = createInstallServices(env);
-      if (!services) return rpcError(id, -32603, 'Installation unavailable', 503);
-      try {
-        const result = await executeApprovedInstall({ shopId: identity.shopId, approvalId: args.approvalId, ...services, runId: crypto.randomUUID().replaceAll('-', '') });
-        return json({ jsonrpc: '2.0', id, result: toolResult(result) });
-      } catch { return rpcError(id, -32603, 'Installation failed or not authorized'); }
-    }
-
-    // 5. Shoptet Get Info & Pricelists
-    if (name === 'shoptet_get_info') {
-      try {
-        const { apiAccessToken } = await getShoptetApiAccessToken({ db: env.DB, shopId: identity.shopId, fetchImpl: fetch });
-        const [eshopRes, pricelistsRes] = await Promise.all([
-          fetch('https://api.myshoptet.com/api/eshop', { headers: { 'Shoptet-Access-Token': apiAccessToken, 'Content-Type': 'application/vnd.shoptet.v1.0' } }),
-          fetch('https://api.myshoptet.com/api/pricelists', { headers: { 'Shoptet-Access-Token': apiAccessToken, 'Content-Type': 'application/vnd.shoptet.v1.0' } })
-        ]);
-        const eshop = await eshopRes.json();
-        const pricelists = await pricelistsRes.json();
-        return json({ jsonrpc: '2.0', id, result: toolResult({ shopId: identity.shopId, eshop: eshop.data, pricelists: pricelists.data?.pricelists || [] }) });
-      } catch (err) {
-        return rpcError(id, -32603, `Shoptet API error: ${err.message}`);
-      }
-    }
-
-    // 6. Shoptet Get Products
-    if (name === 'shoptet_get_products') {
-      try {
-        const { apiAccessToken } = await getShoptetApiAccessToken({ db: env.DB, shopId: identity.shopId, fetchImpl: fetch });
-        const page = args.page || 1;
-        const itemsPerPage = Math.min(args.itemsPerPage || 20, 50);
-        const res = await fetch(`https://api.myshoptet.com/api/products?page=${page}&itemsPerPage=${itemsPerPage}`, {
-          headers: { 'Shoptet-Access-Token': apiAccessToken, 'Content-Type': 'application/vnd.shoptet.v1.0' }
-        });
-        const data = await res.json();
-        return json({ jsonrpc: '2.0', id, result: toolResult(data.data || {}) });
-      } catch (err) {
-        return rpcError(id, -32603, `Shoptet products error: ${err.message}`);
-      }
-    }
-
     // 7. Shoptet Get Tiers Configuration
     if (name === 'shoptet_get_tiers') {
       const row = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(identity.shopId).first();
@@ -332,114 +154,14 @@ export async function handleMcp(request, env) {
       if (row?.config_json) {
         try { config = JSON.parse(row.config_json); } catch {}
       }
-      return json({ jsonrpc: '2.0', id, result: toolResult({ shopId: identity.shopId, version: row?.version || 1, config }) });
+      return json({ jsonrpc: '2.0', id, result: toolResult({ version: row?.version || 1, config }) });
     }
-
-    // 8. Shoptet Configure Tiers
-    if (name === 'shoptet_configure_tiers') {
-      if (!Array.isArray(args.tiers) || args.tiers.length === 0) return rpcError(id, -32602, 'Tiers array required');
-      const payload = {
-        tiers: args.tiers,
-        brandCaps: args.brandCaps || {},
-        categoryCaps: args.categoryCaps || {},
-        productCaps: args.productCaps || {}
-      };
-      await env.DB.prepare(`
-        INSERT INTO tenant_settings (shop_id, config_json, version)
-        VALUES (?, ?, 1)
-        ON CONFLICT(shop_id) DO UPDATE SET
-          config_json = excluded.config_json,
-          version = tenant_settings.version + 1
-      `).bind(identity.shopId, JSON.stringify(payload)).run();
-      return json({ jsonrpc: '2.0', id, result: toolResult({ status: 'saved', shopId: identity.shopId, tierCount: args.tiers.length }) });
-    }
-
-    // 9. Shoptet Sync Tier Price (PATCH Pricelist)
-    if (name === 'shoptet_sync_tier_price') {
-      if (!Number.isSafeInteger(args.pricelistId) || !Array.isArray(args.items) || args.items.length === 0) {
-        return rpcError(id, -32602, 'Invalid pricelistId or empty items');
-      }
-      try {
-        const { apiAccessToken } = await getShoptetApiAccessToken({ db: env.DB, shopId: identity.shopId, fetchImpl: fetch });
-        const patches = [];
-        for (const item of args.items) {
-          const cap = resolveDiscountCap({ productCap: item.capPercent ?? null });
-          const priceMinor = calculateTierPrice({
-            baseMinor: item.baseMinor,
-            actionMinor: item.actionMinor ?? null,
-            tierPercent: item.tierPercent,
-            capPercent: cap
-          });
-          patches.push(createPricelistPricePatch({
-            code: item.code,
-            priceMinor,
-            vatRate: item.vatRate,
-            includingVat: true
-          }));
-        }
-
-        // Send to Shoptet API
-        const patchRes = await fetch(`https://api.myshoptet.com/api/pricelists/${args.pricelistId}`, {
-          method: 'PATCH',
-          headers: {
-            'Shoptet-Access-Token': apiAccessToken,
-            'Content-Type': 'application/vnd.shoptet.v1.0'
-          },
-          body: JSON.stringify({ data: { prices: patches } })
-        });
-
-        const patchBody = await patchRes.text();
-        return json({
-          jsonrpc: '2.0',
-          id,
-          result: toolResult({
-            pricelistId: args.pricelistId,
-            itemsProcessed: patches.length,
-            shoptetStatus: patchRes.status,
-            applied: patchRes.ok,
-            response: patchBody
-          })
-        });
-      } catch (err) {
-        return rpcError(id, -32603, `Sync error: ${err.message}`);
-      }
-    }
-  }
 
   return rpcError(id, -32601, 'Method not found');
 }
 
-export async function handleMcpSse(request, env) {
-  if (request.method !== 'GET') {
-    return json({ error: 'method_not_allowed' }, 405, { allow: 'GET' });
-  }
-  const identity = await authenticate(request, env);
-  if (!identity) {
-    return json({ error: 'unauthorized' }, 401, { 'www-authenticate': 'Bearer' });
-  }
-
-  const sessionId = crypto.randomUUID().replaceAll('-', '');
-  const url = new URL(request.url);
-  const tokenParam = url.searchParams.get('token');
-  const messageUrl = `${url.origin}/mcp/message?sessionId=${sessionId}${tokenParam ? `&token=${encodeURIComponent(tokenParam)}` : ''}`;
-
-  const { readable, writable } = new TransformStream();
-  const writer = writable.getWriter();
-  const encoder = new TextEncoder();
-
-  // Send SSE endpoint event per Model Context Protocol SSE specification
-  await writer.write(encoder.encode(`event: endpoint\r\ndata: ${messageUrl}\r\n\r\n`));
-
-  return new Response(readable, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no'
-    }
-  });
-}
+// Legacy SSE disabled: never put bearer credentials in URLs.
+export async function handleMcpSse() { return json({ error: 'transport_disabled' }, 410); }
 
 export async function handleMcpMessage(request, env) {
   if (request.method !== 'POST') {
