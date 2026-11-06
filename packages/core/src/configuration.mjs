@@ -7,6 +7,7 @@ export const proposalSchema=z.object({
   brandCaps:z.array(z.object({id:z.string().uuid(),percent}).strict()).max(100),
   categoryCaps:z.array(z.object({id:z.string().uuid(),percent}).strict()).max(200).default([]),
   productCaps:z.array(z.object({id:z.string().uuid(),variantCode:z.string().min(1).max(128).optional(),percent}).strict()).max(200).default([]),
+  minMarginBps:z.number().int().min(0).max(9999).optional(),
   salePolicy:z.enum(['okfish_compatible','lowest_price']).default('okfish_compatible'),
   capPriority:z.enum(['hierarchy','most_restrictive']).default('most_restrictive'),
   couponPolicy:z.enum(['no_loyalty_combination','unchanged']),
