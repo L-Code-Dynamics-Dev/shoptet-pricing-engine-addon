@@ -247,3 +247,30 @@ test('Loyalty Repository: Tenant isolation and Webhook Staging reconciliation qu
     db.sql.close();
   }
 });
+
+test('Webhook dedupe resumes failed delivery once and reclaims stale pending delivery', async () => {
+  const db = testD1();
+  try {
+    await setupShop(db);
+    const event = {
+      eventHash: 'retry-hash-001',
+      eventType: 'order:update',
+      orderCode: 'ORDER-RETRY-001',
+      eventCreated: '2026-11-06T16:00:00Z',
+      mode: 'live'
+    };
+    assert.equal((await recordWebhookEvent(db, '826800', event)).duplicate, false);
+    assert.equal((await recordWebhookEvent(db, '826800', event)).duplicate, true);
+    await db.prepare("UPDATE loyalty_webhook_events SET state='failed' WHERE shop_id=? AND event_hash=?")
+      .bind('826800', event.eventHash).run();
+    const retry = await recordWebhookEvent(db, '826800', event);
+    assert.equal(retry.duplicate, false);
+    assert.equal(retry.resumed, true);
+    assert.equal((await recordWebhookEvent(db, '826800', event)).duplicate, true);
+    await db.prepare("UPDATE loyalty_webhook_events SET received_at=unixepoch()-600 WHERE shop_id=? AND event_hash=?")
+      .bind('826800', event.eventHash).run();
+    const recovered = await recordWebhookEvent(db, '826800', event);
+    assert.equal(recovered.duplicate, false);
+    assert.equal(recovered.resumed, true);
+  } finally { db.sql.close(); }
+});
