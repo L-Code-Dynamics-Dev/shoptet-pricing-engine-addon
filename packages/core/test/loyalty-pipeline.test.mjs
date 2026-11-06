@@ -345,3 +345,54 @@ test('Batch Runner: Dry-Run plan generation, B2B protection, item checkpointing,
     db.sql.close();
   }
 });
+
+test('Webhook rejects invalid monetary amounts instead of silently treating them as zero', async () => {
+  const db = testD1();
+  try {
+    await setupShopWithWebhookCredentials(db);
+    const body = Buffer.from(JSON.stringify({
+      event:'order:update', eventInstance:'BAD-AMOUNT-01', eshopId:Number(SHOP_ID),
+      eventCreated:'2026-11-06T17:30:00Z'
+    }));
+    const adapter = {
+      async order(code) {
+        return {
+          code, customerGuid:'1f676f66-d9ea-11f1-a35a-bc241195dd28',
+          status:{id:-3}, paid:true,
+          creationTime:'2026-11-06T17:30:00Z', changeTime:'2026-11-06T17:30:00Z',
+          price:{currencyCode:'CZK',withVat:null,withoutVat:null},
+          items:[]
+        };
+      },
+      async customer() { throw new Error('should_not_reach_customer'); }
+    };
+    await assert.rejects(processOrderWebhook({
+      db, tokenKeys:keys, bytes:body, signature:computeSig(SIGNING_SECRET,body),
+      adapter, policy, tiers, mode:'live'
+    }), /order_amount_invalid/);
+  } finally { db.sql.close(); }
+});
+
+test('Webhook does not acknowledge an in-progress duplicate as completed', async () => {
+  const db = testD1();
+  try {
+    await setupShopWithWebhookCredentials(db);
+    const body = Buffer.from(JSON.stringify({
+      event:'order:update', eventInstance:'PENDING-01', eshopId:Number(SHOP_ID),
+      eventCreated:'2026-11-06T17:45:00Z'
+    }));
+    const eventHash = await digest(new TextDecoder().decode(body));
+    await db.prepare(`
+      INSERT INTO loyalty_webhook_events
+        (shop_id,event_hash,event_type,order_code,event_created,mode,state,received_at)
+      VALUES (?,?,?,?,?,'live','pending',unixepoch())
+    `).bind(SHOP_ID,eventHash,'order:update','PENDING-01','2026-11-06T17:45:00Z').run();
+    const result = await processOrderWebhook({
+      db, tokenKeys:keys, bytes:body, signature:computeSig(SIGNING_SECRET,body),
+      adapter:{}, policy, tiers, mode:'live'
+    });
+    assert.equal(result.accepted,false);
+    assert.equal(result.retryable,true);
+    assert.equal(result.error,'event_still_processing');
+  } finally { db.sql.close(); }
+});
