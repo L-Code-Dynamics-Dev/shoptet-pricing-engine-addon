@@ -57,6 +57,12 @@ export function evaluatePricing({baseMinor,actionMinor=null,tierPercent=0,fixedD
   const fixedP=money(fixedPriceMinor,'fixed price');
   loyalty=(loyalty<fixedP?loyalty:fixedP);
  }
+ // Maximum discount caps also apply to fixed discounts and fixed prices.
+ // A merchant-controlled sale price retains its own explicit sale-policy precedence.
+ if(effectiveCap!==null&&allowLoyaltyDiscount){
+  const floor=divide(base*(10000n-effectiveCap),10000n*step,'up')*step;
+  if(loyalty<floor)loyalty=floor;
+ }
  if(loyalty>base)loyalty=base;
  let action=null;
  if(actionMinor!==null){
