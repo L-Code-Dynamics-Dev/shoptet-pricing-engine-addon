@@ -60,6 +60,11 @@ export async function handleShoptetOrderWebhook(request,env,fetchImpl=fetch,ctx=
     return {policy,tiers:config.tiers||[],mode};
    }
   });
-  return json(result,result.accepted?200:500);
- }catch{return json({error:'webhook_not_authorized'},403);}
+  return json(result,result.accepted?200:503);
+ }catch(error){
+  const authFailure=['invalid_signature','invalid_event'].includes(error?.message);
+  return authFailure
+   ? json({error:'webhook_not_authorized'},403)
+   : json({error:'webhook_processing_unavailable'},503);
+ }
 }
