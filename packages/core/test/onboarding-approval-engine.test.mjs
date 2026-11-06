@@ -333,3 +333,136 @@ test('Onboarding & Approval Engine: Full 6-phase lifecycle', async () => {
   assert.equal(patchCalls, 2);
   assert.equal(customers.find(c => c.guid === 'cust-1-regular').priceList.id, 2);
 });
+
+test('Dry Run with HTTP 403 / permission_missing on credit notes marks plan incomplete and strictly forbids approval', async () => {
+  const db = createTestD1();
+  const SHOP_ID = 826801;
+
+  await db.prepare("INSERT INTO installations (shop_id, state, created_at, updated_at) VALUES (?, 'active', unixepoch(), unixepoch())").bind(SHOP_ID).run();
+  await db.prepare('INSERT INTO tenant_settings (shop_id, config_json, version) VALUES (?, ?, 1)')
+    .bind(SHOP_ID, JSON.stringify({ tiers: [{ name: 'VIP', percent: 10, minTurnover: 5000, pricelistId: 2 }] })).run();
+
+  await savePricelistPolicy(db, SHOP_ID, {
+    defaultPricelistId: 1,
+    managedPricelistIds: [2],
+    protectedPricelistIds: [],
+    engineMode: 'installation'
+  });
+
+  const tiers = [{ name: 'VIP', percent: 10, minTurnover: 5000, pricelistId: 2 }];
+  const policy = {
+    period: { from: '2020-01-01T00:00:00Z', to: '2030-01-01T00:00:00Z' },
+    qualifyingStatusIds: [-3],
+    requirePaid: true,
+    shipping: 'exclude',
+    billing: 'exclude',
+    discounts: 'after_discounts',
+    vat: 'inclusive',
+    refunds: 'exclude_order_with_valid_credit_note',
+    guestCustomers: 'exclude',
+    itemStatuses: 'require_match_order',
+    upgrades: 'recalculate',
+    downgrades: 'keep_current'
+  };
+
+  const customerGuid = 'cust-403-test';
+  const adapterMissingCreditNotes = {
+    async list(kind) {
+      return {
+        items: [{
+          guid: customerGuid,
+          billingAddress: { fullName: 'Test Zákazník' },
+          priceList: { id: 1 },
+          priceRatio: '1.0000'
+        }],
+        pagination: { pageCount: 1 }
+      };
+    },
+    async customer(guid) {
+      return {
+        guid,
+        billingAddress: { fullName: 'Test Zákazník' },
+        priceList: { id: 1 },
+        priceRatio: '1.0000'
+      };
+    },
+    async customerOrders() {
+      return { items: [{ code: 'ORD-REFUNDED' }] };
+    },
+    async order(code) {
+      return {
+        code,
+        customerGuid,
+        status: { id: -3 },
+        paid: true,
+        creationTime: '2026-05-01T10:00:00Z',
+        changeTime: '2026-05-01T10:00:00Z',
+        price: { currencyCode: 'CZK', withVat: '6000.00', withoutVat: '4958.68' },
+        items: []
+      };
+    },
+    async creditNotes() {
+      const err = new Error('permission_missing');
+      err.code = 'permission_missing';
+      err.status = 403;
+      throw err;
+    },
+    async creditNote() {
+      throw new Error('should_not_be_called');
+    }
+  };
+
+  // 1. Dry Run succeeds in producing diagnostic preview
+  const incompletePlan = await generateCustomerRecalculationPlan({
+    db,
+    shopId: SHOP_ID,
+    adapter: adapterMissingCreditNotes,
+    policy,
+    tiers
+  });
+
+  assert.equal(incompletePlan.creditNotesUnavailable, true);
+  assert.equal(incompletePlan.canApprove, false);
+  assert.equal(incompletePlan.incompleteReason, 'credit_notes_permission_missing');
+  assert.equal(incompletePlan.changesNeeded, 1);
+
+  const planDetails = await getRecalculationPlanDetails(db, SHOP_ID, incompletePlan.planId);
+  const planMeta = JSON.parse(planDetails.plan.plan_json);
+  assert.equal(planMeta.canApprove, false);
+  assert.equal(planMeta.creditNotesUnavailable, true);
+
+  // 2. Strict P1 security gate: approve must FAIL CLOSED
+  await assert.rejects(
+    approveRecalculationPlan(db, SHOP_ID, incompletePlan.planId),
+    /incomplete_data_credit_notes_missing/
+  );
+
+  // 3. Execution batch must also fail closed
+  await assert.rejects(
+    executeCustomerRecalculationBatch({ db, shopId: SHOP_ID, planId: incompletePlan.planId, adapter: adapterMissingCreditNotes }),
+    /plan_not_approved/
+  );
+
+  // 4. When credit notes ARE available, plan can be approved
+  const adapterWithCreditNotes = {
+    ...adapterMissingCreditNotes,
+    async creditNotes() {
+      return { items: [], pagination: { pageCount: 1 } };
+    }
+  };
+
+  const completePlan = await generateCustomerRecalculationPlan({
+    db,
+    shopId: SHOP_ID,
+    adapter: adapterWithCreditNotes,
+    policy,
+    tiers
+  });
+
+  assert.equal(completePlan.creditNotesUnavailable, false);
+  assert.equal(completePlan.canApprove, true);
+  assert.equal(completePlan.incompleteReason, null);
+
+  const approvalRes = await approveRecalculationPlan(db, SHOP_ID, completePlan.planId);
+  assert.equal(approvalRes.state, 'approved');
+});

@@ -316,6 +316,11 @@ export async function approveRecalculationPlan(db, shopId, planId) {
   const currentVersion = currentSettings?.version ?? 0;
   let planMeta = {};
   try { planMeta = JSON.parse(plan.plan_json); } catch {}
+
+  if (planMeta.canApprove === false || (planMeta.creditNotesUnavailable && (planMeta.policy?.refunds === 'exclude_order_with_valid_credit_note' || !planMeta.policy?.refunds))) {
+    throw new Error('incomplete_data_credit_notes_missing');
+  }
+
   if (planMeta.configVersion !== undefined && planMeta.configVersion !== currentVersion) {
     throw new Error('plan_stale_configuration_changed');
   }

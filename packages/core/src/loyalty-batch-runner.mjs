@@ -60,6 +60,9 @@ export async function generateCustomerRecalculationPlan({
 
   // 0. Prefetch store credit notes across all pages
   const allCreditNotes = [];
+  let creditNotesUnavailable = false;
+  let creditNotesError = null;
+
   if (typeof adapter.creditNotes === 'function' && typeof adapter.creditNote === 'function') {
     try {
       for (let cnPage = 1; ; cnPage++) {
@@ -80,6 +83,8 @@ export async function generateCustomerRecalculationPlan({
       }
     } catch (e) {
       if (e?.code !== 'permission_missing' && e?.status !== 403) throw e;
+      creditNotesUnavailable = true;
+      creditNotesError = e?.code || 'permission_missing';
     }
   }
 
@@ -229,6 +234,10 @@ export async function generateCustomerRecalculationPlan({
   const configVersion = settingsRow?.version ?? 0;
   const configSha256 = settingsRow?.config_json ? await digest(settingsRow.config_json) : '';
 
+  const requiresCreditNotes = policy.refunds === 'exclude_order_with_valid_credit_note';
+  const canApprove = !(creditNotesUnavailable && requiresCreditNotes);
+  const incompleteReason = canApprove ? null : 'credit_notes_permission_missing';
+
   const planId = 'plan-' + crypto.randomUUID();
   const planJson = JSON.stringify({
     shopId,
@@ -240,6 +249,10 @@ export async function generateCustomerRecalculationPlan({
     b2bSkipped,
     priceRatioSkipped,
     noChangeCount,
+    creditNotesUnavailable,
+    creditNotesError,
+    canApprove,
+    incompleteReason,
     policy,
     tiers,
     items
@@ -268,6 +281,9 @@ export async function generateCustomerRecalculationPlan({
     b2bSkipped,
     priceRatioSkipped,
     noChangeCount,
+    creditNotesUnavailable,
+    canApprove,
+    incompleteReason,
     state: 'draft'
   };
 }
@@ -280,9 +296,14 @@ export async function executeCustomerRecalculationBatch({
   rateLimiter = null,
   batchSize = 25
 }) {
-  const plan = await db.prepare('SELECT state FROM loyalty_recalculation_plans WHERE shop_id = ? AND plan_id = ?').bind(shopId, planId).first();
+  const plan = await db.prepare('SELECT state, plan_json FROM loyalty_recalculation_plans WHERE shop_id = ? AND plan_id = ?').bind(shopId, planId).first();
   if (!plan) throw new Error('plan_not_found');
   if (plan.state !== 'approved') throw new Error('plan_not_approved');
+  let planMeta = {};
+  try { planMeta = JSON.parse(plan.plan_json); } catch {}
+  if (planMeta.canApprove === false || (planMeta.creditNotesUnavailable && (planMeta.policy?.refunds === 'exclude_order_with_valid_credit_note' || !planMeta.policy?.refunds))) {
+    throw new Error('incomplete_data_credit_notes_missing');
+  }
 
   await setEngineMode(db, shopId, 'syncing');
 

@@ -316,6 +316,8 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
     } catch (e) {
       const code = e?.code || e?.message;
       const safeMap = {
+        incomplete_data_credit_notes_missing: 'Návrh nelze schválit, protože chybí data o dobropisech (aplikace nemá v Shoptetu potřebná oprávnění).',
+        credit_notes_permission_missing: 'Návrh nelze schválit, protože chybí data o dobropisech (aplikace nemá v Shoptetu potřebná oprávnění).',
         plan_not_found: 'Plán přepočtu nebyl nalezen.',
         plan_already_processed: 'Tento plán byl již dříve zpracován nebo schválen.',
         plan_expired: 'Platnost plánu vypršela. Vygenerujte prosím nový Dry Run.',
@@ -1853,6 +1855,17 @@ export function renderAdminHtml(eshopId, auth) {
           const items = planData.items || [];
 
           if (plan) {
+            let planMeta = {};
+            try { planMeta = typeof plan.plan_json === 'string' ? JSON.parse(plan.plan_json) : (plan.plan_json || {}); } catch {}
+            const isIncomplete = planMeta.canApprove === false || Boolean(planMeta.creditNotesUnavailable);
+
+            if (isIncomplete) {
+              const warnBox = document.createElement('div');
+              warnBox.style.cssText = 'background: #fff8e5; border: 1px solid #f5c6cb; border-left: 4px solid #d9534f; color: #8a6d3b; border-radius: 4px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px; line-height: 1.5;';
+              warnBox.innerHTML = '<strong style="color: #a94442; font-size: 14px;">⚠️ Upozornění: Návrh je pouze diagnostický náhled (data nejsou úplná)</strong><br><span style="color: #555;">V Shoptetu chybí oprávnění k rozhraní dobropisů (API vrátilo HTTP 403 Forbidden). Bez těchto dat nelze spolehlivě odečíst vrácené nebo stornované objednávky. <strong>Schválení a zápis změn do Shoptetu je z bezpečnostních důvodů zablokován</strong>, aby zákazníkům nebyly neoprávněně přiděleny VIP slevy. Pro aktivaci schvalování udělte doplňku oprávnění k dobropisům v administraci Shoptetu.</span>';
+              card.append(warnBox);
+            }
+
             const summaryBox = document.createElement('div');
             summaryBox.style.cssText = 'display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px;';
             summaryBox.innerHTML = '<div style="background: #f7f9fa; border: 1px solid #e2e5e8; border-radius: 3px; padding: 8px 12px; text-align: center;"><div style="font-size: 11px; color: #777;">Celkem zákazníků</div><div style="font-size: 18px; font-weight: bold; color: #333;">' + plan.total_customers + '</div></div>' +
@@ -1892,21 +1905,28 @@ export function renderAdminHtml(eshopId, auth) {
               btnApprove.type = 'button';
               btnApprove.className = 'btn-shoptet-green';
               btnApprove.textContent = 'Schválit a provést synchronizaci';
-              btnApprove.addEventListener('click', async () => {
+              if (isIncomplete) {
                 btnApprove.disabled = true;
-                btnApprove.textContent = 'Schvaluji…';
-                try {
-                  await api('/loyalty/approve', { method: 'POST', body: JSON.stringify({ planId: plan.plan_id }) });
-                  flash('Plán byl schválen. Spouštím dávkovou synchronizaci…');
-                  await api('/loyalty/sync', { method: 'POST', body: JSON.stringify({ planId: plan.plan_id }) });
-                  flash('Synchronizace zákazníků byla úspěšně dokončena a automatický přepočet je aktivní.');
-                  await renderLoyaltyOnboarding();
-                } catch (err) {
-                  btnApprove.disabled = false;
-                  btnApprove.textContent = 'Schválit a provést synchronizaci';
-                  flash(err.message, true);
-                }
-              });
+                btnApprove.style.opacity = '0.5';
+                btnApprove.style.cursor = 'not-allowed';
+                btnApprove.title = 'Návrh nelze schválit bez dat o dobropisech (aplikace nemá potřebná oprávnění v Shoptetu).';
+              } else {
+                btnApprove.addEventListener('click', async () => {
+                  btnApprove.disabled = true;
+                  btnApprove.textContent = 'Schvaluji…';
+                  try {
+                    await api('/loyalty/approve', { method: 'POST', body: JSON.stringify({ planId: plan.plan_id }) });
+                    flash('Plán byl schválen. Spouštím dávkovou synchronizaci…');
+                    await api('/loyalty/sync', { method: 'POST', body: JSON.stringify({ planId: plan.plan_id }) });
+                    flash('Synchronizace zákazníků byla úspěšně dokončena a automatický přepočet je aktivní.');
+                    await renderLoyaltyOnboarding();
+                  } catch (err) {
+                    btnApprove.disabled = false;
+                    btnApprove.textContent = 'Schválit a provést synchronizaci';
+                    flash(err.message, true);
+                  }
+                });
+              }
               actionsDiv.append(btnApprove);
             } else if (status.engineMode === 'approved') {
               const btnSync = document.createElement('button');
