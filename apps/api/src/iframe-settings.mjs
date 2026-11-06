@@ -754,8 +754,23 @@ export function renderAdminHtml(eshopId, auth) {
       <div class="section-heading">Maximální povolená sleva pro vybrané značky</div>
       <p style="color: #666666; font-size: 13px; margin-bottom: 14px;">U vybraných značek můžete nastavit pevný strop maximální slevy, který věrnostní program nikdy nepřekročí:</p>
 
-      <div id="brand-picker" hidden style="max-width:440px;border:1px solid #ddd;padding:10px;margin:10px 0">
-        <label for="brand-picker-search">Hledat značku</label><input type="search" id="brand-picker-search" class="input-text" autocomplete="off"><select id="brand-picker-results" aria-label="Skutečné značky obchodu" size="5" style="width:100%;height:150px;overflow-y:auto;margin:8px 0"></select><p id="brand-picker-status" role="status"></p><button type="button" id="brand-picker-prev">Předchozí</button><button type="button" id="brand-picker-next">Další</button><button type="button" id="brand-picker-use">Vybrat</button><button type="button" id="brand-picker-close">Zavřít</button>
+      <div id="brand-picker" hidden style="max-width: 480px; background: #ffffff; border: 1px solid #cfcfcf; border-radius: 4px; padding: 14px 16px; margin: 12px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.06);">
+        <div style="font-weight: bold; margin-bottom: 8px; color: #25a9e0;">Výběr značky z katalogu e-shopu</div>
+        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+          <input type="search" id="brand-picker-search" class="input-text" placeholder="Hledat značku…" autocomplete="off" style="flex: 1;">
+        </div>
+        <select id="brand-picker-results" aria-label="Skutečné značky obchodu" size="6" style="width: 100%; border: 1px solid #cfcfcf; border-radius: 3px; padding: 4px; font-size: 13px; outline: none; margin-bottom: 8px;"></select>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+          <span id="brand-picker-status" role="status" style="font-size: 12px; color: #777;"></span>
+          <div style="display: flex; gap: 4px;">
+            <button type="button" class="btn-secondary" id="brand-picker-prev" style="padding: 2px 10px; font-size: 12px;">Předchozí</button>
+            <button type="button" class="btn-secondary" id="brand-picker-next" style="padding: 2px 10px; font-size: 12px;">Další</button>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px; justify-content: flex-end;">
+          <button type="button" class="btn-secondary" id="brand-picker-close">Zavřít</button>
+          <button type="button" class="btn-shoptet-green" id="brand-picker-use">Vybrat značku</button>
+        </div>
       </div>
       <div id="brand-limits-container" style="display: flex; flex-direction: column; gap: 8px; max-width: 440px; margin-bottom: 14px;"></div>
       <button type="button" class="btn-secondary" id="btn-add-brand-limit">+ Přidat značku</button>
@@ -768,11 +783,21 @@ export function renderAdminHtml(eshopId, auth) {
 
     <!-- Tab 3: Přístup k MCP -->
     <section class="panel" id="panel-mcp">
-      <div class="section-heading">OAuth připojení s PKCE</div>
-      <p>Spusťte připojení MCP v podporovaném předregistrovaném klientovi. Z otevřeného autorizačního okna sem vložte jednorázový připojovací kód.</p>
-      <label for="oauth-pair-code">Připojovací kód</label><input id="oauth-pair-code" class="input-text" style="max-width:360px" autocomplete="off">
-      <button type="button" class="btn-secondary" id="oauth-inspect">Zkontrolovat připojení</button><div id="oauth-consent"></div><div id="oauth-connections"></div>
-      <p class="tab-intro">Přístup k MCP (Model Context Protocol) pro propojení s vaším asistentem. Umožňuje bezpečně kontrolovat a spravovat věrnostní ceny přirozenou řečí.</p>
+      <p class="tab-intro">Přístup k MCP pro propojení s vaším asistentem. Umožňuje bezpečně kontrolovat a spravovat věrnostní ceny přirozenou řečí.</p>
+
+      <div class="section-heading">Spárování s AI asistentem</div>
+      <p style="color: #666666; font-size: 13px; margin-bottom: 12px;">Pokud používáte podporovaného klienta, zadejte jednorázový kód pro bezpečné spárování:</p>
+
+      <div class="form-row">
+        <label class="form-label" for="oauth-pair-code">Připojovací kód</label>
+        <div class="form-field">
+          <input id="oauth-pair-code" class="input-text" style="width: 320px;" placeholder="Vložte kód z okna klienta" autocomplete="off">
+          <button type="button" class="btn-secondary" id="oauth-inspect">Ověřit kód</button>
+          <span class="info-icon" title="Jednorázový kód vygenerovaný AI klientem pro autorizaci.">i</span>
+        </div>
+      </div>
+      <div id="oauth-consent" style="margin: 10px 0 16px 298px;"></div>
+      <div id="oauth-connections" style="margin: 8px 0 16px 298px;"></div>
 
       <div class="section-heading">Aktivní přístupové klíče pro MCP</div>
 
@@ -787,9 +812,20 @@ export function renderAdminHtml(eshopId, auth) {
         <tbody id="tokens-body"></tbody>
       </table>
 
-      <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0;">
-        <label><input type="checkbox" id="permission-configure"> Povolit přípravu návrhů</label><label><input type="checkbox" id="permission-customers"> Povolit čtení objednávek pro výpočet obratu</label><label><input type="checkbox" id="permission-audit"> Povolit čtení historie změn</label><label><input type="checkbox" id="permission-sync"> Povolit spouštění synchronizačních úloh</label><label><input type="checkbox" id="permission-execute"> Povolit uložení revizí schválených v administraci</label><button type="button" class="btn-secondary" id="token-revoke">Odvolat ruční klíče</button>
-        <button type="button" class="btn-shoptet-green" id="token-new">Vygenerovat nový klíč pro MCP</button>
+      <div class="section-heading">Vygenerovat nový přístupový klíč</div>
+      <p style="color: #666666; font-size: 13px; margin-bottom: 10px;">Zvolte oprávnění, která má mít nový klíč pro asistenta:</p>
+
+      <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; padding-left: 10px;">
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;"><input type="checkbox" id="permission-configure"> <span>Povolit přípravu návrhů ceníků</span></label>
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;"><input type="checkbox" id="permission-customers"> <span>Povolit čtení objednávek pro výpočet obratu zákazníků</span></label>
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;"><input type="checkbox" id="permission-audit"> <span>Povolit čtení historie změn</span></label>
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;"><input type="checkbox" id="permission-sync"> <span>Povolit spouštění synchronizačních úloh</span></label>
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;"><input type="checkbox" id="permission-execute"> <span>Povolit uložení revizí schválených v administraci</span></label>
+      </div>
+
+      <div style="display: flex; gap: 10px; align-items: center; margin: 16px 0;">
+        <button type="button" class="btn-shoptet-green" id="token-new">Vygenerovat nový klíč</button>
+        <button type="button" class="btn-secondary" id="token-revoke">Odvolat ruční klíče</button>
         <span style="color: #777777; font-size: 12px;">Vygenerováním se všechny dosavadní klíče automaticky zneplatní.</span>
       </div>
 
@@ -801,8 +837,16 @@ export function renderAdminHtml(eshopId, auth) {
     </section>
 
     <!-- Tab 4: Přehled -->
-    <section class="panel" id="panel-overview"><p id="onboarding-status" role="status"></p><p id="webhook-status" role="status"></p><label><input type="checkbox" id="webhook-confirm"> Souhlasím s vytvořením podpisového klíče bezpečných oznámení pro tuto instalaci doplňku.</label><button type="button" id="webhook-enable">Zapnout bezpečná oznámení Shoptetu</button><button type="button" id="onboarding-retry" hidden>Zopakovat ověření připojení</button>
+    <section class="panel" id="panel-overview">
       <p class="tab-intro">Základní přehled o stavu propojení věrnostního systému s vaším e-shopem.</p>
+
+      <div class="shoptet-notice" id="onboarding-notice">
+        <span class="notice-icon">ℹ️</span>
+        <div style="flex: 1; display: flex; justify-content: space-between; align-items: center;">
+          <span id="onboarding-status" role="status">Načítám stav instalace…</span>
+          <button type="button" class="btn-secondary" id="onboarding-retry" hidden style="margin-left: 12px;">Zopakovat ověření</button>
+        </div>
+      </div>
 
       <div class="section-heading">Stav propojení s e-shopem</div>
 
@@ -847,6 +891,30 @@ export function renderAdminHtml(eshopId, auth) {
           <span class="info-icon" title="Počet nakonfigurovaných věrnostních ceníků.">i</span>
         </div>
       </div>
+
+      <div class="section-heading">Zabezpečená systémová oznámení</div>
+
+      <div class="form-row">
+        <label class="form-label">Stav oznámení</label>
+        <div class="form-field">
+          <span id="webhook-status" role="status" style="font-weight: 500;">Načítám stav…</span>
+          <span class="info-icon" title="Zabezpečená komunikace událostí mezi Shoptetem a doplňkem.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label"></label>
+        <div class="form-field" style="display: flex; flex-direction: column; align-items: flex-start; gap: 8px;">
+          <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" id="webhook-confirm">
+            <span>Souhlasím s vytvořením podpisového klíče bezpečných oznámení pro tuto instalaci.</span>
+          </label>
+          <button type="button" class="btn-secondary" id="webhook-enable">Zapnout bezpečná oznámení</button>
+        </div>
+      </div>
+
+      <div id="approvals-container"></div>
+      <div id="sync-approvals-container"></div>
     </section>
   </div>
 
