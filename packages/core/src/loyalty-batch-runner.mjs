@@ -275,6 +275,14 @@ export async function executeCustomerRecalculationBatch({
     }
     if (actualPricelistId === item.target_pricelist_id) {
       await updateRecalculationItemStatus(db, shopId, planId, item.customer_guid, { status: 'verified' });
+      await db.prepare(`
+        INSERT INTO loyalty_customer_states (shop_id, customer_guid, current_pricelist_id, calculated_turnover_minor, updated_at)
+        VALUES (?, ?, ?, ?, unixepoch())
+        ON CONFLICT(shop_id, customer_guid) DO UPDATE SET
+          current_pricelist_id=excluded.current_pricelist_id,
+          calculated_turnover_minor=excluded.calculated_turnover_minor,
+          updated_at=unixepoch()
+      `).bind(shopId, item.customer_guid, item.target_pricelist_id, item.calculated_turnover_minor).run();
       completedInThisBatch++;
       continue;
     }
@@ -319,7 +327,16 @@ export async function executeCustomerRecalculationBatch({
   const remaining = await getPendingRecalculationItems(db, shopId, planId, 1);
   let reconciledCount = 0;
 
-  if (remaining.length === 0) {
+  // A failed item must never silently disappear from the completion gate.
+  const unresolvedRow = await db.prepare(`
+    SELECT COUNT(*) AS total FROM loyalty_recalculation_items
+    WHERE shop_id=? AND plan_id=?
+      AND status NOT IN ('verified', 'no_change', 'b2b_locked')
+  `).bind(shopId, planId).first();
+  const unresolvedCount = Number(unresolvedRow?.total ?? 0);
+  const planCompleted = remaining.length === 0 && unresolvedCount === 0;
+
+  if (planCompleted) {
     // Process queued reconciliation webhook events
     const queuedEvents = await getQueuedWebhookReconciliationEvents(db, shopId);
     for (const ev of queuedEvents) {
@@ -333,7 +350,8 @@ export async function executeCustomerRecalculationBatch({
   return {
     completedInThisBatch,
     remainingCount: remaining.length,
-    planCompleted: remaining.length === 0,
+    planCompleted,
+    unresolvedCount,
     reconciledCount
   };
 }
