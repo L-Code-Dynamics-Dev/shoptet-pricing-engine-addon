@@ -110,6 +110,13 @@ export async function processOrderWebhook({
     lastChangeTime: order.changeTime
   });
 
+  // An older order event must not trigger customer tier calculation with missing turnover.
+  // The ledger already holds the most recent state; a replay is a no-op.
+  if (!ledgerResult.applied) {
+    await db.prepare("UPDATE loyalty_webhook_events SET state='processed' WHERE shop_id=? AND event_hash=?").bind(shopId, eventHash).run();
+    return { accepted: true, changed: false, ignored: true, reason: ledgerResult.reason, orderCode };
+  }
+
   // 6. Evaluate Customer Eligibility & Target Tier
   const customer = await adapter.customer(order.customerGuid);
   const pricelistPolicy = await getPricelistPolicy(db, shopId);
