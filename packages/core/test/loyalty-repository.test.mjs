@@ -132,6 +132,13 @@ test('Loyalty Repository: Order ledger delta updates, multi-order accumulation a
     assert.equal(ref1.applied, true);
     assert.equal(ref1.contributedTurnoverMinor, 404000);
     assert.equal(ref1.customerTurnoverMinor, 604000);
+    const repeatedRefund = await recordRefundToLedger(db, '826800', {
+      orderCode: '2026000001',
+      refundedAmountMinor: 100000,
+      changeTime: '2026-11-06T12:30:00Z'
+    });
+    assert.equal(repeatedRefund.applied, false);
+    assert.equal(repeatedRefund.reason, 'stale_or_duplicate_refund');
     assert.equal(ref1.qualifyingOrdersCount, 2);
 
     // 5. Full remaining refund on order 1 (4 040.00 Kč) -> order 1 contribution drops to 0, count drops to 1
