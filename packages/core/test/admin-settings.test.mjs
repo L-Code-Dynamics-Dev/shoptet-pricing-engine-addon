@@ -115,13 +115,17 @@ test('preview key grants session only with correct key', async () => {
 });
 
 test('tier validation', () => {
-  assert.ok(validateTiers([{ name: 'Bronz', percent: 5, minTurnover: 2000 }, { name: 'Zlato', percent: 0.29, minTurnover: 10000 }]).tiers);
+  const ok = validateTiers([{ name: 'Bronz', percent: 5, minTurnover: 2000, pricelistId: 2 }, { name: 'Zlato', percent: 0.29, minTurnover: 10000 }]);
+  assert.ok(ok.tiers);
+  assert.equal(ok.tiers[0].pricelistId, 2);
+  assert.equal(ok.tiers[1].pricelistId, undefined);
   assert.match(validateTiers([]).error, /alespoň/);
   assert.match(validateTiers([{ name: 'A', percent: 5, minTurnover: 100 }, { name: 'B', percent: 6, minTurnover: 100 }]).error, /vyšší/);
   assert.match(validateTiers([{ name: 'A', percent: 0, minTurnover: 0 }]).error, /sleva/);
   assert.match(validateTiers([{ name: 'A', percent: 5, minTurnover: 1.5 }]).error, /obrat/);
   assert.match(validateTiers([{ name: 'A', percent: 5, minTurnover: 0 }, { name: 'a', percent: 6, minTurnover: 10 }]).error, /duplicit/);
   assert.match(validateTiers([{ name: 'A', percent: 5, minTurnover: 0, shopId: 'x' }]).error, /neznámá/);
+  assert.match(validateTiers([{ name: 'A', percent: 5, minTurnover: 0, pricelistId: -5 }]).error, /ceník/);
 });
 
 test('rule validation', () => {
@@ -132,16 +136,21 @@ test('rule validation', () => {
     highestDiscountWins: true,
     postWriteVerify: true,
     brandLimits: { '123e4567-e89b-42d3-a456-426614174001': 10 },
+    categoryLimits: { '123e4567-e89b-42d3-a456-426614174003': 5 },
     productLimits: { '123e4567-e89b-42d3-a456-426614174002': 0 }
   });
   assert.equal(v.rules.couponLockTopTiers, true);
   assert.equal(v.rules.couponLockMinPercent, 15);
   assert.equal(v.rules.highestDiscountWins, true);
   assert.deepEqual(v.rules.brandLimits, { '123e4567-e89b-42d3-a456-426614174001': 10 });
+  assert.deepEqual(v.rules.categoryLimits, { '123e4567-e89b-42d3-a456-426614174003': 5 });
   assert.deepEqual(v.rules.productLimits, { '123e4567-e89b-42d3-a456-426614174002': 0 });
 
   const invalidPercent = validateRules({ couponLockMinPercent: 150 });
   assert.match(invalidPercent.error, /Hranice slevy/);
+
+  const invalidCategory = validateRules({ categoryLimits: { 'bad-guid': 10 } });
+  assert.match(invalidCategory.error, /Kategorii vyberte/);
 
   const invalidProduct = validateRules({ productLimits: { 'bad-guid': 10 } });
   assert.match(invalidProduct.error, /Produkt vyberte/);

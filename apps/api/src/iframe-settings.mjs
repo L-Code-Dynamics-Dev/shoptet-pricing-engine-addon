@@ -43,7 +43,7 @@ export function validateTiers(input) {
     const t = input[i];
     const row = `Řádek ${i + 1}: `;
     if (!t || typeof t !== 'object' || Array.isArray(t)) return { error: row + 'neplatná data.' };
-    const extra = Object.keys(t).filter(k => !['name', 'percent', 'minTurnover'].includes(k));
+    const extra = Object.keys(t).filter(k => !['name', 'percent', 'minTurnover', 'pricelistId'].includes(k));
     if (extra.length) return { error: row + 'neznámá pole.' };
     const name = typeof t.name === 'string' ? t.name.trim() : '';
     if (name.length < 1 || name.length > 60) return { error: row + 'název musí mít 1–60 znaků.' };
@@ -58,7 +58,12 @@ export function validateTiers(input) {
     if (tiers.length && minTurnover <= tiers[tiers.length - 1].minTurnover) {
       return { error: row + 'obrat musí být vyšší než u předchozí hladiny.' };
     }
-    tiers.push({ name, percent, minTurnover });
+    let pricelistId = null;
+    if (t.pricelistId !== undefined && t.pricelistId !== null && t.pricelistId !== '') {
+      pricelistId = Number(t.pricelistId);
+      if (!Number.isSafeInteger(pricelistId) || pricelistId <= 0) return { error: row + 'ceník musí být kladné číslo.' };
+    }
+    tiers.push({ name, percent, minTurnover, ...(pricelistId !== null ? { pricelistId } : {}) });
   }
   return { tiers };
 }
@@ -71,6 +76,13 @@ export function validateRules(input) {
     if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(key))return {error:'Značku vyberte ze skutečného katalogu obchodu.'};
     if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>100||Number(value.toFixed(2))!==value)return {error:'Sleva značky musí být 0–100 %.'};
     const id=key.toLowerCase();if(Object.hasOwn(brandLimits,id))return {error:'Duplicitní značka.'};brandLimits[id]=value;
+  }
+  const categoryLimits = {};
+  if(input.categoryLimits!==undefined && (!input.categoryLimits || typeof input.categoryLimits!=='object' || Array.isArray(input.categoryLimits) || Object.keys(input.categoryLimits).length>100))return {error:'Neplatný seznam kategorií.'};
+  for(const [key,value] of Object.entries(input.categoryLimits||{})){
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(key))return {error:'Kategorii vyberte ze skutečného katalogu obchodu.'};
+    if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>100||Number(value.toFixed(2))!==value)return {error:'Sleva kategorie musí být 0–100 %.'};
+    const id=key.toLowerCase();if(Object.hasOwn(categoryLimits,id))return {error:'Duplicitní kategorie.'};categoryLimits[id]=value;
   }
   const productLimits = {};
   if(input.productLimits!==undefined && (!input.productLimits || typeof input.productLimits!=='object' || Array.isArray(input.productLimits) || Object.keys(input.productLimits).length>100))return {error:'Neplatný seznam produktů.'};
@@ -94,6 +106,7 @@ export function validateRules(input) {
       vatIntegrity: true,
       postWriteVerify: input.postWriteVerify !== false,
       brandLimits,
+      categoryLimits,
       productLimits
     }
   };
@@ -155,6 +168,9 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       if(route==='/catalog/brand'){const id=url.searchParams.get('id')||'';if(!/^[a-f0-9-]{36}$/i.test(id))return jsonRes({error:'invalid_brand_id'},400);return jsonRes(await catalog.brand(id));}
       if(route==='/catalog/products')return jsonRes(await catalog.list('products',{page:Number(url.searchParams.get('page')||1),limit:50,query:url.searchParams.get('query')||''}));
       if(route==='/catalog/product'){const id=url.searchParams.get('id')||'';if(!/^[a-f0-9-]{36}$/i.test(id))return jsonRes({error:'invalid_product_id'},400);return jsonRes(await catalog.product(id));}
+      if(route==='/catalog/categories')return jsonRes(await catalog.list('categories',{page:Number(url.searchParams.get('page')||1),limit:50,query:url.searchParams.get('query')||''}));
+      if(route==='/catalog/category'){const id=url.searchParams.get('id')||'';if(!/^[a-f0-9-]{36}$/i.test(id))return jsonRes({error:'invalid_category_id'},400);return jsonRes(await catalog.category(id));}
+      if(route==='/catalog/pricelists')return jsonRes(await catalog.list('pricelists'));
     }catch{return jsonRes({error:'catalog_unavailable',message:'Katalog není dostupný. Ověřte připojení Shoptetu a schválená oprávnění.'},502);}
     return jsonRes({error:'not_found'},404);
   }
@@ -232,6 +248,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       vatIntegrity: true,
       postWriteVerify: true,
       brandLimits: {},
+      categoryLimits: {},
       productLimits: {}
     };
     const rules = { ...defaultRules, ...(config.rules || {}) };
@@ -263,6 +280,24 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
     const v = validateTiers(body.tiers);
     if (v.error) return jsonRes({ error: v.error }, 422);
 
+    if (v.tiers.some(t => t.pricelistId)) {
+      try {
+        const catalog = createShoptetAdapter({ getToken: async () => (await getShoptetApiAccessToken({ db: env.DB, shopId, tokenKeys: env.SHOPTET_TOKEN_KEYS })).apiAccessToken });
+        for (const t of v.tiers) {
+          if (t.pricelistId) {
+            try {
+              const pl = await catalog.pricelist(t.pricelistId);
+              if (!pl || pl.id !== t.pricelistId) return jsonRes({ error: `Ceník ${t.pricelistId} již neexistuje v Shoptetu.` }, 422);
+            } catch {
+              return jsonRes({ error: `Ceník ${t.pricelistId} již neexistuje v Shoptetu.` }, 422);
+            }
+          }
+        }
+      } catch {
+        return jsonRes({ error: 'Ceníky Shoptetu nelze ověřit. Zkontrolujte oprávnění.' }, 422);
+      }
+    }
+
     const current = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
     const { config, version } = parseConfig(current);
     if (version !== body.version) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.', version }, 409);
@@ -286,11 +321,12 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
     if (!body || !Number.isSafeInteger(body.version) || body.version < 0) return jsonRes({ error: 'Chybí verze nastavení.' }, 400);
     const v = validateRules(body.rules);
     if (v.error) return jsonRes({ error: v.error }, 422);
-    if(Object.keys(v.rules.brandLimits).length || Object.keys(v.rules.productLimits).length){
+    if(Object.keys(v.rules.brandLimits).length || Object.keys(v.rules.productLimits).length || Object.keys(v.rules.categoryLimits).length){
       try{
         const catalog=createShoptetAdapter({getToken:async()=> (await getShoptetApiAccessToken({db:env.DB,shopId,tokenKeys:env.SHOPTET_TOKEN_KEYS})).apiAccessToken});
         for(const id of Object.keys(v.rules.brandLimits))if(!await catalog.verifyBrand(id))return jsonRes({error:'Značka již neexistuje v katalogu.'},422);
         for(const id of Object.keys(v.rules.productLimits)){try{await catalog.product(id);}catch{return jsonRes({error:'Produkt již neexistuje v katalogu.'},422);}}
+        for(const id of Object.keys(v.rules.categoryLimits)){try{await catalog.category(id);}catch{return jsonRes({error:'Kategorie již neexistuje v katalogu.'},422);}}
       }catch{return jsonRes({error:'Položky katalogu nelze ověřit. Zkontrolujte oprávnění Shoptetu.'},422);}
     }
 
@@ -722,13 +758,13 @@ const SHOPTET_STYLES = `
       .shoptet-table {
         min-width: 520px;
       }
-      #brand-picker, #product-picker {
+      #brand-picker, #product-picker, #category-picker {
         max-width: 100% !important;
       }
-      #brand-limits-container, #product-limits-container {
+      #brand-limits-container, #product-limits-container, #category-limits-container {
         max-width: 100% !important;
       }
-      #brand-limits-container > div, #product-limits-container > div {
+      #brand-limits-container > div, #product-limits-container > div, #category-limits-container > div {
         max-width: 100% !important;
       }
     }
@@ -821,9 +857,10 @@ export function renderAdminHtml(eshopId, auth) {
         <table class="shoptet-table">
           <thead>
             <tr>
-              <th style="width: 48%;">Název věrnostního ceníku</th>
-              <th style="width: 24%;">Věrnostní sleva</th>
-              <th style="width: 24%;">Požadovaný obrat</th>
+              <th style="width: 36%;">Název věrnostního ceníku</th>
+              <th style="width: 18%;">Věrnostní sleva</th>
+              <th style="width: 20%;">Požadovaný obrat</th>
+              <th style="width: 22%;">Ceník v Shoptetu</th>
               <th style="width: 4%;"></th>
             </tr>
           </thead>
@@ -905,6 +942,30 @@ export function renderAdminHtml(eshopId, auth) {
       </div>
       <div id="brand-limits-container" style="display: flex; flex-direction: column; gap: 8px; max-width: 440px; margin-bottom: 14px;"></div>
       <button type="button" class="btn-secondary" id="btn-add-brand-limit">+ Přidat značku</button>
+
+      <div class="section-heading">Maximální povolená sleva pro vybrané kategorie</div>
+      <p style="color: #666666; font-size: 13px; margin-bottom: 14px;">U vybraných kategorií můžete nastavit strop slevy (nebo 0 % pro úplné vyloučení kategorie z věrnostních slev):</p>
+
+      <div id="category-picker" hidden style="max-width: 480px; background: #ffffff; border: 1px solid #cfcfcf; border-radius: 4px; padding: 14px 16px; margin: 12px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.06);">
+        <div style="font-weight: bold; margin-bottom: 8px; color: #25a9e0;">Výběr kategorie z katalogu e-shopu</div>
+        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+          <input type="search" id="category-picker-search" class="input-text" placeholder="Hledat kategorii podle názvu…" autocomplete="off" style="flex: 1;">
+        </div>
+        <select id="category-picker-results" aria-label="Skutečné kategorie obchodu" size="6" style="width: 100%; border: 1px solid #cfcfcf; border-radius: 3px; padding: 4px; font-size: 13px; outline: none; margin-bottom: 8px;"></select>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+          <span id="category-picker-status" role="status" style="font-size: 12px; color: #777;"></span>
+          <div style="display: flex; gap: 4px;">
+            <button type="button" class="btn-secondary" id="category-picker-prev" style="padding: 2px 10px; font-size: 12px;">Předchozí</button>
+            <button type="button" class="btn-secondary" id="category-picker-next" style="padding: 2px 10px; font-size: 12px;">Další</button>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px; justify-content: flex-end;">
+          <button type="button" class="btn-secondary" id="category-picker-close">Zavřít</button>
+          <button type="button" class="btn-shoptet-green" id="category-picker-use">Vybrat kategorii</button>
+        </div>
+      </div>
+      <div id="category-limits-container" style="display: flex; flex-direction: column; gap: 8px; max-width: 440px; margin-bottom: 14px;"></div>
+      <button type="button" class="btn-secondary" id="btn-add-category-limit">+ Přidat kategorii</button>
 
       <div class="section-heading">Výjimky a stropy slev pro vybrané produkty</div>
       <p style="color: #666666; font-size: 13px; margin-bottom: 14px;">Zde můžete vybrané produkty úplně vyloučit z věrnostních slev (zadáním 0 %) nebo jim nastavit individuální strop:</p>
@@ -1136,13 +1197,25 @@ export function renderAdminHtml(eshopId, auth) {
     }
 
     /* Tiers table */
-    function tierRow(t = { name: '', percent: '', minTurnover: '' }) {
+    function tierRow(t = { name: '', percent: '', minTurnover: '', pricelistId: null }) {
       const tr = document.createElement('tr');
       tr.innerHTML = '<td><input type="text" class="input-text w-full tier-name" placeholder="Název úrovně"></td>' +
         '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-small tier-percent" min="0.01" max="100" step="0.01"><span class="unit">%</span></div></td>' +
         '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-med tier-turnover" min="0" step="1"><span class="unit tier-currency"></span></div></td>' +
+        '<td><select class="input-select tier-pricelist" style="width: 100%;"><option value="">— Bez přiřazení —</option></select></td>' +
         '<td><button type="button" class="btn-remove tier-remove" title="Smazat úroveň">×</button></td>';
-      tr.querySelector('.tier-name').value=t.name||'';tr.querySelector('.tier-percent').value=t.percent??'';tr.querySelector('.tier-turnover').value=t.minTurnover??'';tr.querySelector('.tier-currency').textContent=state.currency||'měna obchodu';
+      tr.querySelector('.tier-name').value = t.name || '';
+      tr.querySelector('.tier-percent').value = t.percent ?? '';
+      tr.querySelector('.tier-turnover').value = t.minTurnover ?? '';
+      tr.querySelector('.tier-currency').textContent = state.currency || 'měna obchodu';
+      const plSelect = tr.querySelector('.tier-pricelist');
+      (state.pricelists || []).forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name + (p.currency ? ' (' + p.currency + ')' : '');
+        if (t.pricelistId && String(p.id) === String(t.pricelistId)) opt.selected = true;
+        plSelect.append(opt);
+      });
       tr.querySelector('.tier-remove').addEventListener('click', () => { tr.remove(); resize(); });
       return tr;
     }
@@ -1165,11 +1238,15 @@ export function renderAdminHtml(eshopId, auth) {
 
     async function saveTiers() {
       const rows = [...$('tiers-body').querySelectorAll('tr')];
-      const tiers = rows.map(r => ({
-        name: r.querySelector('.tier-name').value,
-        percent: r.querySelector('.tier-percent').value === '' ? NaN : Number(r.querySelector('.tier-percent').value),
-        minTurnover: r.querySelector('.tier-turnover').value === '' ? NaN : Number(r.querySelector('.tier-turnover').value)
-      }));
+      const tiers = rows.map(r => {
+        const pl = r.querySelector('.tier-pricelist').value;
+        return {
+          name: r.querySelector('.tier-name').value,
+          percent: r.querySelector('.tier-percent').value === '' ? NaN : Number(r.querySelector('.tier-percent').value),
+          minTurnover: r.querySelector('.tier-turnover').value === '' ? NaN : Number(r.querySelector('.tier-turnover').value),
+          ...(pl ? { pricelistId: Number(pl) } : {})
+        };
+      });
       const btn = $('btn-top-save');
       btn.disabled = true;
       try {
@@ -1208,6 +1285,31 @@ export function renderAdminHtml(eshopId, auth) {
     $('brand-picker-next').addEventListener('click',()=>{brandPage++;loadBrandPicker();});$('brand-picker-prev').addEventListener('click',()=>{brandPage=Math.max(1,brandPage-1);loadBrandPicker();});
     $('brand-picker-use').addEventListener('click',()=>{const id=$('brand-picker-results').value;if(!id||!brandTarget)return;if([...document.querySelectorAll('.bl-name')].some(input=>input!==brandTarget.querySelector('.bl-name')&&input.value===id)){flash('Tato značka už je vybraná.',true);return;}brandTarget.querySelector('.bl-name').value=id;brandTarget.querySelector('.bl-label').textContent=brandNames.get(id)||id;brandTarget.dataset.invalid='false';$('brand-picker').hidden=true;});
     $('brand-picker-close').addEventListener('click',()=>{$('brand-picker').hidden=true;});
+
+    const categoryNames=new Map();let categoryTarget=null,categoryPage=1,categoryPages=1;
+    async function loadCategoryPicker(){
+      const list=$('category-picker-results');list.textContent='';$('category-picker-status').textContent='Načítám kategorie…';
+      try{const data=await api('/catalog/categories?page='+categoryPage+'&query='+encodeURIComponent($('category-picker-search').value.trim()));categoryPages=data.pagination?.pageCount||categoryPage;
+        for(const cat of data.items){categoryNames.set(cat.guid,cat.name);const option=document.createElement('option');option.value=cat.guid;option.textContent=cat.name;list.append(option);}
+        $('category-picker-status').textContent=data.items.length?'Stránka '+categoryPage+' z '+categoryPages:'Na této stránce nejsou odpovídající kategorie. Projděte další stránku.';
+        $('category-picker-next').disabled=categoryPage>=categoryPages;$('category-picker-prev').disabled=categoryPage<=1;
+      }catch{$('category-picker-status').textContent='Katalog kategorií není dostupný. Ověřte připojení a oprávnění.';}
+      resize();
+    }
+    function showCategoryPicker(row){categoryTarget=row;$('category-picker').hidden=false;categoryPage=1;$('category-picker-search').value='';loadCategoryPicker();$('category-picker-search').focus();}
+    function addCategoryLimitRow(id='',limit=0){
+      const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;align-items:center;max-width:440px';
+      const value=document.createElement('input');value.type='hidden';value.className='cl-name';value.value=id;
+      const choose=document.createElement('button');choose.type='button';choose.className='btn-secondary cl-label';choose.style.cssText='flex:1;min-width:0;overflow-wrap:anywhere';choose.textContent=id?'Ověřuji kategorii…':'Vybrat kategorii';choose.addEventListener('click',()=>showCategoryPicker(row));
+      const percent=document.createElement('input');percent.type='number';percent.min='0';percent.max='100';percent.step='0.01';percent.className='input-text cl-limit w-small';percent.value=limit;percent.setAttribute('aria-label','Maximální sleva kategorie');
+      const unit=document.createElement('span');unit.textContent='%';const remove=document.createElement('button');remove.type='button';remove.className='btn-remove';remove.textContent='×';remove.setAttribute('aria-label','Odebrat kategorii');remove.addEventListener('click',()=>row.remove());row.append(value,choose,percent,unit,remove);$('category-limits-container').append(row);
+      if(id){if(!/^[a-f0-9-]{36}$/i.test(id)){choose.textContent='Chybí platný odkaz: '+id;row.dataset.invalid='true';}else api('/catalog/category?id='+encodeURIComponent(id)).then(cat=>{if(value.value!==id)return;categoryNames.set(cat.guid,cat.name);choose.textContent=cat.name+(limit===0?' (0 % - vyloučeno)':'');row.dataset.invalid='false';}).catch(()=>{if(value.value!==id)return;choose.textContent='Nedostupná kategorie: '+id;row.dataset.invalid='true';});}
+      resize();return row;
+    }
+    $('category-picker-search').addEventListener('input',()=>{clearTimeout(window.categorySearchTimer);window.categorySearchTimer=setTimeout(()=>{categoryPage=1;loadCategoryPicker();},250);});
+    $('category-picker-next').addEventListener('click',()=>{categoryPage++;loadCategoryPicker();});$('category-picker-prev').addEventListener('click',()=>{categoryPage=Math.max(1,categoryPage-1);loadCategoryPicker();});
+    $('category-picker-use').addEventListener('click',()=>{const id=$('category-picker-results').value;if(!id||!categoryTarget)return;if([...document.querySelectorAll('.cl-name')].some(input=>input!==categoryTarget.querySelector('.cl-name')&&input.value===id)){flash('Tato kategorie už je vybraná.',true);return;}categoryTarget.querySelector('.cl-name').value=id;categoryTarget.querySelector('.cl-label').textContent=categoryNames.get(id)||id;categoryTarget.dataset.invalid='false';$('category-picker').hidden=true;});
+    $('category-picker-close').addEventListener('click',()=>{$('category-picker').hidden=true;});
 
     const productNames=new Map();let productTarget=null,productPage=1,productPages=1;
     async function loadProductPicker(){
@@ -1248,6 +1350,11 @@ export function renderAdminHtml(eshopId, auth) {
       const limits = r.brandLimits || {};
       Object.entries(limits).forEach(([k, v]) => addBrandLimitRow(k, v));
 
+      const cc = $('category-limits-container');
+      cc.textContent = '';
+      const cLimits = r.categoryLimits || {};
+      Object.entries(cLimits).forEach(([k, v]) => addCategoryLimitRow(k, v));
+
       const pc = $('product-limits-container');
       pc.textContent = '';
       const pLimits = r.productLimits || {};
@@ -1261,16 +1368,24 @@ export function renderAdminHtml(eshopId, auth) {
     });
 
     $('btn-add-brand-limit').addEventListener('click', () => showBrandPicker(addBrandLimitRow()));
+    $('btn-add-category-limit').addEventListener('click', () => showCategoryPicker(addCategoryLimitRow()));
     $('btn-add-product-limit').addEventListener('click', () => showProductPicker(addProductLimitRow()));
 
     async function saveRules() {
       if(document.querySelector('#brand-limits-container [data-invalid="true"]')){flash('Nejdřív opravte nedostupné odkazy značek.',true);return;}
+      if(document.querySelector('#category-limits-container [data-invalid="true"]')){flash('Nejdřív opravte nedostupné odkazy kategorií.',true);return;}
       if(document.querySelector('#product-limits-container [data-invalid="true"]')){flash('Nejdřív opravte nedostupné odkazy produktů.',true);return;}
       const brandLimits = {};
       document.querySelectorAll('#brand-limits-container > div').forEach(row => {
         const name = row.querySelector('.bl-name').value.trim();
         const val = Number(row.querySelector('.bl-limit').value);
         if (name && Number.isFinite(val)) brandLimits[name] = val;
+      });
+      const categoryLimits = {};
+      document.querySelectorAll('#category-limits-container > div').forEach(row => {
+        const name = row.querySelector('.cl-name').value.trim();
+        const val = Number(row.querySelector('.cl-limit').value);
+        if (name && Number.isFinite(val)) categoryLimits[name] = val;
       });
       const productLimits = {};
       document.querySelectorAll('#product-limits-container > div').forEach(row => {
@@ -1287,6 +1402,7 @@ export function renderAdminHtml(eshopId, auth) {
         couponLockMaxRemaining: $('rule-coupon-min-price-ratio').checked,
         postWriteVerify: $('rule-post-write-verify').checked,
         brandLimits,
+        categoryLimits,
         productLimits
       };
       const btn = $('btn-top-save');
@@ -1295,7 +1411,7 @@ export function renderAdminHtml(eshopId, auth) {
         const res = await api('/rules', { method: 'PUT', body: JSON.stringify({ rules, version: state.version }) });
         state.rules = res.rules; state.version = res.version;
         renderRules(); renderOverview();
-        flash('Pravidla slev, stropy značek a výjimky produktů byly úspěšně uloženy.');
+        flash('Pravidla slev, stropy značek, kategorií a výjimky produktů byly úspěšně uloženy.');
       } catch (e) { flash(e.message, true); }
       finally { btn.disabled = false; resize(); }
     }
@@ -1571,6 +1687,7 @@ export function renderAdminHtml(eshopId, auth) {
     (async () => {
       try {
         state = await api('/state');
+        try { const plData = await api('/catalog/pricelists'); state.pricelists = plData.items || []; } catch { state.pricelists = []; }
         $('loading').remove();
         renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals(); renderWebhookStatus();
       } catch (e) {
