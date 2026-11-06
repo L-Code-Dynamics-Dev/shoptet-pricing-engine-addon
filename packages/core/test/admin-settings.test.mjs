@@ -131,15 +131,20 @@ test('rule validation', () => {
     couponLockMaxRemaining: true,
     highestDiscountWins: true,
     postWriteVerify: true,
-    brandLimits: { '123e4567-e89b-42d3-a456-426614174001': 10 }
+    brandLimits: { '123e4567-e89b-42d3-a456-426614174001': 10 },
+    productLimits: { '123e4567-e89b-42d3-a456-426614174002': 0 }
   });
   assert.equal(v.rules.couponLockTopTiers, true);
   assert.equal(v.rules.couponLockMinPercent, 15);
   assert.equal(v.rules.highestDiscountWins, true);
   assert.deepEqual(v.rules.brandLimits, { '123e4567-e89b-42d3-a456-426614174001': 10 });
+  assert.deepEqual(v.rules.productLimits, { '123e4567-e89b-42d3-a456-426614174002': 0 });
 
   const invalidPercent = validateRules({ couponLockMinPercent: 150 });
   assert.match(invalidPercent.error, /Hranice slevy/);
+
+  const invalidProduct = validateRules({ productLimits: { 'bad-guid': 10 } });
+  assert.match(invalidProduct.error, /Produkt vyberte/);
 });
 
 async function apiReq(path, { method = 'GET', body, session, origin } = {}) {
