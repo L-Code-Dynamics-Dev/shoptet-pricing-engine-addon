@@ -31,35 +31,34 @@ export async function handleShoptetOrderWebhook(request,env,fetchImpl=fetch,ctx=
    fetchImpl,
    authorizeWrite:async()=>true
   });
-  const settingsRow=await env.DB.prepare('SELECT config_json FROM tenant_settings WHERE shop_id=?').bind(shopId).first();
-  const config=settingsRow?JSON.parse(settingsRow.config_json):{};
-  const policy=config.turnoverPolicy||{
-   period:{from:'2020-01-01T00:00:00Z',to:'2030-01-01T00:00:00Z'},
-   qualifyingStatusIds:[-3],
-   requirePaid:true,
-   shipping:'exclude',
-   billing:'exclude',
-   discounts:'after_discounts',
-   vat:'inclusive',
-   refunds:'exclude_order_with_valid_credit_note',
-   guestCustomers:'exclude',
-   itemStatuses:'require_match_order',
-   upgrades:'recalculate',
-   downgrades:'keep_current'
-  };
-  const tiers=config.tiers||[];
-  const policyRow=await getPricelistPolicy(env.DB,shopId);
-  const engineMode=policyRow?.engineMode||'installation';
-  const mode=engineMode==='active'?'live':'staging';
   const result=await processOrderWebhook({
    db:env.DB,
    tokenKeys:env.SHOPTET_TOKEN_KEYS,
    bytes,
    signature,
    adapter,
-   policy,
-   tiers,
-   mode
+   loadVerifiedContext:async verifiedShopId=>{
+    const settingsRow=await env.DB.prepare('SELECT config_json FROM tenant_settings WHERE shop_id=?')
+      .bind(verifiedShopId).first();
+    const config=settingsRow?JSON.parse(settingsRow.config_json):{};
+    const policy=config.turnoverPolicy||{
+     period:{from:'2020-01-01T00:00:00Z',to:'2030-01-01T00:00:00Z'},
+     qualifyingStatusIds:[-3],
+     requirePaid:true,
+     shipping:'exclude',
+     billing:'exclude',
+     discounts:'after_discounts',
+     vat:'inclusive',
+     refunds:'exclude_order_with_valid_credit_note',
+     guestCustomers:'exclude',
+     itemStatuses:'require_match_order',
+     upgrades:'recalculate',
+     downgrades:'keep_current'
+    };
+    const policyRow=await getPricelistPolicy(env.DB,verifiedShopId);
+    const mode=policyRow?.engineMode==='active'?'live':'staging';
+    return {policy,tiers:config.tiers||[],mode};
+   }
   });
   return json(result,result.accepted?200:500);
  }catch{return json({error:'webhook_not_authorized'},403);}
