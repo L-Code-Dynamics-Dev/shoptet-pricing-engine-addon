@@ -13,7 +13,9 @@ export const turnoverPolicySchema=z.object({
  guestCustomers:z.literal('exclude'),
  itemStatuses:z.literal('require_match_order'),
  upgrades:z.literal('recalculate'),
- downgrades:z.enum(['recalculate','keep_current'])
+ downgrades:z.enum(['recalculate','keep_current']),
+ exchangeRates:z.record(z.string().regex(/^[A-Z]{3}$/), z.number().positive()).optional(),
+ multiCurrency:z.enum(['fail_on_mismatch','convert_explicit','accumulate_separate']).optional()
 }).strict().superRefine((p,c)=>{
  if(Date.parse(p.period.from)>=Date.parse(p.period.to))c.addIssue({code:'custom',message:'Period must increase'});
  if(new Set(p.qualifyingStatusIds).size!==p.qualifyingStatusIds.length)c.addIssue({code:'custom',message:'Duplicate status'});
@@ -27,13 +29,18 @@ const amount=n=>`${n<0n?'-':''}${(n<0n?-n:n)/100n}.${String((n<0n?-n:n)%100n).pa
 export function calculateTurnover({customerGuid,currency,tiers,policy,orders,creditNotes,currentPricelistId=null}){
  const p=turnoverPolicySchema.parse(policy),start=Date.parse(p.period.from),end=Date.parse(p.period.to);
  const relevant=new Map(),seen=new Set(),excluded=[];let total=0n;
+ const turnoverByCurrency=new Map();
  for(const o of orders){
   if(seen.has(o.code))fail('duplicate_order');seen.add(o.code);
   if(o.customerGuid!==customerGuid)fail('customer_order_mismatch');
   const date=Date.parse(o.creationTime);if(!Number.isFinite(date))fail('order_date_invalid');
   if(date<start||date>=end)continue;
   if(!o.status||!p.qualifyingStatusIds.includes(o.status.id)||p.requirePaid&&o.paid!==true){excluded.push({code:o.code,reason:'status_or_payment'});continue;}
-  if(o.price.currencyCode!==currency)fail('turnover_currency_mismatch');
+  const orderCur=o.price.currencyCode;
+  if(orderCur!==currency){
+   const hasRate=p.exchangeRates&&typeof p.exchangeRates[orderCur]==='number';
+   if(!hasRate&&p.multiCurrency!=='accumulate_separate')fail('turnover_currency_mismatch');
+  }
   relevant.set(o.code,o);
  }
  const refunded=new Set(),notes=new Set();
@@ -52,7 +59,18 @@ export function calculateTurnover({customerGuid,currency,tiers,policy,orders,cre
   if(o.items.some(i=>i.status.id!==o.status.id))fail('mixed_item_status_requires_supported_policy');
   const field=p.vat==='inclusive'?'withVat':'withoutVat';let value=money(o.price[field]);
   for(const i of o.items)if(i.itemType==='shipping'&&p.shipping==='exclude'||i.itemType==='billing'&&p.billing==='exclude')value-=money(i.itemPrice[field]);
-  if(value<0n)fail('negative_qualifying_order');total+=value;counted++;
+  if(value<0n)fail('negative_qualifying_order');
+  const orderCur=o.price.currencyCode;
+  turnoverByCurrency.set(orderCur,(turnoverByCurrency.get(orderCur)??0n)+value);
+  if(orderCur===currency){
+   total+=value;
+  }else if(p.exchangeRates&&typeof p.exchangeRates[orderCur]==='number'){
+   const rate=p.exchangeRates[orderCur];
+   const rateScaled=BigInt(Math.round(rate*10000));
+   const converted=(value*rateScaled+5000n)/10000n;
+   total+=converted;
+  }
+  counted++;
  }
  let previous=-1n;const names=new Set();
  for(const t of tiers){if(!Number.isSafeInteger(t.minTurnover)||t.minTurnover<0||names.has(t.name)||BigInt(t.minTurnover)<=previous)fail('invalid_turnover_tiers');previous=BigInt(t.minTurnover);names.add(t.name);}
@@ -61,7 +79,8 @@ export function calculateTurnover({customerGuid,currency,tiers,policy,orders,cre
  const current=currentPricelistId===null?null:tiers.find(t=>t.pricelistId===currentPricelistId);
  const kept=!!(current&&p.downgrades==='keep_current'&&(!eligible||current.minTurnover>eligible.minTurnover));
  const selected=kept?current:eligible;
- return {customerGuid,currency,turnover:amount(total),qualifyingOrders:counted,excludedOrders:excluded,tier:selected?.name??null,pricelistId:selected?.pricelistId??null,downgradePrevented:kept,mappedPricelistAvailable:!!selected?.pricelistId,assignmentSupported:false,assignmentBlockers:['customer_assignment_executor_not_implemented'],applied:false};
+ const currencyBreakdown=Object.fromEntries(Array.from(turnoverByCurrency.entries()).map(([k,v])=>[k,amount(v)]));
+ return {customerGuid,currency,turnover:amount(total),turnoverByCurrency:currencyBreakdown,qualifyingOrders:counted,excludedOrders:excluded,tier:selected?.name??null,pricelistId:selected?.pricelistId??null,downgradePrevented:kept,mappedPricelistAvailable:!!selected?.pricelistId,assignmentSupported:false,assignmentBlockers:['customer_assignment_executor_not_implemented'],applied:false};
 }
 
 async function boundedCollection(load,max){

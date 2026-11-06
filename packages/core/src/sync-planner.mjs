@@ -1,7 +1,7 @@
 import {z} from 'zod';
 import {proposalSchema} from './configuration.mjs';
 import {evaluatePricing,grossApiPrice,activeActionMinor,formatApiPrice,shopDate} from './pricing-policy.mjs';
-export const syncSelectionSchema=z.object({revisionId:z.string().uuid(),tierName:z.string().min(1).max(60),targetPricelistId:z.number().int().positive(),products:z.array(z.object({guid:z.string().uuid(),codes:z.array(z.string().min(1).max(128)).min(1).max(20)}).strict()).min(1).max(25)}).strict().superRefine((v,c)=>{if(v.products.reduce((n,p)=>n+p.codes.length,0)>100)c.addIssue({code:'custom',path:['products'],message:'Maximum 100 variants per plan'});});
+export const syncSelectionSchema=z.object({revisionId:z.string().uuid(),tierName:z.string().min(1).max(60),targetPricelistId:z.number().int().positive(),sourcePricelistId:z.number().int().positive().optional(),products:z.array(z.object({guid:z.string().uuid(),codes:z.array(z.string().min(1).max(128)).min(1).max(20)}).strict()).min(1).max(25)}).strict().superRefine((v,c)=>{if(v.products.reduce((n,p)=>n+p.codes.length,0)>100)c.addIssue({code:'custom',path:['products'],message:'Maximum 100 variants per plan'});});
 export async function buildSyncPlan({adapter,proposal,selection,instant=new Date()}) {
  const policy=proposalSchema.parse(proposal),selected=syncSelectionSchema.parse(selection);
  const tier=policy.tiers.find(t=>t.name===selected.tierName);if(!tier)throw Error('tier_not_found');if(tier.pricelistId!=null && tier.pricelistId!==selected.targetPricelistId)throw Error('tier_pricelist_mapping_mismatch');
@@ -10,7 +10,15 @@ export async function buildSyncPlan({adapter,proposal,selection,instant=new Date
  if(profile.defaultPricelistId===selected.targetPricelistId)throw Error('default_pricelist_write_forbidden');
  const target=await adapter.pricelist(selected.targetPricelistId);
  if(target.isDefault || target.currency!==null&&target.currency!==policy.currency)throw Error('target_currency_mismatch');
- const source=await adapter.pricelist(profile.defaultPricelistId);
+ let sourceId=selected.sourcePricelistId||profile.defaultPricelistId;
+ let source=await adapter.pricelist(sourceId);
+ if(source.currency!==null&&source.currency!==policy.currency){
+  if(typeof adapter.pricelists==='function'){
+   const all=await adapter.pricelists();
+   const match=all.items.find(p=>p.currency===policy.currency&&p.id!==selected.targetPricelistId);
+   if(match)source=await adapter.pricelist(match.id);
+  }
+ }
  if(source.currency!==null&&source.currency!==policy.currency)throw Error('source_currency_mismatch');
  const date=shopDate(profile.timezone,instant),actions=[],seen=new Set(),productIds=new Set();
  for(const item of selected.products){

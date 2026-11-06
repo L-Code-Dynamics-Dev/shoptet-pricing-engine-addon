@@ -1,13 +1,18 @@
 // Pure pricing primitives. Monetary inputs are integer minor units (cents/halere).
 // This is a Marketplace reference implementation, not yet verified for parity with OKfish.
-export function calculateTierPrice({ baseMinor, actionMinor = null, tierPercent, capPercent = null }) {
+export function calculateTierPrice({ baseMinor, actionMinor = null, tierPercent = 0, fixedDiscountMinor = null, capPercent = null }) {
   if (!Number.isSafeInteger(baseMinor) || baseMinor < 0) throw new TypeError('Invalid baseMinor');
   if (actionMinor !== null && (!Number.isSafeInteger(actionMinor) || actionMinor < 0)) throw new TypeError('Invalid actionMinor');
+  if (fixedDiscountMinor !== null && (!Number.isSafeInteger(fixedDiscountMinor) || fixedDiscountMinor < 0)) throw new TypeError('Invalid fixedDiscountMinor');
   for (const [key, value] of Object.entries({tierPercent, capPercent})) {
     if (value !== null && (!Number.isFinite(value) || value < 0 || value > 100)) throw new TypeError(`Invalid ${key}`);
   }
   const effectiveTier = Math.min(tierPercent, capPercent ?? 100);
-  const loyaltyMinor = Math.round(baseMinor * (1 - effectiveTier / 100));
+  let loyaltyMinor = Math.round(baseMinor * (1 - effectiveTier / 100));
+  if (fixedDiscountMinor !== null) {
+    const fixedLoyalty = Math.max(0, baseMinor - fixedDiscountMinor);
+    loyaltyMinor = tierPercent > 0 ? Math.min(loyaltyMinor, fixedLoyalty) : fixedLoyalty;
+  }
   // Existing action price is independently authoritative; choose lower price.
   return Math.min(loyaltyMinor, actionMinor ?? baseMinor);
 }
