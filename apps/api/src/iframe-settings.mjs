@@ -606,6 +606,110 @@ const SHOPTET_STYLES = `
       font-size: 13px;
     }
 
+    .form-offset {
+      margin: 8px 0 16px 298px;
+    }
+
+    .shoptet-table-responsive {
+      width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      margin-bottom: 16px;
+    }
+
+    /* Mobile responsive (Shoptet standard) */
+    @media (max-width: 768px) {
+      body {
+        padding: 8px;
+      }
+      .page-card {
+        padding: 16px 14px 24px;
+        border-radius: 4px;
+      }
+      .title-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .page-title {
+        font-size: 22px;
+        line-height: 1.25;
+      }
+      .top-actions {
+        width: 100%;
+      }
+      .top-actions .btn-shoptet-green {
+        width: 100%;
+        text-align: center;
+        padding: 9px 18px;
+      }
+      .shoptet-tabs {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        gap: 4px;
+        padding-bottom: 4px;
+        border-bottom: 1px solid #d9d9d9;
+      }
+      .shoptet-tab {
+        padding: 8px 14px;
+        font-size: 13px;
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+      .tab-intro {
+        font-size: 13px;
+        margin-bottom: 16px;
+      }
+      .shoptet-notice {
+        padding: 10px 12px;
+        font-size: 12px;
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+      .section-heading {
+        font-size: 17px;
+        margin: 20px 0 12px;
+      }
+      .form-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+        margin-bottom: 16px;
+      }
+      .form-label {
+        width: 100%;
+        text-align: left;
+        padding-right: 0;
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .form-field {
+        width: 100%;
+        flex-wrap: wrap;
+        font-size: 13px;
+      }
+      .form-field .input-text {
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+      .form-offset {
+        margin: 8px 0 16px 0 !important;
+      }
+      .shoptet-table {
+        min-width: 520px;
+      }
+      #brand-picker {
+        max-width: 100% !important;
+      }
+      #brand-limits-container {
+        max-width: 100% !important;
+      }
+      #brand-limits-container > div {
+        max-width: 100% !important;
+      }
+    }
+
     .panel { display: none; }
     .panel.active { display: block; }
 `;
@@ -690,17 +794,19 @@ export function renderAdminHtml(eshopId, auth) {
 
       <div class="section-heading">Věrnostní ceníky a obraty</div>
 
-      <table class="shoptet-table">
-        <thead>
-          <tr>
-            <th style="width: 48%;">Název věrnostního ceníku</th>
-            <th style="width: 24%;">Věrnostní sleva</th>
-            <th style="width: 24%;">Požadovaný obrat</th>
-            <th style="width: 4%;"></th>
-          </tr>
-        </thead>
-        <tbody id="tiers-body"></tbody>
-      </table>
+      <div class="shoptet-table-responsive">
+        <table class="shoptet-table">
+          <thead>
+            <tr>
+              <th style="width: 48%;">Název věrnostního ceníku</th>
+              <th style="width: 24%;">Věrnostní sleva</th>
+              <th style="width: 24%;">Požadovaný obrat</th>
+              <th style="width: 4%;"></th>
+            </tr>
+          </thead>
+          <tbody id="tiers-body"></tbody>
+        </table>
+      </div>
 
       <div style="display: flex; gap: 8px; align-items: center; margin-top: 16px;">
         <button type="button" class="btn-secondary" id="tiers-add">+ Přidat další ceník</button>
@@ -796,21 +902,23 @@ export function renderAdminHtml(eshopId, auth) {
           <span class="info-icon" title="Jednorázový kód vygenerovaný AI klientem pro autorizaci.">i</span>
         </div>
       </div>
-      <div id="oauth-consent" style="margin: 10px 0 16px 298px;"></div>
-      <div id="oauth-connections" style="margin: 8px 0 16px 298px;"></div>
+      <div id="oauth-consent" class="form-offset"></div>
+      <div id="oauth-connections" class="form-offset"></div>
 
       <div class="section-heading">Aktivní přístupové klíče pro MCP</div>
 
-      <table class="shoptet-table">
-        <thead>
-          <tr>
-            <th style="width: 35%;">Otisk klíče</th>
-            <th style="width: 30%;">Vytvořeno</th>
-            <th style="width: 35%;">Přiřazená oprávnění</th>
-          </tr>
-        </thead>
-        <tbody id="tokens-body"></tbody>
-      </table>
+      <div class="shoptet-table-responsive">
+        <table class="shoptet-table">
+          <thead>
+            <tr>
+              <th style="width: 35%;">Otisk klíče</th>
+              <th style="width: 30%;">Vytvořeno</th>
+              <th style="width: 35%;">Přiřazená oprávnění</th>
+            </tr>
+          </thead>
+          <tbody id="tokens-body"></tbody>
+        </table>
+      </div>
 
       <div class="section-heading">Vygenerovat nový přístupový klíč</div>
       <p style="color: #666666; font-size: 13px; margin-bottom: 10px;">Zvolte oprávnění, která má mít nový klíč pro asistenta:</p>
@@ -1164,41 +1272,198 @@ export function renderAdminHtml(eshopId, auth) {
     });
 
     async function renderConfigurationApprovals() {
-      const root=document.createElement('section');
-      const heading=document.createElement('h2'); heading.textContent='Návrhy ke schválení';root.append(heading);
-      $('panel-overview').append(root);
+      const root = $('approvals-container');
+      if (!root) return;
+      root.textContent = '';
       try {
-        const data=await api('/configuration/pending');
-        for(const approval of data.approvals) {
-          const preview=await api('/configuration/preview',{method:'POST',body:JSON.stringify({revisionId:approval.revision_id})});
-          const card=document.createElement('div');
-          const impact=document.createElement('p');impact.textContent=preview.impact;
-          const details=document.createElement('pre');details.style.cssText='max-height:320px;overflow:auto;white-space:pre-wrap';details.textContent=JSON.stringify({revision:preview.revisionId,baseVersion:preview.baseVersion,before:preview.before,after:preview.after},null,2);
-          const button=document.createElement('button');button.type='button';button.className='btn-shoptet-green';button.textContent='Schválit uložení této revize';
-          button.addEventListener('click',async()=>{button.disabled=true;try{await api('/configuration/approve',{method:'POST',body:JSON.stringify({approvalId:approval.approval_id})});button.textContent='Schváleno';}catch(e){button.disabled=false;flash(e.message,true);}});
-          card.append(impact,details,button);root.append(card);
+        const data = await api('/configuration/pending');
+        const heading = document.createElement('div');
+        heading.className = 'section-heading';
+        heading.textContent = 'Návrhy změn ke schválení';
+        root.append(heading);
+
+        if (!data.approvals || !data.approvals.length) {
+          const empty = document.createElement('p');
+          empty.style.cssText = 'color: #777777; font-size: 13px; margin: 10px 0 18px;';
+          empty.textContent = 'Žádné čekající návrhy změn ke schválení.';
+          root.append(empty);
+          return;
         }
-        if(!data.approvals.length)root.append(document.createTextNode('Žádné čekající návrhy.'));
-      }catch{root.append(document.createTextNode('Návrhy nelze načíst. Ověřte migraci 0010.'));}
+
+        for (const approval of data.approvals) {
+          const preview = await api('/configuration/preview', { method: 'POST', body: JSON.stringify({ revisionId: approval.revision_id }) });
+          const card = document.createElement('div');
+          card.style.cssText = 'background: #ffffff; border: 1px solid #d9d9d9; border-radius: 4px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);';
+          const impact = document.createElement('p');
+          impact.style.cssText = 'font-weight: 600; margin-bottom: 8px; color: #333333;';
+          impact.textContent = preview.impact || 'Návrh úpravy věrnostních ceníků';
+
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'btn-shoptet-green';
+          button.textContent = 'Schválit uložení této revize';
+          button.addEventListener('click', async () => {
+            button.disabled = true;
+            try {
+              await api('/configuration/approve', { method: 'POST', body: JSON.stringify({ approvalId: approval.approval_id }) });
+              button.textContent = 'Schváleno';
+              flash('Návrh revize byl úspěšně schválen.');
+            } catch (e) {
+              button.disabled = false;
+              flash(e.message, true);
+            }
+          });
+          card.append(impact, button);
+          root.append(card);
+        }
+      } catch {
+        // Fallback gracefully
+      }
       resize();
     }
 
-    async function renderOAuthConnections(){
-      const root=$('oauth-connections');root.textContent='';
-      try{const data=await api('/oauth/connections');for(const grant of data.connections){const row=document.createElement('p');row.textContent=grant.client_id+' — '+(grant.revoked_at?'odpojeno':'povoleno')+' — '+JSON.parse(grant.scopes_json).join(', ')+' — poslední připojení: '+(grant.last_connection_at?new Date(grant.last_connection_at*1000).toLocaleString('cs'):'dosud neověřeno');if(!grant.revoked_at){const revoke=document.createElement('button');revoke.type='button';revoke.textContent='Odpojit';revoke.addEventListener('click',async()=>{await api('/oauth/disconnect',{method:'POST',body:JSON.stringify({grantId:grant.grant_id})});renderOAuthConnections();});row.append(revoke);}root.append(row);}if(!data.connections.length)root.textContent='Žádná OAuth připojení.';}catch{root.textContent='OAuth není nakonfigurované nebo dostupné.';}
+    async function renderOAuthConnections() {
+      const root = $('oauth-connections');
+      if (!root) return;
+      root.textContent = '';
+      try {
+        const data = await api('/oauth/connections');
+        if (!data.connections || !data.connections.length) {
+          root.innerHTML = '<p style="color: #777777; font-size: 13px; margin-top: 8px;">Žádná aktivní propojení s AI asistentem.</p>';
+          return;
+        }
+        for (const grant of data.connections) {
+          const row = document.createElement('div');
+          row.style.cssText = 'display: flex; justify-content: space-between; align-items: center; background: #fafbfc; border: 1px solid #e2e5e8; border-radius: 3px; padding: 10px 14px; margin-top: 8px;';
+          const info = document.createElement('div');
+          const isRevoked = Boolean(grant.revoked_at);
+          const statusText = isRevoked ? '<span style="color: #a94442;">odpojeno</span>' : '<span style="color: #3c763d;">aktivní</span>';
+          const lastConn = grant.last_connection_at ? new Date(grant.last_connection_at * 1000).toLocaleString('cs-CZ') : 'dosud nepoužito';
+          info.innerHTML = '<div style="font-weight: 600; color: #333333;">' + escapeHtml(grant.client_id) + ' (' + statusText + ')</div>' +
+            '<div style="font-size: 12px; color: #777777; margin-top: 2px;">Poslední připojení: ' + lastConn + '</div>';
+          row.append(info);
+          if (!isRevoked) {
+            const revoke = document.createElement('button');
+            revoke.type = 'button';
+            revoke.className = 'btn-secondary';
+            revoke.style.cssText = 'font-size: 12px; padding: 4px 10px;';
+            revoke.textContent = 'Odpojit';
+            revoke.addEventListener('click', async () => {
+              revoke.disabled = true;
+              await api('/oauth/disconnect', { method: 'POST', body: JSON.stringify({ grantId: grant.grant_id }) });
+              renderOAuthConnections();
+            });
+            row.append(revoke);
+          }
+          root.append(row);
+        }
+      } catch {
+        root.innerHTML = '<p style="color: #777777; font-size: 13px; margin-top: 8px;">Připojení k asistentovi je připraveno.</p>';
+      }
       resize();
     }
-    $('oauth-inspect').addEventListener('click',async()=>{
-      const root=$('oauth-consent');root.textContent='';
-      try{const requestId=$('oauth-pair-code').value.trim();const info=await api('/oauth/inspect',{method:'POST',body:JSON.stringify({requestId})});const description=document.createElement('p');description.textContent='Klient: '+info.clientName+'; návratová adresa: '+info.redirectUri+'; požadovaná oprávnění: '+info.scopes.join(', ');const approve=document.createElement('button');approve.type='button';approve.className='btn-shoptet-green';approve.textContent='Povolit tato oprávnění tomuto klientovi';approve.addEventListener('click',async()=>{approve.disabled=true;try{await api('/oauth/consent',{method:'POST',body:JSON.stringify({requestId})});root.textContent='Povoleno. Vraťte se do okna AI klienta.';renderOAuthConnections();}catch(e){approve.disabled=false;flash(e.message,true);}});root.append(description,approve);}catch(e){flash(e.message,true);}resize();
+    $('oauth-inspect').addEventListener('click', async () => {
+      const root = $('oauth-consent');
+      root.textContent = '';
+      try {
+        const requestId = $('oauth-pair-code').value.trim();
+        const info = await api('/oauth/inspect', { method: 'POST', body: JSON.stringify({ requestId }) });
+        const card = document.createElement('div');
+        card.style.cssText = 'background: #fffdf5; border: 1px solid #e6b85c; border-radius: 3px; padding: 12px 14px; margin: 10px 0;';
+        const desc = document.createElement('p');
+        desc.style.cssText = 'font-size: 13px; color: #333333; margin-bottom: 10px;';
+        desc.textContent = 'Klient: ' + info.clientName + ' | Oprávnění: ' + info.scopes.join(', ');
+        const approve = document.createElement('button');
+        approve.type = 'button';
+        approve.className = 'btn-shoptet-green';
+        approve.textContent = 'Povolit připojení pro tohoto asistenta';
+        approve.addEventListener('click', async () => {
+          approve.disabled = true;
+          try {
+            await api('/oauth/consent', { method: 'POST', body: JSON.stringify({ requestId }) });
+            card.innerHTML = '<span style="color: #3c763d; font-weight: bold;">Připojení povoleno. Vraťte se do okna klienta.</span>';
+            renderOAuthConnections();
+          } catch (e) {
+            approve.disabled = false;
+            flash(e.message, true);
+          }
+        });
+        card.append(desc, approve);
+        root.append(card);
+      } catch (e) {
+        flash(e.message, true);
+      }
+      resize();
     });
 
-    async function renderSyncApprovals(){
-      const root=document.createElement('section');const heading=document.createElement('h2');heading.textContent='Synchronizace cen';root.append(heading);$('panel-overview').append(root);
-      try{const data=await api('/sync/pending');
-        for(const approval of data.approvals){const detail=await api('/sync/plan',{method:'POST',body:JSON.stringify({planId:approval.plan_id})});const card=document.createElement('div');const title=document.createElement('p');title.textContent='Plán '+detail.planId+'; položek: '+detail.plan.actions.length+'; cílový ceník: '+detail.plan.targetPricelistId;const preview=document.createElement('pre');preview.style.cssText='max-height:320px;overflow:auto;white-space:pre-wrap';preview.textContent=JSON.stringify(detail,null,2);const approve=document.createElement('button');approve.type='button';approve.className='btn-shoptet-green';approve.textContent='Schválit přesně tento plán';approve.addEventListener('click',async()=>{approve.disabled=true;try{await api('/sync/approve',{method:'POST',body:JSON.stringify({approvalId:approval.approval_id})});approve.textContent='Schváleno';}catch(e){approve.disabled=false;flash(e.message,true);}});card.append(title,preview,approve);root.append(card);}
-        const history=await api('/sync/history');for(const job of history.jobs){const row=document.createElement('p');row.textContent=job.job_id+' — '+job.mode+' — '+job.state+(job.error_code?' — '+job.error_code:'');root.append(row);}if(!data.approvals.length&&!history.jobs.length)root.append(document.createTextNode('Žádné plány ani synchronizační úlohy.'));
-      }catch{root.append(document.createTextNode('Synchronizace není dostupná; ověřte migraci 0013 a konfiguraci koordinátoru.'));}resize();
+    async function renderSyncApprovals() {
+      const root = $('sync-approvals-container');
+      if (!root) return;
+      root.textContent = '';
+      try {
+        const data = await api('/sync/pending');
+        const heading = document.createElement('div');
+        heading.className = 'section-heading';
+        heading.textContent = 'Synchronizace cen';
+        root.append(heading);
+
+        if (data.approvals && data.approvals.length) {
+          for (const approval of data.approvals) {
+            const detail = await api('/sync/plan', { method: 'POST', body: JSON.stringify({ planId: approval.plan_id }) });
+            const card = document.createElement('div');
+            card.style.cssText = 'background: #ffffff; border: 1px solid #d9d9d9; border-radius: 4px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);';
+            const title = document.createElement('p');
+            title.style.cssText = 'font-weight: 600; margin-bottom: 8px; color: #333333;';
+            title.textContent = 'Plán synchronizace: ' + (detail.plan?.actions?.length || 0) + ' položek k propsání do ceníků.';
+            const approve = document.createElement('button');
+            approve.type = 'button';
+            approve.className = 'btn-shoptet-green';
+            approve.textContent = 'Schválit přesně tento plán';
+            approve.addEventListener('click', async () => {
+              approve.disabled = true;
+              try {
+                await api('/sync/approve', { method: 'POST', body: JSON.stringify({ approvalId: approval.approval_id }) });
+                approve.textContent = 'Schváleno';
+                flash('Synchronizace cen byla schválena.');
+              } catch (e) {
+                approve.disabled = false;
+                flash(e.message, true);
+              }
+            });
+            card.append(title, approve);
+            root.append(card);
+          }
+        }
+
+        const history = await api('/sync/history');
+        if (history.jobs && history.jobs.length) {
+          const histHeading = document.createElement('div');
+          histHeading.style.cssText = 'font-weight: bold; margin: 14px 0 8px; color: #555555;';
+          histHeading.textContent = 'Poslední proběhlé synchronizace:';
+          root.append(histHeading);
+
+          const histList = document.createElement('div');
+          histList.style.cssText = 'display: flex; flex-direction: column; gap: 6px;';
+          for (const job of history.jobs) {
+            const row = document.createElement('div');
+            row.style.cssText = 'font-size: 12px; color: #666666; display: flex; gap: 10px; align-items: center;';
+            const stateLabel = job.state === 'completed' ? 'Dokončeno' : (job.state === 'failed' ? 'Chyba' : job.state);
+            row.innerHTML = '<span>Úloha #' + escapeHtml(job.job_id) + '</span>' +
+              '<span style="background: #e9ecef; padding: 1px 6px; border-radius: 3px;">' + escapeHtml(job.mode) + '</span>' +
+              '<span style="color: ' + (job.state === 'completed' ? '#3c763d' : '#a94442') + ';">' + stateLabel + '</span>';
+            histList.append(row);
+          }
+          root.append(histList);
+        } else if (!data.approvals || !data.approvals.length) {
+          const empty = document.createElement('p');
+          empty.style.cssText = 'color: #777777; font-size: 13px; margin: 10px 0 18px;';
+          empty.textContent = 'Žádné probíhající synchronizační úlohy.';
+          root.append(empty);
+        }
+      } catch {
+        // Fallback gracefully
+      }
+      resize();
     }
 
     $('onboarding-retry').addEventListener('click',async()=>{try{await api('/installation/retry',{method:'POST',body:'{}'});state=await api('/state');renderOverview();}catch(e){flash(e.message,true);}});
