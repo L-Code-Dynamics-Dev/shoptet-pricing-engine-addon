@@ -120,8 +120,10 @@
           if (html.length > 1000000) return null;
           const doc = new DOMParser().parseFromString(html, 'text/html');
           const skuElements = [...doc.querySelectorAll(skuSelector)];
-          // Reject variants we cannot tie to the cart line exactly.
-          if (!skuElements.some(el => (el.getAttribute('content') || el.textContent || '').trim() === sku)) return null;
+          // A product page may list several variants while showing the first one's price.
+          // Only use the price if every visible SKU reference is the cart variant.
+          const codes = new Set(skuElements.map(el => (el.getAttribute('content') || el.textContent || '').trim()).filter(Boolean));
+          if (codes.size !== 1 || !codes.has(sku)) return null;
           const original = doc.querySelector(originalSelector);
           return original ? minor(original.textContent) : null;
         } catch { return null; }
