@@ -1,206 +1,239 @@
 /**
- * Shoptet Pricing Engine — Cart Savings Module
- * Universal row discount badges and total savings banner for the shopping cart.
- * Compatible with all Shoptet themes (Classic, Step, Disco, Waltz, Tango, Samba, Techno).
+ * L-Code B2C cart savings. Never infer a baseline from the customer's tier percentage.
+ * References are either native cart markup, a verified same-variant product page, or an
+ * explicitly provisioned reference-price snapshot. No changes to checkout prices.
  */
 (() => {
   'use strict';
-
   if (window.__shoptetPricingCartLoaded) return;
   window.__shoptetPricingCartLoaded = true;
 
-  function getLang() {
-    const l = (window.shoptet?.config?.language || document.documentElement.lang || 'cs').toLowerCase();
-    if (l.startsWith('sk')) return 'sk';
-    if (l.startsWith('en')) return 'en';
-    return 'cs';
-  }
+  const rowsSelector = "tr[data-micro='cartItem'], .cart-table tbody tr, .cart-table tr.cart-item";
+  const skuSelector = "[data-micro='sku'], [itemprop='sku'], [data-testid='productCardSku'], .p-code";
+  const originalSelector = '.price-standard, .price-additional, .cart-item-original-price, s';
+  const pageCache = new Map();
+  let generation = 0;
+  let lastSignature = '';
 
-  const I18N = {
-    cs: {
-      totalSave: 'Celkem ušetříte díky věrnostnímu programu:'
-    },
-    sk: {
-      totalSave: 'Celkovo ušetríte vďaka vernostnému programu:'
-    },
-    en: {
-      totalSave: 'Total savings with loyalty program:'
-    }
+  function lang() {
+    const value = (window.shoptet?.config?.language || document.documentElement.lang || 'cs').toLowerCase();
+    return value.startsWith('sk') ? 'sk' : value.startsWith('en') ? 'en' : 'cs';
+  }
+  const labels = {
+    cs: 'Úspora oproti původní ceně:',
+    sk: 'Úspora oproti pôvodnej cene:',
+    en: 'Savings compared with original price:'
   };
 
-  function t(k) {
-    const l = getLang();
-    return I18N[l]?.[k] || I18N.cs[k] || '';
-  }
-
-  function formatPrice(amount) {
-    if (typeof amount !== 'number' || !Number.isFinite(amount)) return '';
-    if (typeof window.shoptet?.helpers?.formatPrice === 'function') {
-      try {
-        return window.shoptet.helpers.formatPrice(amount);
-      } catch {}
-    }
-    const curr = window.shoptet?.currency || {};
-    const symbol = curr.symbol || 'Kč';
-    const decimals = typeof curr.decimalPlaces === 'number' ? curr.decimalPlaces : 2;
-    const decSep = curr.decimalSeparator || ',';
-    const thouSep = curr.thousandSeparator || ' ';
-
-    const parts = amount.toFixed(decimals).split('.');
-    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, thouSep);
-    const formatted = parts.join(decSep);
-
-    return curr.symbolPosition === 'left' ? `${symbol} ${formatted}` : `${formatted} ${symbol}`;
-  }
-
-  function parsePrice(text) {
-    if (!text || typeof text !== 'string') return NaN;
-    const clean = text.replace(/[\s\u00A0]/g, '');
-    const m = clean.match(/(\d+(?:[.,]\d+)*)/);
-    if (!m) return NaN;
-    let numStr = m[1];
-    if (numStr.includes(',') && numStr.includes('.')) {
-      if (numStr.lastIndexOf(',') > numStr.lastIndexOf('.')) {
-        numStr = numStr.replace(/\./g, '').replace(',', '.');
+  // Monetary arithmetic uses safe integer minor units. The locale parser is deliberately
+  // strict: ambiguous or unsupported price formats result in no badge.
+  function minor(value) {
+    if (typeof value !== 'string') return null;
+    const cleaned = value.replace(/[\u00a0\u202f\s]/g, '');
+    const match = cleaned.match(/\d[\d.,]*/);
+    if (!match) return null;
+    let number = match[0].replace(/[.,]$/, '');
+    const comma = number.lastIndexOf(',');
+    const dot = number.lastIndexOf('.');
+    const last = Math.max(comma, dot);
+    let decimals = '';
+    if (last !== -1) {
+      const tail = number.slice(last + 1);
+      const prefix = number.slice(0, last);
+      if (/^\d{1,2}$/.test(tail)) {
+        decimals = tail;
+        number = prefix;
+      } else if (/^\d{3}$/.test(tail)) {
+        number = prefix + tail;
       } else {
-        numStr = numStr.replace(/,/g, '');
+        return null;
       }
-    } else if (numStr.includes(',')) {
-      numStr = numStr.replace(',', '.');
     }
-    const val = parseFloat(numStr);
-    return Number.isFinite(val) ? val : NaN;
+    if (!/^\d[\d.,]*$/.test(number)) return null;
+    const units = number.replace(/[.,]/g, '');
+    if (!/^\d+$/.test(units)) return null;
+    const cents = BigInt(units) * 100n + BigInt((decimals + '00').slice(0, 2));
+    return cents <= BigInt(Number.MAX_SAFE_INTEGER) ? cents : null;
   }
 
-  function parsePriceExcludingBadge(cell) {
-    if (!cell) return NaN;
+  function formatted(cents) {
+    const value = Number(cents) / 100; // Presentation only; never used in arithmetic.
+    if (typeof window.shoptet?.helpers?.formatPrice === 'function') {
+      try { return window.shoptet.helpers.formatPrice(value); } catch {}
+    }
+    const currency = window.shoptet?.currency || {};
+    const symbol = currency.symbol || 'Kč';
+    const whole = (cents / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, currency.thousandSeparator || ' ');
+    const decimal = (cents % 100n).toString().padStart(2, '0');
+    const text = whole + (currency.decimalSeparator || ',') + decimal;
+    return currency.symbolPosition === 'left' ? symbol + ' ' + text : text + ' ' + symbol;
+  }
+
+  function rowSku(row) {
+    const element = row.querySelector(skuSelector);
+    return (row.dataset.productCode || element?.getAttribute('content') || element?.textContent || '').trim();
+  }
+
+  function quantity(row) {
+    const input = row.querySelector("input[name='amount'], input[name^='amount'], [data-testid='cartItemQuantity']");
+    const count = Number(input?.value ?? '1');
+    return Number.isSafeInteger(count) && count > 0 && count <= 100000 ? BigInt(count) : null;
+  }
+
+  function currentTotal(row) {
+    const cell = row.querySelector('td.p-total, [data-testid="cartItemTotal"]');
+    if (!cell) return null;
     const clone = cell.cloneNode(true);
-    clone.querySelectorAll('.vip-cart-percent, .vip-discount-badge').forEach(el => el.remove());
-    return parsePrice(clone.textContent);
+    clone.querySelectorAll('.vip-cart-percent, .vip-discount-badge').forEach(e => e.remove());
+    return minor(clone.textContent);
   }
 
-  function getRowQuantity(row) {
-    const input = row.querySelector("input[name='amount'], [data-testid='cartItemQuantity']");
-    const n = input ? parseInt(input.value, 10) : 1;
-    return isNaN(n) || n <= 0 ? 1 : n;
+  function nativeOriginal(row) {
+    const el = row.querySelector(originalSelector);
+    return el ? minor(el.textContent) : null;
   }
 
-  function setBadge(totalCell, pct) {
-    let badge = totalCell.querySelector(':scope > .vip-cart-percent');
-    if (pct === null || pct <= 0) {
-      if (badge) badge.remove();
+  function tierPresent() {
+    return !!(window.shoptetPricingEngine?.customerTier || window.shoptet?.customer?.priceListId);
+  }
+
+  function productLink(row) {
+    const a = row.querySelector('a.p-name, a[href][data-testid="cartItemName"], .p-name a, a.p-main-image');
+    if (!a) return null;
+    try {
+      const url = new URL(a.href, location.href);
+      if (url.origin !== location.origin || !['http:', 'https:'].includes(url.protocol)) return null;
+      url.hash = '';
+      return url.href;
+    } catch { return null; }
+  }
+
+  async function pageOriginal(url, sku) {
+    const key = url + '|' + sku;
+    if (!pageCache.has(key)) {
+      pageCache.set(key, (async () => {
+        try {
+          const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', redirect: 'follow' });
+          if (!response.ok || new URL(response.url).origin !== location.origin) return null;
+          if (!(response.headers.get('content-type') || '').includes('text/html')) return null;
+          const html = await response.text();
+          if (html.length > 1000000) return null;
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          const skuElements = [...doc.querySelectorAll(skuSelector)];
+          // Reject variants we cannot tie to the cart line exactly.
+          if (!skuElements.some(el => (el.getAttribute('content') || el.textContent || '').trim() === sku)) return null;
+          const original = doc.querySelector(originalSelector);
+          return original ? minor(original.textContent) : null;
+        } catch { return null; }
+      })());
+    }
+    return pageCache.get(key);
+  }
+
+  async function originalUnit(row, sku) {
+    const native = nativeOriginal(row);
+    if (native !== null) return native;
+    if (!sku || !tierPresent()) return null;
+    // Optional merchant-provisioned reference data. Never trust a percentage/cookie.
+    const snapshot = window.shoptetPricingEngine?.cartReferencePrices?.[sku];
+    if (snapshot && snapshot.verified === true && snapshot.vipEligible === true &&
+        typeof snapshot.standardPrice === 'string' &&
+        (!snapshot.currency || snapshot.currency === window.shoptet?.currency?.code)) {
+      const parsed = minor(snapshot.standardPrice);
+      if (parsed !== null) return parsed;
+    }
+    const url = productLink(row);
+    return url ? pageOriginal(url, sku) : null;
+  }
+
+  function badge(cell, percent) {
+    let element = cell.querySelector(':scope > .vip-cart-percent');
+    if (percent === null) {
+      element?.remove();
       return;
     }
-    if (!badge) {
-      badge = document.createElement('span');
-      badge.className = 'vip-cart-percent';
-      badge.style.cssText = 'color:#198754;font-weight:700;margin-left:8px;font-size:0.9em;white-space:nowrap;';
-      totalCell.appendChild(badge);
+    if (!element) {
+      element = document.createElement('span');
+      element.className = 'vip-cart-percent';
+      element.style.cssText = 'color:#198754;font-weight:700;margin-left:8px;font-size:.9em;white-space:nowrap';
+      cell.appendChild(element);
     }
-    const pctText = pct % 1 === 0 ? pct.toFixed(0) : pct.toFixed(1).replace('.', ',');
-    badge.textContent = `-${pctText}%`;
+    const value = '-' + percent + '%';
+    if (element.textContent !== value) element.textContent = value;
   }
 
-  function renderTotalSavings(totalSaved) {
-    document.querySelectorAll('.vip-cart-total-savings').forEach(el => el.remove());
-    if (totalSaved <= 0) return;
-
-    const anchor = document.querySelector("[data-testid='recapFullPrice']")?.closest('tr, div, .cart-total')
-      || document.querySelector('.cart-total')
-      || document.querySelector('.recap-price')
-      || document.querySelector('.cart-table')?.parentElement;
-
-    if (!anchor) return;
-
-    const box = document.createElement('div');
+  function banner(total) {
+    document.querySelectorAll('.vip-cart-total-savings').forEach(e => e.remove());
+    if (total <= 0n) return;
+    const anchor = document.querySelector("[data-testid='recapFullPrice']")?.closest('tr, div, .cart-total') ||
+      document.querySelector('.cart-total, .recap-price, .cart-table');
+    if (!anchor?.parentElement) return;
+    const box = document.createElement(anchor.tagName === 'TR' ? 'tr' : 'div');
     box.className = 'vip-cart-total-savings';
-    box.style.cssText = 'background:#f0fdf4;border:1px solid #bbf7d0;color:#166534;border-radius:6px;padding:10px 14px;margin:12px 0;font-size:0.95em;font-weight:600;display:flex;align-items:center;gap:8px;';
-    box.innerHTML = `
-      <span style="font-size:1.1em;line-height:1;">✓</span>
-      <span>${t('totalSave')} <strong>${formatPrice(totalSaved)}</strong></span>
-    `;
-
-    if (anchor.tagName === 'TR') {
-      const tr = document.createElement('tr');
-      tr.className = 'vip-cart-total-savings';
-      const td = document.createElement('td');
-      td.colSpan = 10;
-      td.style.padding = '4px 0';
-      td.appendChild(box);
-      tr.appendChild(td);
-      anchor.parentElement.insertBefore(tr, anchor);
-    } else {
-      anchor.parentElement.insertBefore(box, anchor);
-    }
+    const content = document.createElement(anchor.tagName === 'TR' ? 'td' : 'div');
+    if (box.tagName === 'TR') content.colSpan = 10;
+    content.style.cssText = 'background:#f0fdf4;border:1px solid #bbf7d0;color:#166534;border-radius:6px;padding:10px 14px;margin:12px 0;font-weight:600';
+    content.textContent = labels[lang()] + ' ' + formatted(total);
+    box.appendChild(content);
+    anchor.parentElement.insertBefore(box, anchor);
   }
 
-  function renderCart() {
-    const rows = document.querySelectorAll("tr[data-micro='cartItem'], .cart-table tbody tr, .cart-table tr.cart-item");
-    if (!rows.length) return;
-
-    let totalSaved = 0;
-
-    for (const row of rows) {
-      const totalCell = row.querySelector('td.p-total, [data-testid="cartItemTotal"]');
-      const unitCell = row.querySelector('td.p-price, [data-testid="cartItemPrice"]');
-      if (!totalCell) continue;
-
-      const currentTotal = parsePriceExcludingBadge(totalCell);
-      const qty = getRowQuantity(row);
-
-      // Check if standard price or original price exists in row
-      const origPriceEl = row.querySelector('.price-standard, .price-additional, s, .cart-item-original-price');
-      let standardUnit = origPriceEl ? parsePrice(origPriceEl.textContent) : null;
-
-      if (standardUnit && currentTotal && Number.isFinite(standardUnit)) {
-        const standardTotal = standardUnit * qty;
-        if (standardTotal > currentTotal) {
-          const savedOnRow = standardTotal - currentTotal;
-          const pct = Math.round((savedOnRow / standardTotal) * 100);
-          setBadge(totalCell, pct);
-          totalSaved += savedOnRow;
-          continue;
-        }
-      }
-
-      // If Shoptet already provided discount on row via native discount attribute
-      const nativeDiscountEl = row.querySelector('[data-testid="cartItemDiscount"]');
-      if (nativeDiscountEl) {
-        const discountText = nativeDiscountEl.textContent;
-        const discountPctMatch = discountText.match(/(\d+)%/);
-        if (discountPctMatch) {
-          const pct = parseInt(discountPctMatch[1], 10);
-          if (pct > 0) {
-            setBadge(totalCell, pct);
-            const origTotal = currentTotal / (1 - pct / 100);
-            totalSaved += (origTotal - currentTotal);
-          }
-        }
-      }
+  async function render() {
+    const run = ++generation;
+    const rows = [...document.querySelectorAll(rowsSelector)].filter(row => row.querySelector('td.p-total, [data-testid="cartItemTotal"]'));
+    if (!rows.length) { banner(0n); return; }
+    const results = await Promise.all(rows.slice(0, 100).map(async row => {
+      const qty = quantity(row);
+      const total = currentTotal(row);
+      if (qty === null || total === null) return { row, saved: 0n, percent: null };
+      const orig = await originalUnit(row, rowSku(row));
+      if (orig === null || orig <= 0n) return { row, saved: 0n, percent: null };
+      const standardTotal = orig * qty;
+      if (standardTotal <= total) return { row, saved: 0n, percent: null };
+      const saved = standardTotal - total;
+      const pct = (saved * 100n + standardTotal / 2n) / standardTotal;
+      return { row, saved, percent: Number(pct) };
+    }));
+    if (run !== generation) return;
+    const applied = new Set(results.map(x => x.row));
+    let sum = 0n;
+    for (const result of results) {
+      const cell = result.row.querySelector('td.p-total, [data-testid="cartItemTotal"]');
+      if (!cell) continue;
+      badge(cell, result.percent && result.percent > 0 ? result.percent : null);
+      sum += result.saved;
     }
+    for (const row of rows) {
+      if (!applied.has(row)) badge(row.querySelector('td.p-total, [data-testid="cartItemTotal"]'), null);
+    }
+    banner(sum);
+  }
 
-    renderTotalSavings(totalSaved);
+  function signature() {
+    return [...document.querySelectorAll(rowsSelector)].map(row => [
+      rowSku(row), quantity(row)?.toString() ?? '',
+      currentTotal(row)?.toString() ?? '',
+      nativeOriginal(row)?.toString() ?? '',
+      productLink(row) ?? ''
+    ].join('|')).join(';');
   }
 
   function init() {
-    renderCart();
-    let timeout;
-    const observer = new MutationObserver(() => {
-      clearTimeout(timeout);
-      timeout = setTimeout(renderCart, 150);
-    });
+    let timer;
+    const schedule = (force = false) => {
+      const next = signature();
+      if (!force && next === lastSignature) return;
+      lastSignature = next;
+      clearTimeout(timer);
+      timer = setTimeout(() => { void render(); }, 120);
+    };
+    schedule(true);
     const target = document.querySelector('.cart-table, .cart-content, #content') || document.body;
-    if (target) {
-      observer.observe(target, { childList: true, subtree: true });
-    }
+    new MutationObserver(() => schedule()).observe(target, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['value'] });
+    window.addEventListener('vipReady', () => schedule(true));
+    document.addEventListener('shoptet.cart-updated', () => schedule(true));
+    document.addEventListener('change', () => schedule(), true);
   }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
-
-  window.addEventListener('vipReady', renderCart);
-  document.addEventListener('shoptet.cart-updated', () => setTimeout(renderCart, 150));
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
 })();
