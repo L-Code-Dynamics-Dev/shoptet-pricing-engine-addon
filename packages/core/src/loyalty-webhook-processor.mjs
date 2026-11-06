@@ -110,11 +110,17 @@ export async function processOrderWebhook({
     lastChangeTime: order.changeTime
   });
 
-  // An older order event must not trigger customer tier calculation with missing turnover.
-  // The ledger already holds the most recent state; a replay is a no-op.
+  // A stale event must never be interpreted as zero turnover. A retried failed
+  // assignment may still need to complete, using the latest persisted summary.
+  let turnoverMinor = ledgerResult.customerTurnoverMinor;
   if (!ledgerResult.applied) {
-    await db.prepare("UPDATE loyalty_webhook_events SET state='processed' WHERE shop_id=? AND event_hash=?").bind(shopId, eventHash).run();
-    return { accepted: true, changed: false, ignored: true, reason: ledgerResult.reason, orderCode };
+    const currentState = await db.prepare(
+      'SELECT calculated_turnover_minor FROM loyalty_customer_states WHERE shop_id=? AND customer_guid=?'
+    ).bind(shopId, order.customerGuid).first();
+    if (!currentState || !Number.isSafeInteger(currentState.calculated_turnover_minor)) {
+      throw new Error('customer_turnover_state_unavailable');
+    }
+    turnoverMinor = currentState.calculated_turnover_minor;
   }
 
   // 6. Evaluate Customer Eligibility & Target Tier
@@ -128,7 +134,7 @@ export async function processOrderWebhook({
     return { accepted: true, locked: true, lockStatus, orderCode };
   }
 
-  const customerTurnover = BigInt(ledgerResult.customerTurnoverMinor ?? 0);
+  const customerTurnover = BigInt(turnoverMinor);
   const eligibleTier = tiers.filter(t => customerTurnover >= BigInt(t.minTurnover) * 100n).at(-1) ?? null;
   const currentPricelistId = customer.priceList?.id ?? null;
   const currentTier = tiers.find(t => t.pricelistId === currentPricelistId);
