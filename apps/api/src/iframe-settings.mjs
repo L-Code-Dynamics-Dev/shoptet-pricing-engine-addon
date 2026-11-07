@@ -2094,27 +2094,27 @@ export function renderAdminHtml(eshopId, auth) {
         actionsDiv.style.cssText = 'display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap;';
 
         if (status.engineMode === 'installation') {
-          desc.textContent = 'Věrnostní engine je v bezpečném instalačním režimu. Žádné automatické změny zákaznických ceníků se neprovádějí. Spusťte hromadnou analýzu obratu vašich zákazníků (Dry Run) pro výpočet navrhovaných VIP hladin bez jakýchkoliv zápisů do e-shopu.';
+          desc.textContent = 'Věrnostní systém je v bezpečném instalačním režimu. Žádné automatické změny zákaznických ceníků se neprovádějí. Spusťte kontrolní náhled změn pro výpočet navrhovaných VIP hladin bez jakýchkoliv zápisů do e-shopu.';
           const btnDryRun = document.createElement('button');
           btnDryRun.type = 'button';
           btnDryRun.className = 'btn-shoptet-green';
-          btnDryRun.textContent = 'Spustit hromadnou analýzu (Dry Run)';
+          btnDryRun.textContent = 'Spustit kontrolní náhled změn';
           btnDryRun.addEventListener('click', async () => {
             btnDryRun.disabled = true;
-            btnDryRun.textContent = 'Analyzuji zákazníky…';
+            btnDryRun.textContent = 'Přepočítávám náhled…';
             try {
               await api('/loyalty/dry-run', { method: 'POST', body: '{}' });
-              flash('Hromadná analýza (Dry Run) byla úspěšně dokončena.');
+              flash('Kontrolní náhled změn byl úspěšně vygenerován bez zápisů do e-shopu.');
               await renderLoyaltyOnboarding();
             } catch (err) {
               btnDryRun.disabled = false;
-              btnDryRun.textContent = 'Spustit hromadnou analýzu (Dry Run)';
+              btnDryRun.textContent = 'Spustit kontrolní náhled změn';
               flash(err.message, true);
             }
           });
           actionsDiv.append(btnDryRun);
         } else if (status.engineMode === 'dry_run_ready' || status.engineMode === 'approved') {
-          desc.textContent = 'Hromadná analýza byla dokončena. Níže naleznete přesný přehled všech navrhovaných změn zákaznických ceníků k vašemu schválení.';
+          desc.textContent = 'Kontrolní analýza byla dokončena. Níže naleznete přesný přehled všech navrhovaných změn zákaznických ceníků k vašemu schválení.';
 
           const planData = await api('/loyalty/plan');
           const plan = planData.plan;
@@ -2218,17 +2218,17 @@ export function renderAdminHtml(eshopId, auth) {
             const btnReDryRun = document.createElement('button');
             btnReDryRun.type = 'button';
             btnReDryRun.className = 'btn-secondary';
-            btnReDryRun.textContent = 'Analyzovat znovu (Nový Dry Run)';
+            btnReDryRun.textContent = 'Přepočítat znovu (Aktualizovat náhled)';
             btnReDryRun.addEventListener('click', async () => {
               btnReDryRun.disabled = true;
-              btnReDryRun.textContent = 'Počítám…';
+              btnReDryRun.textContent = 'Přepočítávám…';
               try {
                 await api('/loyalty/dry-run', { method: 'POST', body: '{}' });
-                flash('Nový Dry Run byl vygenerován.');
+                flash('Nový kontrolní náhled byl úspěšně vygenerován.');
                 await renderLoyaltyOnboarding();
               } catch (err) {
                 btnReDryRun.disabled = false;
-                btnReDryRun.textContent = 'Analyzovat znovu (Nový Dry Run)';
+                btnReDryRun.textContent = 'Přepočítat znovu (Aktualizovat náhled)';
                 flash(err.message, true);
               }
             });
@@ -2241,17 +2241,17 @@ export function renderAdminHtml(eshopId, auth) {
           const btnNewAudit = document.createElement('button');
           btnNewAudit.type = 'button';
           btnNewAudit.className = 'btn-secondary';
-          btnNewAudit.textContent = 'Spustit novou hromadnou kontrolu (Dry Run)';
+          btnNewAudit.textContent = 'Spustit kontrolní přepočet bez zápisu';
           btnNewAudit.addEventListener('click', async () => {
             btnNewAudit.disabled = true;
-            btnNewAudit.textContent = 'Počítám…';
+            btnNewAudit.textContent = 'Přepočítávám…';
             try {
               await api('/loyalty/dry-run', { method: 'POST', body: '{}' });
-              flash('Kontrolní Dry Run byl vygenerován.');
+              flash('Kontrolní náhled byl vygenerován.');
               await renderLoyaltyOnboarding();
             } catch (err) {
               btnNewAudit.disabled = false;
-              btnNewAudit.textContent = 'Spustit novou hromadnou kontrolu (Dry Run)';
+              btnNewAudit.textContent = 'Spustit kontrolní přepočet bez zápisu';
               flash(err.message, true);
             }
           });
