@@ -45,7 +45,7 @@ export async function reconcilePrices({
   tiers = [],
   catalogProducts = [],
   pagination = null,
-  fullCatalogVerified = true,
+  fullCatalogVerified = false,
   minExpectedCombinations = 1
 }) {
   const numShopId = Number(shopId);
@@ -53,6 +53,12 @@ export async function reconcilePrices({
     throw new TypeError('Invalid shopId: must be positive numeric tenant ID');
   }
   if (!Array.isArray(tiers) || tiers.length === 0) throw new TypeError('Tiers must be non-empty array');
+
+  const isAdapterVerified = Boolean(
+    (typeof adapter?.isFullCatalogVerified === 'function' && adapter.isFullCatalogVerified() === true) ||
+    adapter?.fullCatalogVerified === true ||
+    fullCatalogVerified === true
+  );
 
   // Verify pagination completeness (INC-012)
   const isTruncated = Boolean(
@@ -221,15 +227,15 @@ export async function reconcilePrices({
     minExpectedCombinations
   });
 
-  if (!pagination && !fullCatalogVerified) {
-    selfCheck = {
-      passed: false,
-      reason: 'unverified_coverage_pagination_metadata_missing'
-    };
-  } else if (isTruncated) {
+  if (isTruncated) {
     selfCheck = {
       passed: false,
       reason: 'incomplete_pagination_truncated_run'
+    };
+  } else if (!pagination && !isAdapterVerified) {
+    selfCheck = {
+      passed: false,
+      reason: 'unverified_coverage_pagination_metadata_missing'
     };
   }
 
@@ -264,7 +270,7 @@ export async function reconcileCoupons({
   tiers = [],
   catalogProducts = [],
   pagination = null,
-  fullCatalogVerified = true,
+  fullCatalogVerified = false,
   minExpectedCombinations = 1
 }) {
   const numShopId = Number(shopId);
@@ -272,6 +278,12 @@ export async function reconcileCoupons({
     throw new TypeError('Invalid shopId: must be positive numeric tenant ID');
   }
   if (!Array.isArray(tiers) || tiers.length === 0) throw new TypeError('Tiers must be non-empty array');
+
+  const isAdapterVerified = Boolean(
+    (typeof adapter?.isFullCatalogVerified === 'function' && adapter.isFullCatalogVerified() === true) ||
+    adapter?.fullCatalogVerified === true ||
+    fullCatalogVerified === true
+  );
 
   // Verify pagination completeness (INC-012)
   const isTruncated = Boolean(
@@ -281,7 +293,11 @@ export async function reconcileCoupons({
     )
   );
 
-  const couponPolicy = normalizeCouponPolicy(couponConfig);
+  const resolvedMainId = couponConfig.defaultPricelistId ?? couponConfig.mainPricelistId ?? adapter?.defaultPricelistId ?? adapter?.mainPricelistId;
+  const couponPolicy = normalizeCouponPolicy({
+    ...couponConfig,
+    defaultPricelistId: resolvedMainId
+  });
   const counts = { total: 0, match: 0, drift: 0, missing: 0, skipped: 0, unknown: 0 };
   const drifts = [];
   const checkedProducts = new Set();
@@ -415,8 +431,26 @@ export async function reconcileCoupons({
           continue;
         }
 
+        // Task C: Present sales with missing minPriceRatio must be classified as UNKNOWN (not silently treated as null)
+        if (!('minPriceRatio' in actualEntry.sales) || actualEntry.sales.minPriceRatio === undefined) {
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'UNKNOWN',
+            reason: 'missing_min_price_ratio_observation',
+            expected: {
+              discountCoupon: expected.applyDiscountCoupon,
+              minPriceRatio: expected.minPriceRatio
+            },
+            actual: actualEntry.sales
+          });
+          continue;
+        }
+
         const actualCoupon = actualEntry.sales.discountCoupon;
-        const actualRatio = actualEntry.sales.minPriceRatio ?? null;
+        const actualRatio = actualEntry.sales.minPriceRatio;
 
         const couponMatches = actualCoupon === expected.applyDiscountCoupon;
         const ratioMatches = actualRatio === expected.minPriceRatio;
@@ -456,15 +490,15 @@ export async function reconcileCoupons({
     minExpectedCombinations
   });
 
-  if (!pagination && !fullCatalogVerified) {
-    selfCheck = {
-      passed: false,
-      reason: 'unverified_coverage_pagination_metadata_missing'
-    };
-  } else if (isTruncated) {
+  if (isTruncated) {
     selfCheck = {
       passed: false,
       reason: 'incomplete_pagination_truncated_run'
+    };
+  } else if (!pagination && !isAdapterVerified) {
+    selfCheck = {
+      passed: false,
+      reason: 'unverified_coverage_pagination_metadata_missing'
     };
   }
 

@@ -25,18 +25,27 @@ test('FÁZE 2: formatPriceRatio - exact 3-decimal places relative to tier price'
 });
 
 test('FÁZE 2: normalizeCouponPolicy - defaults and configurable locked tiers', () => {
-  const standard = normalizeCouponPolicy();
+  // Fail closed without authenticated main pricelist ID
+  assert.throws(() => normalizeCouponPolicy(), /Missing or invalid authenticated shop-scoped default\/main pricelist ID/);
+  assert.throws(() => normalizeCouponPolicy({ defaultPricelistId: 0 }), /Missing or invalid authenticated shop-scoped default\/main pricelist ID/);
+
+  const standard = normalizeCouponPolicy({ defaultPricelistId: 1 });
   assert.equal(standard.mode, 'percent-ceiling');
   assert.equal(standard.ceilingPercent, 20);
   assert.equal(standard.defaultPricelistId, 1);
+  assert.equal(standard.mainPricelistId, 1);
 
   // Custom per-shop configuration with locked tiers (e.g. ZR20/ZR25)
   const shopConfig = normalizeCouponPolicy({
+    defaultPricelistId: 17,
+    managedPricelistIds: [1, 2, 3],
     mode: 'fixed-amount',
     lockedPricelistIds: [26, 29],
     lockedTierNames: ['ZR20', 'ZR25']
   });
   assert.equal(shopConfig.mode, 'fixed-amount');
+  assert.equal(shopConfig.defaultPricelistId, 17);
+  assert.deepEqual(shopConfig.managedPricelistIds, [1, 2, 3]);
   assert.ok(shopConfig.lockedPricelistIds.has(26));
   assert.ok(shopConfig.lockedPricelistIds.has(29));
   assert.ok(shopConfig.lockedTierNames.has('ZR20'));
@@ -182,6 +191,7 @@ test('FÁZE 2: INC-003 regression - coupon patch strictly forbids modifying main
 
 test('FÁZE 2: INC-011 regression - locked tiers ZR20 and ZR25 strictly disable coupons', () => {
   const policy = normalizeCouponPolicy({
+    defaultPricelistId: 1,
     mode: 'fixed-amount',
     lockedPricelistIds: [26, 29],
     lockedTierNames: ['ZR20', 'ZR25']
@@ -391,6 +401,7 @@ test('TASK 3: createPricelistCouponPatch strictly validates 0..1 minPriceRatio b
   // Valid ratios: 0.000, 1.000, 0.889, null
   const patchZero = createPricelistCouponPatch({
     targetPricelistId: 2,
+    defaultPricelistId: 1,
     code: 'SKU-1',
     applyDiscountCoupon: true,
     minPriceRatio: '0.000'
@@ -399,6 +410,7 @@ test('TASK 3: createPricelistCouponPatch strictly validates 0..1 minPriceRatio b
 
   const patchOne = createPricelistCouponPatch({
     targetPricelistId: 2,
+    defaultPricelistId: 1,
     code: 'SKU-1',
     applyDiscountCoupon: true,
     minPriceRatio: '1.000'
@@ -407,6 +419,7 @@ test('TASK 3: createPricelistCouponPatch strictly validates 0..1 minPriceRatio b
 
   const patchMid = createPricelistCouponPatch({
     targetPricelistId: 2,
+    defaultPricelistId: 1,
     code: 'SKU-1',
     applyDiscountCoupon: true,
     minPriceRatio: '0.889'
@@ -415,27 +428,77 @@ test('TASK 3: createPricelistCouponPatch strictly validates 0..1 minPriceRatio b
 
   // Invalid ratios: > 1.000 (e.g. 2.000, 9.999), negative, wrong decimals
   assert.throws(
-    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '2.000' }),
+    () => createPricelistCouponPatch({ targetPricelistId: 2, defaultPricelistId: 1, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '2.000' }),
     /Invalid minPriceRatio/
   );
 
   assert.throws(
-    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '9.999' }),
+    () => createPricelistCouponPatch({ targetPricelistId: 2, defaultPricelistId: 1, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '9.999' }),
     /Invalid minPriceRatio/
   );
 
   assert.throws(
-    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '-0.100' }),
+    () => createPricelistCouponPatch({ targetPricelistId: 2, defaultPricelistId: 1, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '-0.100' }),
     /Invalid minPriceRatio/
   );
 
   assert.throws(
-    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '1.001' }),
+    () => createPricelistCouponPatch({ targetPricelistId: 2, defaultPricelistId: 1, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '1.001' }),
     /Invalid minPriceRatio/
   );
 
   assert.throws(
-    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '0.88' }),
+    () => createPricelistCouponPatch({ targetPricelistId: 2, defaultPricelistId: 1, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '0.88' }),
     /Invalid minPriceRatio/
+  );
+});
+
+test('TASK A: authenticated shop-scoped main ID=17 and managed tier ID=1 regression', () => {
+  // Missing or non-positive main ID fails closed
+  assert.throws(
+    () => createPricelistCouponPatch({ targetPricelistId: 1, code: 'SKU-1', applyDiscountCoupon: true }),
+    /Missing or invalid authenticated default\/main pricelist ID/
+  );
+  assert.throws(
+    () => createPricelistCouponPatch({ targetPricelistId: 1, defaultPricelistId: 0, code: 'SKU-1', applyDiscountCoupon: true }),
+    /Missing or invalid authenticated default\/main pricelist ID/
+  );
+
+  // Main ID = 17, managed tiers = [1, 2, 3]
+  // 1) Writing to managed tier ID 1 succeeds (never falsely rejected as main ID)
+  const patchTier1 = createPricelistCouponPatch({
+    targetPricelistId: 1,
+    mainPricelistId: 17,
+    managedPricelistIds: [1, 2, 3],
+    code: 'SKU-1',
+    applyDiscountCoupon: true,
+    minPriceRatio: '0.889'
+  });
+  assert.equal(patchTier1.code, 'SKU-1');
+  assert.equal(patchTier1.sales.discountCoupon, true);
+  assert.equal(patchTier1.sales.minPriceRatio, '0.889');
+
+  // 2) Writing to main ID 17 strictly throws main_pricelist_coupon_write_forbidden
+  assert.throws(
+    () => createPricelistCouponPatch({
+      targetPricelistId: 17,
+      mainPricelistId: 17,
+      managedPricelistIds: [1, 2, 3],
+      code: 'SKU-1',
+      applyDiscountCoupon: true
+    }),
+    /main_pricelist_coupon_write_forbidden/
+  );
+
+  // 3) Writing to unmanaged tier ID 99 throws unmanaged_tier_pricelist_coupon_write_forbidden
+  assert.throws(
+    () => createPricelistCouponPatch({
+      targetPricelistId: 99,
+      mainPricelistId: 17,
+      managedPricelistIds: [1, 2, 3],
+      code: 'SKU-1',
+      applyDiscountCoupon: true
+    }),
+    /unmanaged_tier_pricelist_coupon_write_forbidden/
   );
 });

@@ -61,6 +61,7 @@ test('FÁZE 3: reconcilePrices - detects MATCH, DRIFT, MISSING, SKIPPED and UNKN
     shopId,
     tiers,
     catalogProducts,
+    fullCatalogVerified: true,
     minExpectedCombinations: 4
   });
 
@@ -102,6 +103,7 @@ test('FÁZE 3: Coverage self-check guard - zero drift with insufficient coverage
         variants: [{ code: 'V-1', visible: true, basePriceMinor: 1000, perPricelistPrices: { 2: { priceMinor: 900 } } }]
       }
     ],
+    fullCatalogVerified: true,
     minExpectedCombinations: 100
   });
 
@@ -120,6 +122,7 @@ test('FÁZE 3: reconcileCoupons - audits coupon settings and catches INC-011 loc
   ];
 
   const couponConfig = {
+    defaultPricelistId: 1,
     mode: 'fixed-amount',
     lockedPricelistIds: [26, 29]
   };
@@ -159,6 +162,7 @@ test('FÁZE 3: reconcileCoupons - audits coupon settings and catches INC-011 loc
     couponConfig,
     tiers,
     catalogProducts,
+    fullCatalogVerified: true,
     minExpectedCombinations: 3
   });
 
@@ -249,6 +253,7 @@ test('P2: Self-check fails on single UNKNOWN with cardinality 1, and consistent 
         variants: [{ code: 'U-1', visible: true, basePriceMinor: 0 }] // Corrupted base
       }
     ],
+    fullCatalogVerified: true,
     minExpectedCombinations: 1
   });
   assert.equal(unknownSingle.counts.unknown, 1);
@@ -260,6 +265,7 @@ test('P2: Self-check fails on single UNKNOWN with cardinality 1, and consistent 
     adapter: {},
     shopId,
     tiers,
+    fullCatalogVerified: true,
     policy: { minimumMinor: 8000 }, // Global min 80.00
     catalogProducts: [
       {
@@ -294,7 +300,8 @@ test('P2: Self-check fails on single UNKNOWN with cardinality 1, and consistent 
     adapter: {},
     shopId,
     tiers,
-    couponConfig: { mode: 'percent-ceiling', ceilingPercent: 30, minimumMinor: 8000 },
+    fullCatalogVerified: true,
+    couponConfig: { defaultPricelistId: 1, mode: 'percent-ceiling', ceilingPercent: 30, minimumMinor: 8000 },
     catalogProducts: [
       {
         guid: 'prod-coupon-global',
@@ -345,6 +352,7 @@ test('TASK E: Reconciliation runner detects missing variant code as UNKNOWN and 
     adapter: {},
     shopId,
     tiers,
+    fullCatalogVerified: true,
     catalogProducts: [
       {
         guid: 'prod-no-code',
@@ -364,7 +372,9 @@ test('TASK E: Reconciliation runner detects missing variant code as UNKNOWN and 
   const couponResult = await reconcileCoupons({
     adapter: {},
     shopId,
+    couponConfig: { defaultPricelistId: 1 },
     tiers,
+    fullCatalogVerified: true,
     catalogProducts: [
       {
         guid: 'prod-empty-code',
@@ -389,6 +399,7 @@ test('TASK 1: Audit conflict reproducer - manual action price below margin floor
     adapter: {},
     shopId,
     tiers,
+    fullCatalogVerified: true,
     catalogProducts: [
       {
         guid: 'prod-conflict',
@@ -421,11 +432,12 @@ test('TASK 1: Audit conflict reproducer - manual action price below margin floor
   assert.equal(conflict.actual, 8000);
 });
 
-test('TASK 4: Coverage trust - absent pagination metadata with fullCatalogVerified: false fails self-check', async () => {
+test('TASK 4: Coverage trust - absent pagination metadata with default arguments fails self-check (TASK B)', async () => {
   const shopId = 826800;
   const tiers = [{ name: 'VIP', percent: 10, pricelistId: 2 }];
 
-  const result = await reconcilePrices({
+  // 1. Default arguments: fullCatalogVerified and pagination omitted -> must fail closed
+  const defaultPriceResult = await reconcilePrices({
     adapter: {},
     shopId,
     tiers,
@@ -436,13 +448,43 @@ test('TASK 4: Coverage trust - absent pagination metadata with fullCatalogVerifi
         variants: [{ code: 'SKU-UNV', visible: true, basePriceMinor: 1000, perPricelistPrices: { 2: { priceMinor: 900 } } }]
       }
     ],
-    pagination: null,
-    fullCatalogVerified: false, // Incomplete caller assurance without authenticated adapter proof
     minExpectedCombinations: 1
   });
+  assert.equal(defaultPriceResult.selfCheckPassed, false);
+  assert.equal(defaultPriceResult.selfCheckReason, 'unverified_coverage_pagination_metadata_missing');
 
-  assert.equal(result.selfCheckPassed, false);
-  assert.equal(result.selfCheckReason, 'unverified_coverage_pagination_metadata_missing');
+  // 2. Default arguments in coupon reconciliation -> must fail closed
+  const defaultCouponResult = await reconcileCoupons({
+    adapter: { defaultPricelistId: 1 },
+    shopId,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-unverified-coupon',
+        visibility: 'normal',
+        variants: [{ code: 'SKU-UNV-C', visible: true, basePriceMinor: 1000, perPricelistPrices: { 2: { priceMinor: 900, sales: { discountCoupon: true, minPriceRatio: null } } } }]
+      }
+    ],
+    minExpectedCombinations: 1
+  });
+  assert.equal(defaultCouponResult.selfCheckPassed, false);
+  assert.equal(defaultCouponResult.selfCheckReason, 'unverified_coverage_pagination_metadata_missing');
+
+  // 3. Authenticated adapter completeness proof (isFullCatalogVerified) -> passes coverage self-check
+  const adapterProofResult = await reconcilePrices({
+    adapter: { isFullCatalogVerified: () => true },
+    shopId,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-verified',
+        visibility: 'normal',
+        variants: [{ code: 'SKU-V', visible: true, basePriceMinor: 1000, perPricelistPrices: { 2: { priceMinor: 900 } } }]
+      }
+    ],
+    minExpectedCombinations: 1
+  });
+  assert.equal(adapterProofResult.selfCheckPassed, true);
 });
 
 test('TASK 5: reconcileCoupons - missing sales field or discountCoupon fails closed to UNKNOWN', async () => {
@@ -450,9 +492,10 @@ test('TASK 5: reconcileCoupons - missing sales field or discountCoupon fails clo
   const tiers = [{ name: 'VIP', percent: 10, pricelistId: 2 }];
 
   const result = await reconcileCoupons({
-    adapter: {},
+    adapter: { defaultPricelistId: 1 },
     shopId,
     tiers,
+    fullCatalogVerified: true,
     catalogProducts: [
       {
         guid: 'prod-missing-sales',
@@ -482,4 +525,78 @@ test('TASK 5: reconcileCoupons - missing sales field or discountCoupon fails clo
   const drift = result.drifts.find(d => d.reason === 'missing_sales_coupon_observation');
   assert.ok(drift);
   assert.equal(drift.status, 'UNKNOWN');
+});
+
+test('TASK C: reconcileCoupons - present sales with missing minPriceRatio vs explicit null', async () => {
+  const shopId = 826800;
+  const tiers = [{ name: 'VIP', percent: 10, pricelistId: 2 }];
+
+  // 1. Present sales, but minPriceRatio property is absent -> classified as UNKNOWN
+  const absentRatioResult = await reconcileCoupons({
+    adapter: { defaultPricelistId: 1 },
+    shopId,
+    tiers,
+    fullCatalogVerified: true,
+    couponConfig: { mode: 'fixed-amount', defaultPricelistId: 1 },
+    catalogProducts: [
+      {
+        guid: 'prod-absent-ratio',
+        visibility: 'normal',
+        variants: [
+          {
+            code: 'SKU-ABSENT-RATIO',
+            visible: true,
+            basePriceMinor: 10000,
+            perPricelistPrices: {
+              2: {
+                priceMinor: 9000,
+                sales: { discountCoupon: true } // minPriceRatio is completely absent!
+              }
+            }
+          }
+        ]
+      }
+    ],
+    minExpectedCombinations: 1
+  });
+
+  assert.equal(absentRatioResult.counts.unknown, 1);
+  assert.equal(absentRatioResult.counts.match, 0);
+  assert.equal(absentRatioResult.selfCheckPassed, false);
+  const unknownDrift = absentRatioResult.drifts.find(d => d.reason === 'missing_min_price_ratio_observation');
+  assert.ok(unknownDrift);
+  assert.equal(unknownDrift.status, 'UNKNOWN');
+
+  // 2. Present sales with explicit null minPriceRatio -> evaluated cleanly, NOT classified as UNKNOWN
+  const explicitNullResult = await reconcileCoupons({
+    adapter: { defaultPricelistId: 1 },
+    shopId,
+    tiers,
+    fullCatalogVerified: true,
+    couponConfig: { mode: 'fixed-amount', defaultPricelistId: 1 },
+    catalogProducts: [
+      {
+        guid: 'prod-explicit-null',
+        visibility: 'normal',
+        variants: [
+          {
+            code: 'SKU-EXPLICIT-NULL',
+            visible: true,
+            basePriceMinor: 10000,
+            perPricelistPrices: {
+              2: {
+                priceMinor: 9000,
+                sales: { discountCoupon: true, minPriceRatio: null } // Explicit null
+              }
+            }
+          }
+        ]
+      }
+    ],
+    minExpectedCombinations: 1
+  });
+
+  assert.equal(explicitNullResult.counts.unknown, 0);
+  assert.equal(explicitNullResult.counts.match, 1);
+  assert.equal(explicitNullResult.selfCheckPassed, true);
 });

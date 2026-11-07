@@ -130,6 +130,15 @@ export function normalizeCouponPolicy(config = {}) {
     throw new TypeError(`Invalid capPriority: ${capPriority}`);
   }
 
+  const defaultPricelistId = config.defaultPricelistId ?? config.mainPricelistId;
+  if (!Number.isSafeInteger(defaultPricelistId) || defaultPricelistId <= 0) {
+    throw new TypeError('Missing or invalid authenticated shop-scoped default/main pricelist ID');
+  }
+
+  const managedPricelistIds = Array.isArray(config.managedPricelistIds)
+    ? Array.from(new Set(config.managedPricelistIds.map(Number))).filter(id => Number.isSafeInteger(id) && id > 0)
+    : null;
+
   return {
     mode,
     ceilingPercent,
@@ -138,7 +147,9 @@ export function normalizeCouponPolicy(config = {}) {
     lockedTierNames,
     capPriority,
     minimumMinor: config.minimumMinor ?? null,
-    defaultPricelistId: config.defaultPricelistId ?? 1
+    defaultPricelistId,
+    mainPricelistId: defaultPricelistId,
+    managedPricelistIds
   };
 }
 
@@ -331,7 +342,9 @@ export function evaluateCouponSettings({
  */
 export function createPricelistCouponPatch({
   targetPricelistId,
-  defaultPricelistId = 1,
+  defaultPricelistId,
+  mainPricelistId,
+  managedPricelistIds = null,
   code,
   applyDiscountCoupon,
   minPriceRatio = null
@@ -342,9 +355,16 @@ export function createPricelistCouponPatch({
   if (!Number.isSafeInteger(targetPricelistId) || targetPricelistId <= 0) {
     throw new TypeError('Invalid targetPricelistId');
   }
-  if (targetPricelistId === defaultPricelistId) {
+  const effectiveMainId = defaultPricelistId ?? mainPricelistId;
+  if (!Number.isSafeInteger(effectiveMainId) || effectiveMainId <= 0) {
+    throw new TypeError('Missing or invalid authenticated default/main pricelist ID');
+  }
+  if (targetPricelistId === effectiveMainId) {
     // INC-003 invariant: Main pricelist product discount caps must NEVER be overwritten by coupon sync!
     throw new Error('main_pricelist_coupon_write_forbidden');
+  }
+  if (Array.isArray(managedPricelistIds) && !managedPricelistIds.includes(targetPricelistId)) {
+    throw new Error('unmanaged_tier_pricelist_coupon_write_forbidden');
   }
   if (typeof applyDiscountCoupon !== 'boolean') {
     throw new TypeError('applyDiscountCoupon must be boolean');
