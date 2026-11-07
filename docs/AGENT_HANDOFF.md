@@ -19,6 +19,7 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 | Independent review | GPT-6 | REVIEW_IN_PROGRESS | Review findings issued (Tasks 1-5) |
 | Review tasks 1-5 addressed | Gemini | VERIFIED | Commit `d4f959c`, 265/265 tests pass, PR #4 updated |
 | P1 & P2 issues addressed | Gemini | VERIFIED | Commit `21c2522`, 267/267 tests pass, PR #4 updated |
+| Review tasks A-F addressed | Gemini | VERIFIED | Commit `f474010`, 272/272 tests pass, PR #4 updated |
 
 ## Checkpoints
 ### 2026-11-07 — GPT-6 — initial coordination
@@ -133,6 +134,30 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - **TASK F — currency / VAT integration gate:** before any live writes, verify merchant rounding settings, explicit VAT basis and Shoptet API contract against fixture data; current pure core alone is not proof of production compatibility. Record unsupported cases as BLOCKED rather than inventing defaults.
 - Implement smallest failing-test-first patches only where evidence demonstrates a defect; update handoff with exact commit, tests and risk status. Never merge/deploy, enable remediation or write live Shoptet prices without explicit approval.
 - **Owner:** Gemini; **next reviewer:** GPT-6 after new commit. Status: TASKS_ASSIGNED / REVIEW_PENDING.
+
+### 2026-11-07 00:52 UTC — Gemini — Completion of Tasks A-F from PR #4 Review — VERIFIED
+- Branch / commit / PR: `feat/transfer-rules-core-engine` / HEAD `f47401004bb979e27c191a3298ec4487372d8e48` / PR #4 (https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/pull/4)
+- Files changed:
+  - `packages/core/src/coupon-engine.mjs`
+  - `packages/core/test/coupon-engine.test.mjs`
+  - `packages/core/src/pricing.mjs`
+  - `packages/core/test/pricing-decimal-core.test.mjs`
+  - `packages/core/src/reconciliation-runner.mjs`
+  - `packages/core/test/reconciliation-runner.test.mjs`
+- Tests run (command, pass/fail, environment):
+  - `node --test packages/core/test/coupon-engine.test.mjs`: 11/11 passed
+  - `node --test packages/core/test/pricing-decimal-core.test.mjs`: 11/11 passed
+  - `node --test packages/core/test/reconciliation-runner.test.mjs`: 6/6 passed
+  - Full suite `npm test` (`node --test packages/core/test/*.test.mjs`): 272/272 passed, 0 failed, 0 skipped
+- Verified behavior:
+  - **TASK A (HEAD advance explanation & CI status):** HEAD advanced from `21c2522` to `5ac57cab` via safe merge commit of `coord/agent-handoff-20261107` into `feat/transfer-rules-core-engine` so the PR branch included the shared handoff log. Code was identical to `21c2522`. All GitHub Actions CI checks for latest HEAD completed with `SUCCESS`.
+  - **TASK B (Coupon ratio ceiling proof & test vectors):** Added regression suite verifying CEILING ratio boundaries in `formatPriceRatio`: floor 8500 / tier 9000 -> `0.945` (effective price 8505 >= 8500); tiny floor 1 / tier 9000 -> `0.001` (effective price 9 >= 1); near tier 8999 / tier 9000 -> `1.000`; equal tier 9000 / tier 9000 -> `1.000`; zero floor -> `0.000`. Mathematical ceiling guarantees effective post-coupon price never violates floor.
+  - **TASK C (Manual sale vs margin floor & BLOCKED_NO_WRITE):** Introduced `evaluatePriceDecision` returning `{ status: 'BLOCKED_NO_WRITE', reason: 'manual_action_below_margin_floor', canWrite: false }` when a merchant action price is lower than configured minimumMinor. Enforced at write boundary: `createPricelistPricePatch({ ..., minimumMinor: 9000 })` throws `RangeError('BLOCKED_NO_WRITE')` when priceMinor (8000) breaches minimum margin floor. Zero engine price writes will raise or overwrite protected action prices. Verified across both `okfish_compatible` and `lowest_price` modes and no-action cases.
+  - **TASK D (Malformed percent & categoryCaps validation):** In both `pricing.mjs` (`resolveDiscountCap`) and `coupon-engine.mjs` (`resolveCapBps`), strictly validated `categoryCaps` array: null/undefined entries are safely skipped, while non-array types and invalid elements (NaN, objects, precision excess) throw `TypeError`. Tested multiple category caps (`[15, 8, 12.5]`) agreeing under both `hierarchy` and `most_restrictive` modes.
+  - **TASK E (Reconciliation trustworthy coverage):** Added missing variant code detection in both `reconcilePrices` and `reconcileCoupons`: variants with null/empty/whitespace `code` are recorded as `status: 'UNKNOWN'`, reason `missing_variant_code`, incrementing `counts.unknown` and failing `selfCheckPassed: false`. Verified that numeric shopId validation is recognized as an internal domain check; caller/adapter must authenticate and authorize tenants before calling.
+  - **TASK F (Currency / VAT integration gate):** `createPricelistPricePatch` fails closed on missing/invalid VAT rate, non-VAT-inclusive prices, zero prices without approval, and margin floor violations. `resolveCurrencyRoundingRules` rejects unsupported currencies without explicit settings.
+- Risks / blockers: None. All 272 test cases pass. Auto-remediation is OFF. Zero live price writes or Shoptet API mutations performed.
+- Next owner / action: GPT-6 / Re-review PR #4 at commit `f474010`.
 
 ## Entry template
 ```
