@@ -16,14 +16,48 @@ export const REMEDIATION_STATES = Object.freeze([
   'BLOCKED'
 ]);
 
+export const VALID_DRIFT_TYPES = Object.freeze([
+  'price_drift',
+  'coupon_drift',
+  'locked_tier_violation'
+]);
+
+export const MANAGED_FIELDS = Object.freeze([
+  'price',
+  'commonPrice',
+  'discountCoupon',
+  'minPriceRatio'
+]);
+
+/**
+ * Deep freezes an object and all nested properties recursively.
+ */
+export function deepFreeze(obj) {
+  if (obj === null || typeof obj !== 'object') return obj;
+  Object.freeze(obj);
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    const val = obj[key];
+    if (val !== null && typeof val === 'object' && !Object.isFrozen(val)) {
+      deepFreeze(val);
+    }
+  }
+  return obj;
+}
+
 /**
  * Classifies whether a confirmed reconciliation drift item is eligible for AUTO, REVIEW, or BLOCK.
  * Fail-closed invariant: AUTO is strictly disabled by default (autoEnabled = false).
+ * Enforces strict allowlist and evidence validation (K1).
  */
 export function classifyRemediationEligibility({
   item,
   selfCheckPassed = false,
   autoEnabled = false,
+  verifiedTenantShopId = null,
+  managedPricelistIds = null,
+  activeInstallGeneration = null,
+  installGeneration = null,
+  approvalId = null,
   hasConcurrentWriter = false,
   isProtectedPricelist = false,
   hasManualSaleConflict = false,
@@ -32,10 +66,79 @@ export function classifyRemediationEligibility({
   circuitBreakerOpen = false
 }) {
   if (!item || typeof item !== 'object') {
-    throw new TypeError('Invalid drift item');
+    throw new TypeError('Invalid drift item: must be an object');
   }
 
-  // 1. BLOCK conditions (hard safety violations)
+  // 1. Strict Item Evidence & Allowlist Validation (K1)
+  const shopIdStr = item.shopId !== undefined && item.shopId !== null ? String(item.shopId).trim() : '';
+  if (!shopIdStr || !/^\d+$/.test(shopIdStr)) {
+    return {
+      decision: 'BLOCK',
+      reason: 'missing_or_invalid_item_shop_id',
+      canAutoRemediate: false
+    };
+  }
+
+  if (verifiedTenantShopId !== null && String(verifiedTenantShopId).trim() !== shopIdStr) {
+    return {
+      decision: 'BLOCK',
+      reason: 'tenant_shop_id_mismatch',
+      canAutoRemediate: false
+    };
+  }
+
+  if (typeof item.variantCode !== 'string' || !item.variantCode.trim()) {
+    return {
+      decision: 'BLOCK',
+      reason: 'missing_variant_code',
+      canAutoRemediate: false
+    };
+  }
+
+  if (!Number.isSafeInteger(item.pricelistId) || item.pricelistId <= 0) {
+    return {
+      decision: 'BLOCK',
+      reason: 'missing_or_invalid_pricelist_id',
+      canAutoRemediate: false
+    };
+  }
+
+  if (managedPricelistIds !== null) {
+    const idSet = managedPricelistIds instanceof Set ? managedPricelistIds : new Set(managedPricelistIds);
+    if (!idSet.has(item.pricelistId)) {
+      return {
+        decision: 'BLOCK',
+        reason: 'unmanaged_pricelist_id',
+        canAutoRemediate: false
+      };
+    }
+  }
+
+  if (!MANAGED_FIELDS.includes(item.field)) {
+    return {
+      decision: 'BLOCK',
+      reason: 'unmanaged_field',
+      canAutoRemediate: false
+    };
+  }
+
+  if (item.driftType !== undefined && !VALID_DRIFT_TYPES.includes(item.driftType)) {
+    return {
+      decision: 'BLOCK',
+      reason: 'unknown_drift_type',
+      canAutoRemediate: false
+    };
+  }
+
+  if (activeInstallGeneration !== null && installGeneration !== null && activeInstallGeneration !== installGeneration) {
+    return {
+      decision: 'BLOCK',
+      reason: 'stale_install_generation',
+      canAutoRemediate: false
+    };
+  }
+
+  // 2. BLOCK conditions (hard safety violations)
   if (!selfCheckPassed) {
     return {
       decision: 'BLOCK',
@@ -76,7 +179,7 @@ export function classifyRemediationEligibility({
     };
   }
 
-  // 2. REVIEW conditions (requires manual merchant inspection / approval)
+  // 3. REVIEW conditions (requires manual merchant inspection / approval)
   if (hasMissingCostOrVat) {
     return {
       decision: 'REVIEW',
@@ -93,7 +196,15 @@ export function classifyRemediationEligibility({
     };
   }
 
-  // 3. AUTO OFF by default (safety invariant)
+  if (!approvalId || typeof approvalId !== 'string' || !approvalId.trim()) {
+    return {
+      decision: 'REVIEW',
+      reason: 'missing_merchant_approval_token',
+      canAutoRemediate: false
+    };
+  }
+
+  // 4. AUTO OFF by default (safety invariant)
   if (!autoEnabled) {
     return {
       decision: 'REVIEW',
@@ -102,7 +213,7 @@ export function classifyRemediationEligibility({
     };
   }
 
-  // 4. AUTO eligible (strictly bounded managed tier or coupon lock repair)
+  // 5. AUTO eligible (strictly bounded managed tier or coupon lock repair)
   return {
     decision: 'AUTO',
     reason: 'eligible_for_safe_automated_remediation',
@@ -112,6 +223,7 @@ export function classifyRemediationEligibility({
 
 /**
  * State machine transition function for remediation lifecycle.
+ * Follows strict progression: DETECTED -> CONFIRMED -> PLANNED -> AUTHORIZED -> WRITING -> VERIFYING -> RESOLVED (K2).
  */
 export function transitionRemediationState(currentState, event, context = {}) {
   if (!REMEDIATION_STATES.includes(currentState)) {
@@ -123,7 +235,8 @@ export function transitionRemediationState(currentState, event, context = {}) {
     attempts = 0,
     maxRetries = 3,
     error = null,
-    verified = false
+    verified = false,
+    readbackProof = null
   } = context;
 
   // Immediate universal abort events
@@ -145,10 +258,10 @@ export function transitionRemediationState(currentState, event, context = {}) {
 
     case 'PLANNED':
       if (event === 'AUTHORIZE') {
-        if (!approvalId || typeof approvalId !== 'string') {
+        if (!approvalId || typeof approvalId !== 'string' || !approvalId.trim()) {
           return { state: 'BLOCKED', reason: 'missing_valid_merchant_approval' };
         }
-        return { state: 'AUTHORIZED', approvalId };
+        return { state: 'AUTHORIZED', approvalId: approvalId.trim() };
       }
       break;
 
@@ -164,17 +277,31 @@ export function transitionRemediationState(currentState, event, context = {}) {
           requiresReadback: true
         };
       }
-      if (event === 'VERIFY_SUCCESS') {
-        if (!verified) {
-          return { state: 'BLOCKED', reason: 'readback_verification_missing' };
-        }
-        return { state: 'RESOLVED', verified: true };
+      // Strict progression (K2): WRITING moves to VERIFYING upon write confirmation, not directly to RESOLVED!
+      if (event === 'WRITE_CONFIRMED') {
+        return { state: 'VERIFYING', writeTimestamp: context.writeTimestamp || Date.now() };
       }
-      if (event === 'VERIFY_FAIL') {
+      break;
+
+    case 'VERIFYING':
+      if (event === 'READBACK_CONFIRMED_MATCH') {
+        if (!verified || !readbackProof) {
+          return { state: 'BLOCKED', reason: 'readback_verification_proof_missing' };
+        }
+        return { state: 'RESOLVED', verified: true, readbackProof };
+      }
+      if (event === 'READBACK_MISMATCH' || event === 'VERIFY_FAIL') {
         if (attempts + 1 < maxRetries) {
-          return { state: 'RETRYABLE', attempts: attempts + 1, error };
+          return { state: 'RETRYABLE', attempts: attempts + 1, error: error || 'readback_mismatch' };
         }
         return { state: 'ESCALATED', attempts: attempts + 1, error: error || 'max_retries_exceeded' };
+      }
+      if (event === 'TIMEOUT' || event === 'NETWORK_UNCERTAIN') {
+        return {
+          state: 'UNCERTAIN',
+          reason: 'verifying_timeout_quarantine_required',
+          requiresReadback: true
+        };
       }
       break;
 
@@ -184,7 +311,12 @@ export function transitionRemediationState(currentState, event, context = {}) {
 
     case 'UNCERTAIN':
       // From UNCERTAIN, only an explicit external read-back verification can move state
-      if (event === 'READBACK_CONFIRMED_MATCH') return { state: 'RESOLVED', verified: true };
+      if (event === 'READBACK_CONFIRMED_MATCH') {
+        if (!verified || !readbackProof) {
+          return { state: 'BLOCKED', reason: 'readback_verification_proof_missing' };
+        }
+        return { state: 'RESOLVED', verified: true, readbackProof };
+      }
       if (event === 'READBACK_CONFIRMED_UNWRITTEN') return { state: 'RETRYABLE', attempts };
       if (event === 'READBACK_FAILED') return { state: 'ESCALATED', error: 'readback_failed' };
       break;
@@ -231,6 +363,7 @@ export function evaluateCircuitBreaker({
 
 /**
  * Generates an immutable audit evidence record for remediation decisions and operations.
+ * Recursively deep-freezes record and validates all required fields (K3).
  */
 export function createRemediationAuditRecord({
   auditId,
@@ -248,25 +381,57 @@ export function createRemediationAuditRecord({
   decision,
   reason
 }) {
-  if (!shopId || !variantCode || !pricelistId || !field || !state || !decision) {
-    throw new TypeError('Missing required audit evidence fields');
+  const shopIdStr = shopId !== undefined && shopId !== null ? String(shopId).trim() : '';
+  if (!shopIdStr || !/^\d+$/.test(shopIdStr)) {
+    throw new TypeError('Invalid or missing shopId: must be non-empty numeric string');
   }
 
-  return Object.freeze({
+  if (typeof variantCode !== 'string' || !variantCode.trim()) {
+    throw new TypeError('Invalid or missing variantCode: must be non-empty string');
+  }
+
+  if (!Number.isSafeInteger(pricelistId) || pricelistId <= 0) {
+    throw new TypeError('Invalid or missing pricelistId: must be positive safe integer');
+  }
+
+  if (typeof field !== 'string' || !field.trim() || !MANAGED_FIELDS.includes(field)) {
+    throw new TypeError(`Invalid field: must be one of ${MANAGED_FIELDS.join(', ')}`);
+  }
+
+  if (typeof policyVersion !== 'string' || !policyVersion.trim() || policyVersion === 'undefined' || policyVersion === 'null') {
+    throw new TypeError('Invalid policyVersion: must be a defined non-empty string');
+  }
+
+  if (!state || !REMEDIATION_STATES.includes(state)) {
+    throw new TypeError(`Invalid state: must be one of ${REMEDIATION_STATES.join(', ')}`);
+  }
+
+  if (!['AUTO', 'REVIEW', 'BLOCK'].includes(decision)) {
+    throw new TypeError("Invalid decision: must be 'AUTO', 'REVIEW', or 'BLOCK'");
+  }
+
+  if (expected === undefined || expected === null || actual === undefined || actual === null) {
+    throw new TypeError('expected and actual values must be defined');
+  }
+
+  const record = {
+    contract: 'in_memory_frozen_audit_record_requires_durable_persistence',
     auditId: auditId || `audit_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
     timestamp: new Date().toISOString(),
-    shopId: String(shopId),
-    variantCode: String(variantCode),
+    shopId: shopIdStr,
+    variantCode: variantCode.trim(),
     pricelistId: Number(pricelistId),
-    field: String(field),
+    field: field.trim(),
     expected: String(expected),
     actual: String(actual),
-    policyVersion: String(policyVersion),
-    approvalId: approvalId ? String(approvalId) : null,
+    policyVersion: policyVersion.trim(),
+    approvalId: approvalId ? String(approvalId).trim() : null,
     state: String(state),
     attempts: Number(attempts),
-    readbackProof: readbackProof ? Object.freeze({ ...readbackProof }) : null,
+    readbackProof: readbackProof ? JSON.parse(JSON.stringify(readbackProof)) : null,
     decision: String(decision),
-    reason: String(reason)
-  });
+    reason: String(reason || '')
+  };
+
+  return deepFreeze(record);
 }
