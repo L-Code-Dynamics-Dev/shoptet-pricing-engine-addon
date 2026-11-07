@@ -130,6 +130,89 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
         return { outcome: 'failed', error: 'readback_mismatch', expectedPricelistId: pricelistId, actualPricelistId: verified.priceList?.id ?? null, requiresReadback: true };
       }
       return { outcome: 'accepted', customerGuid: guid, previousPricelistId: current.priceList?.id ?? null, pricelistId, verified: true, requiresReadback: false };
+    },
+    async createPricelist({ name }) {
+      z.string().min(1).max(128).parse(name);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ action: 'createPricelist', name });
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/pricelists', {
+          method: 'POST',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { name } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { outcome: 'failed', error: response.status === 401 ? 'oauth_expired' : 'permission_missing', status: response.status };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response' }; }
+      if (!response.ok || !body?.data) {
+        return { outcome: 'failed', error: 'create_pricelist_failed', status: response.status, errors: body?.errors ?? [] };
+      }
+      return { outcome: 'accepted', pricelist: { id: body.data.id, name: body.data.name } };
+    },
+    async createCustomerGroup({ name, defaultPricelistId = null }) {
+      z.string().min(1).max(128).parse(name);
+      if (defaultPricelistId !== null && defaultPricelistId !== undefined) positiveId.parse(defaultPricelistId);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ action: 'createCustomerGroup', name, defaultPricelistId });
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/customers/groups', {
+          method: 'POST',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { name, ...(defaultPricelistId ? { defaultPricelistId } : {}) } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { outcome: 'failed', error: response.status === 401 ? 'oauth_expired' : 'permission_missing', status: response.status };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response' }; }
+      if (!response.ok || !body?.data) {
+        return { outcome: 'failed', error: 'create_customer_group_failed', status: response.status, errors: body?.errors ?? [] };
+      }
+      return { outcome: 'accepted', customerGroup: { id: body.data.id, name: body.data.name, defaultPricelistId: body.data.defaultPricelistId ?? defaultPricelistId ?? null } };
+    },
+    async updateCustomerGroup(id, { defaultPricelistId }) {
+      positiveId.parse(id);
+      positiveId.parse(defaultPricelistId);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ action: 'updateCustomerGroup', id, defaultPricelistId });
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/customers/groups/' + id, {
+          method: 'PATCH',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { defaultPricelistId } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { outcome: 'failed', error: response.status === 401 ? 'oauth_expired' : 'permission_missing', status: response.status };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response' }; }
+      if (!response.ok || !body?.data) {
+        return { outcome: 'failed', error: 'update_customer_group_failed', status: response.status, errors: body?.errors ?? [] };
+      }
+      return { outcome: 'accepted', id, defaultPricelistId };
     }
   };
   return adapter;
