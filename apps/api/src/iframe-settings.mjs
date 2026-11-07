@@ -245,7 +245,12 @@ async function sha256Hex(text) {
 }
 
 async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, defaultPricelistId, tiers, minMarginPercent }) {
-  const vatPayer = typeof profile?.vatPayer === 'boolean' ? profile.vatPayer : true;
+  const vatPayer = typeof profile?.vatPayer === 'boolean'
+    ? profile.vatPayer
+    : (profile?.priceType === 'including_vat' ? true : (profile?.priceType === 'excluding_vat' ? false : null));
+  if (typeof vatPayer !== 'boolean') {
+    throw new Error('missing_verified_vat_payer_status');
+  }
   const date = shopDate(profile?.timezone || 'Europe/Prague');
   const minMarginBps = typeof minMarginPercent === 'number' && Number.isFinite(minMarginPercent) && minMarginPercent > 0
     ? Math.round(minMarginPercent * 100)
@@ -256,6 +261,7 @@ async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, de
     const basePriceMinor = grossApiPrice(row, vatPayer);
     const actionPriceMinor = activeActionMinor(row, vatPayer, date);
     let minimumMinor = null;
+    let missingMarginCost = false;
     if (minMarginBps !== null) {
       const purchase = row.prices?.purchasePrice;
       if (purchase?.price && purchase.vatRate === row.vatRate) {
@@ -268,8 +274,11 @@ async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, de
           if (floor <= BigInt(Number.MAX_SAFE_INTEGER)) minimumMinor = Number(floor);
         }
       }
+      if (minimumMinor === null) {
+        missingMarginCost = true;
+      }
     }
-    basePriceByCode.set(row.code, { basePriceMinor, actionPriceMinor, minimumMinor });
+    basePriceByCode.set(row.code, { basePriceMinor, actionPriceMinor, minimumMinor, missingMarginCost });
   }
 
   const tierPricesByPricelist = new Map();
@@ -289,6 +298,7 @@ async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, de
   let page = 1;
   let pageCount = 1;
   let hasVerifiedPagination = true;
+  let expectedTotalCount = null;
 
   while (page <= pageCount) {
     const res = await adapter.list('products', { page, limit: 50 });
@@ -297,9 +307,17 @@ async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, de
       pageCount = 1;
     } else {
       pageCount = res.pagination.pageCount;
+      if (Number.isSafeInteger(res.pagination.totalCount) && res.pagination.totalCount >= 0) {
+        expectedTotalCount = res.pagination.totalCount;
+      }
     }
 
-    for (const item of (res?.items || [])) {
+    const pageItems = Array.isArray(res?.items) ? res.items : null;
+    if (!pageItems || pageItems.length === 0) {
+      hasVerifiedPagination = false;
+    }
+
+    for (const item of (pageItems || [])) {
       const detail = typeof adapter.product === 'function' ? await adapter.product(item.guid) : item;
       let brandId = null;
       if (detail.brand?.code && typeof adapter.brand === 'function') {
@@ -332,6 +350,7 @@ async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, de
           basePriceMinor: baseEntry?.basePriceMinor ?? null,
           actionPriceMinor: baseEntry?.actionPriceMinor ?? null,
           minimumMinor: baseEntry?.minimumMinor ?? null,
+          missingMarginCost: Boolean(baseEntry?.missingMarginCost),
           perPricelistPrices
         };
       });
@@ -348,9 +367,23 @@ async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, de
     page++;
   }
 
+  if (catalogProducts.length === 0) {
+    hasVerifiedPagination = false;
+  }
+  if (expectedTotalCount !== null && catalogProducts.length !== expectedTotalCount) {
+    hasVerifiedPagination = false;
+  }
+
   const fullCatalogVerified = hasVerifiedPagination && page > pageCount;
-  const pagination = hasVerifiedPagination ? { page: pageCount, pageCount, isComplete: true } : null;
-  const minExpectedCombinations = Math.max(1, catalogProducts.length * tiers.length);
+  const pagination = {
+    page: Math.max(1, page - 1),
+    pageCount,
+    isComplete: fullCatalogVerified
+  };
+  const minExpectedCombinations = Math.max(
+    1,
+    (expectedTotalCount !== null ? Math.max(expectedTotalCount, catalogProducts.length) : catalogProducts.length) * tiers.length
+  );
   return { catalogProducts, pagination, fullCatalogVerified, minExpectedCombinations };
 }
 
@@ -576,7 +609,9 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
         lockedTierNames,
         brandCaps,
         categoryCaps,
-        productCaps
+        productCaps,
+        scheduledPromotions: Array.isArray(rules.scheduledPromotions) ? rules.scheduledPromotions : [],
+        brandPromotions: Array.isArray(rules.brandPromotions) ? rules.brandPromotions : []
       };
 
       try {

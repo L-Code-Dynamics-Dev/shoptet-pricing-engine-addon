@@ -83,11 +83,27 @@ export async function reconcilePrices({
       continue;
     }
 
-    const brandCap = policy?.brandCaps?.find(b => b.id === product.brandId)?.percent ?? null;
-    const categoryCaps = policy?.categoryCaps?.filter(c => (product.categoryIds || []).includes(c.id)).map(c => c.percent) || [];
-    const productCap = policy?.productCaps?.find(p => p.id === product.guid)?.percent ?? null;
+    const brandCap = product.brandCap ?? policy?.brandCaps?.find(b => b.id === product.brandId)?.percent ?? null;
+    const categoryCaps = product.categoryCaps ?? (policy?.categoryCaps?.filter(c => (product.categoryIds || []).includes(c.id)).map(c => c.percent) || []);
+    const productCap = product.productCap ?? policy?.productCaps?.find(p => p.id === product.guid)?.percent ?? null;
 
-    for (const variant of (product.variants || [])) {
+    if (!Array.isArray(product.variants) || product.variants.length === 0) {
+      for (const tier of tiers) {
+        counts.total++;
+        counts.unknown++;
+        drifts.push({
+          code: `missing-variants-${product.guid}`,
+          targetPricelistId: tier.pricelistId,
+          status: 'UNKNOWN',
+          reason: 'missing_product_variants',
+          expected: null,
+          actual: null
+        });
+      }
+      continue;
+    }
+
+    for (const variant of product.variants) {
       const code = variant.code;
       if (!variant.visible && variant.visible !== undefined) {
         counts.skipped += tiers.length;
@@ -139,6 +155,22 @@ export async function reconcilePrices({
             targetPricelistId: tier.pricelistId,
             status: 'UNKNOWN',
             reason: 'missing_or_invalid_base_price',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+
+      if (variant.missingMarginCost === true) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_purchase_price_for_margin_floor',
             expected: null,
             actual: null
           });
@@ -327,12 +359,28 @@ export async function reconcileCoupons({
       continue;
     }
 
-    const productCap = product.productCap ?? null;
-    const brandCap = product.brandCap ?? null;
-    const categoryCaps = product.categoryCaps ?? [];
+    const productCap = product.productCap ?? couponConfig?.productCaps?.find(p => p.id === product.guid)?.percent ?? null;
+    const brandCap = product.brandCap ?? couponConfig?.brandCaps?.find(b => b.id === product.brandId)?.percent ?? null;
+    const categoryCaps = product.categoryCaps ?? (couponConfig?.categoryCaps?.filter(c => (product.categoryIds || []).includes(c.id)).map(c => c.percent) || []);
     const manualCouponDisabled = product.manualCouponDisabled === true;
 
-    for (const variant of (product.variants || [])) {
+    if (!Array.isArray(product.variants) || product.variants.length === 0) {
+      for (const tier of tiers) {
+        counts.total++;
+        counts.unknown++;
+        drifts.push({
+          code: `missing-variants-${product.guid}`,
+          targetPricelistId: tier.pricelistId,
+          status: 'UNKNOWN',
+          reason: 'missing_product_variants',
+          expected: null,
+          actual: null
+        });
+      }
+      continue;
+    }
+
+    for (const variant of product.variants) {
       const code = variant.code;
       if (!variant.visible && variant.visible !== undefined) {
         counts.skipped += tiers.length;
@@ -390,6 +438,36 @@ export async function reconcileCoupons({
         continue;
       }
 
+      if (variant.missingMarginCost === true) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_purchase_price_for_margin_floor',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+
+      const explicitActionMinor = variant.actionPriceMinor ?? null;
+      const scheduledActionMinor = resolveScheduledPromotionActionMinor({
+        baseMinor,
+        code,
+        brand: [product.brand, product.brandName, product.brandId],
+        productPromotions: couponConfig?.scheduledPromotions,
+        brandPromotions: couponConfig?.brandPromotions,
+        now: couponConfig?.now
+      });
+      const effectiveActionMinor = explicitActionMinor !== null && scheduledActionMinor !== null
+        ? Math.min(explicitActionMinor, scheduledActionMinor)
+        : (explicitActionMinor ?? scheduledActionMinor);
+      const hasActiveSale = effectiveActionMinor !== null && effectiveActionMinor < baseMinor;
+
       for (const tier of tiers) {
         counts.total++;
         checkedPricelists.add(tier.pricelistId);
@@ -419,11 +497,12 @@ export async function reconcileCoupons({
           isLocked,
           baseMinor,
           tierPriceMinor,
+          actionPriceMinor: effectiveActionMinor,
           productCap,
           brandCap,
           categoryCaps,
           capPriority: couponPolicy.capPriority,
-          hasActiveSale: Boolean(variant.actionPriceMinor),
+          hasActiveSale,
           manualCouponDisabled,
           minimumMinor: variant.minimumMinor ?? product.minimumMinor ?? couponPolicy.minimumMinor ?? null
         });
