@@ -557,15 +557,17 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 
 ### 2026-11-07 14:54 UTC — Gemini 4 Argon — COMPLETE PRODUCT INTEGRATION & ACCEPTANCE MATRIX VERIFIED
 - **Branch:** `feat/argon4-complete-loyalty-engine`
-- **Implementation Commits:** `caff7da`, `b40f3f5`, `2af8b28`
-- **Scope:** Full GAP analysis and end-to-end completion across `PRICE-001..012`, `COUPON-001..009`, `IFRAME-001..012`, and `SYNC-001..013`, plus security hardening of `/reconciliation/run` against caller-supplied catalog payloads and unsafe configuration defaults.
+- **Implementation Commits:** `caff7da`, `b40f3f5`, `2af8b28`, `45bf76f`, `852cf95`
+- **Scope:** Full GAP analysis and end-to-end completion across `PRICE-001..012`, `COUPON-001..009`, `IFRAME-001..012`, and `SYNC-001..013`, security hardening of `/reconciliation/run`, and wire-level release gate verification (`issuecomment-6708065401`).
 - **Changes:**
   - Wired `couponMode` (`fixed-amount` | `percent-ceiling`), `couponCeilingPercent` (`1..100%`, mandatory when `couponMode === 'percent-ceiling'`), `capPriority` (`hierarchy` | `most_restrictive`), and `minMarginPercent` (`0..99.99%`) into `validateRules`, `/state`, and Tab 2 UI (`apps/api/src/iframe-settings.mjs`).
   - Wired `scheduledPromotions` and `brandPromotions` (with `validFrom`/`validTo` date windows) into `proposalSchema` (`packages/core/src/configuration.mjs`) and `buildSyncPlan` (`packages/core/src/sync-planner.mjs`).
-  - Hardened `/reconciliation/run` (`apps/api/src/iframe-settings.mjs:247-354,463-680`):
+  - Hardened `/reconciliation/run` (`apps/api/src/iframe-settings.mjs:247-390,480-715`) and `priceRowSchema` (`packages/core/src/shoptet-adapter.mjs:243-244`):
     - Rejects any caller-supplied body keys (`catalogProducts`, `fullCatalogVerified`, `pagination`, `defaultPricelistId`) with HTTP 400 (`caller_supplied_reconciliation_data_forbidden`).
     - Loads and verifies all store products and prices on the server via `fetchVerifiedStoreCatalogForReconciliation` using the authenticated `ShoptetAdapter` (`iteratePrices`, `list('products')`, `product`, `profile`).
+    - Preserves `sales.minPriceRatio` in `priceRowSchema` and `pricePatchSchema` in `shoptet-adapter.mjs`.
+    - Fails closed (`selfCheckPassed: false`, `UNKNOWN`) on incomplete/empty product pages, `totalCount` mismatch, missing product variants (`missing_product_variants`), or missing `purchasePrice` when `minMarginPercent > 0` (`missing_purchase_price_for_margin_floor`).
     - Resolves `defaultPricelistId` strictly from authenticated server state (`pricelist_policies` or `adapter.profile()`), failing closed with HTTP 422 (`missing_default_pricelist_id`) instead of falling back to `|| 1`.
     - Removed hardcoded `ceilingPercent: 20` in `/reconciliation/run` and `normalizeCouponPolicy` (`packages/core/src/coupon-engine.mjs:123-129`); fails closed with HTTP 422 (`missing_coupon_ceiling_percent`) if `couponMode === 'percent-ceiling'` without a configured `couponCeilingPercent`.
-  - Updated `docs/requirements/ACCEPTANCE_MATRIX.md` splitting all 46 requirements (`PRICE-001..012`, `COUPON-001..009`, `IFRAME-001..012`, `SYNC-001..013`) into individual verified rows with commit SHA, exact code `path:lines`, executable test commands, and observed results.
-- **Test Evidence:** `npm test` (`node --test packages/core/test/*.test.mjs`) -> **319/319 PASS, 0 FAIL, 0 SKIPPED**.
+  - Updated `docs/requirements/ACCEPTANCE_MATRIX.md` with commit `852cf95`, test-shop ID `826800`, CI run URL, rollback steps, and observed test results.
+- **Test Evidence:** `npm test` (`node --test packages/core/test/*.test.mjs`) -> **320/320 PASS, 0 FAIL, 0 SKIPPED**.
