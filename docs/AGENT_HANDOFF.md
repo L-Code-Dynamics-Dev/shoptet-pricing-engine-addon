@@ -545,3 +545,12 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
    - Full round-trip persistence via `/admin/settings/api/rules` with optimistic version tracking.
 4. **Test Evidence (`packages/core/test/promotions.test.mjs`):**
    - 5 comprehensive test suites covering date format parsing, edge-of-day window boundaries, input sanitization, dynamic action price synthesis, and full reconciliation drift detection for active vs expired promotions. All 5/5 pass. Full suite 314/314 pass.
+
+
+### 2026-11-07 — GPT-6 — TOKEN-EFFICIENT REQUIREMENTS INDEX — DOCS CREATED
+- Owner request: store full Marketplace B2C rules in repo as targeted, versioned specs; reduce repeated agent context use.
+- Canonical requirements index: `docs/requirements/PRODUCT_SPEC.md`.
+- Domain specs: `docs/requirements/PRICING_RULES.md`, `COUPON_RULES.md`, `ONBOARDING_IFRAME.md`, `SYNC_AND_SECURITY.md`.
+- Evidence tracker: `docs/requirements/ACCEPTANCE_MATRIX.md`; all statuses initially NOT_VERIFIED. No code or tests changed, no deployment or live writes.
+- Agent protocol: read this handoff, then only the task-relevant spec(s), adjacent code/tests and current repository instructions. Report actual commit, changed paths, exact tests and open gaps. Never load all documents by default or claim completion from docs alone.
+- Branch: `coord/agent-handoff-20261107`; changes are coordination-only, not merged into implementation branch. Owners should integrate through reviewed PR before treating these paths as available on other branches.
