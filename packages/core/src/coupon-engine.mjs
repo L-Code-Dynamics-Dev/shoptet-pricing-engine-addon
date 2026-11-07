@@ -8,13 +8,13 @@
 export function parsePercentBps(val, label = 'percent') {
   if (val === null || val === undefined) return null;
   if (typeof val === 'bigint') {
-    if (val < 0n || val > 10000n) throw new TypeError(`Invalid ${label}: BigInt bps must be between 0 and 10000`);
+    if (val < 0n || val > 10000n) throw new RangeError(`Invalid ${label}: BigInt bps must be between 0 and 10000`);
     return val;
   }
   let str = null;
   if (typeof val === 'number') {
-    if (!Number.isFinite(val) || val < 0 || val > 100) {
-      throw new TypeError(`Invalid ${label}: expected finite number 0-100`);
+    if (!Number.isFinite(val) || val < 0 || val > 100 || Number(val.toFixed(2)) !== val) {
+      throw new TypeError(`Invalid ${label}: expected finite number 0-100 with at most 2 decimal places`);
     }
     str = val.toString();
   } else if (typeof val === 'string') {
@@ -27,21 +27,20 @@ export function parsePercentBps(val, label = 'percent') {
     throw new TypeError(`Invalid ${label}: must be a non-negative decimal string`);
   }
   const parts = str.split('.');
+  if (parts[1] && parts[1].length > 2) {
+    throw new TypeError(`Invalid ${label}: precision excess (at most 2 decimal places allowed)`);
+  }
   const intPart = BigInt(parts[0]);
   if (intPart > 100n || (intPart === 100n && parts[1] && /^0+$/.test(parts[1]) === false)) {
     throw new RangeError(`Invalid ${label}: out of range 0-100`);
   }
   if (intPart === 100n) return 10000n;
 
-  const decPart = (parts[1] || '').slice(0, 4);
+  const decPart = (parts[1] || '').padEnd(2, '0');
   const d0 = BigInt(decPart[0] || '0');
   const d1 = BigInt(decPart[1] || '0');
-  const d2 = BigInt(decPart[2] || '0');
 
-  let bps = intPart * 100n + d0 * 10n + d1;
-  if (d2 >= 5n) {
-    bps += 1n;
-  }
+  const bps = intPart * 100n + d0 * 10n + d1;
   if (bps > 10000n) {
     throw new RangeError(`Invalid ${label}: out of range 0-100`);
   }
@@ -50,7 +49,8 @@ export function parsePercentBps(val, label = 'percent') {
 
 /**
  * Exact 3-decimal place ratio calculation relative to stored tier price:
- * ratio = floorPrice / tierPrice (rounded half up).
+ * ratio = ceil(floorPrice / tierPrice) to 3 decimals.
+ * Uses CEILING rounding so effective post-coupon price NEVER drops below floorMinor.
  * Clamped between 0.000 and 1.000.
  */
 export function formatPriceRatio(floorMinor, tierPriceMinor) {
@@ -63,9 +63,9 @@ export function formatPriceRatio(floorMinor, tierPriceMinor) {
   if (f >= t) return '1.000';
   if (f === 0n) return '0.000';
 
-  // ROUND_HALF_UP to 3 decimal places:
-  // (f * 2000n + t) / (2n * t) gives thousandths
-  const thousandths = (f * 2000n + t) / (2n * t);
+  // CEILING to 3 decimal places to guarantee effective price >= floorMinor:
+  // thousandths = (f * 1000n + t - 1n) / t
+  const thousandths = (f * 1000n + t - 1n) / t;
   const clamped = thousandths > 1000n ? 1000n : thousandths;
 
   const intPart = clamped / 1000n;
@@ -130,6 +130,7 @@ export function normalizeCouponPolicy(config = {}) {
     lockedPricelistIds,
     lockedTierNames,
     capPriority,
+    minimumMinor: config.minimumMinor ?? null,
     defaultPricelistId: config.defaultPricelistId ?? 1
   };
 }

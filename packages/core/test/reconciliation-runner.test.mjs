@@ -71,7 +71,9 @@ test('FÁZE 3: reconcilePrices - detects MATCH, DRIFT, MISSING, SKIPPED and UNKN
   assert.equal(result.counts.missing, 1);
   assert.equal(result.counts.skipped, 2);
   assert.equal(result.counts.unknown, 2);
-  assert.equal(result.selfCheckPassed, true);
+  // Unknown or corrupt combinations MUST fail self-check even if minExpectedCombinations met
+  assert.equal(result.selfCheckPassed, false);
+  assert.match(result.selfCheckReason, /corrupt_or_duplicate_data_detected/);
 
   const driftEntry = result.drifts.find(d => d.status === 'DRIFT');
   assert.equal(driftEntry.code, 'VAR-2');
@@ -135,7 +137,7 @@ test('FÁZE 3: reconcileCoupons - audits coupon settings and catches INC-011 loc
           perPricelistPrices: {
             11: {
               priceMinor: 9000,
-              sales: { discountCoupon: true, minPriceRatio: '0.944' } // MATCH (floor 8500 / 9000 = 0.944)
+              sales: { discountCoupon: true, minPriceRatio: '0.945' } // MATCH (floor 8500 / 9000 = ceil 0.945)
             },
             26: {
               priceMinor: 8000,
@@ -229,4 +231,107 @@ test('Task 5: Reconciliation runner validation - invalid shopId, truncated pagin
   assert.ok(dupEntry);
   assert.equal(dupEntry.status, 'UNKNOWN');
   assert.equal(dupEntry.code, 'DUP-1');
+});
+
+test('P2: Self-check fails on single UNKNOWN with cardinality 1, and consistent minimumMinor resolution', async () => {
+  const shopId = 826800;
+  const tiers = [{ name: 'VIP', percent: 20, pricelistId: 2 }];
+
+  // 1. Single UNKNOWN with minimum cardinality 1 must fail self-check
+  const unknownSingle = await reconcilePrices({
+    adapter: {},
+    shopId,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-unknown-single',
+        visibility: 'normal',
+        variants: [{ code: 'U-1', visible: true, basePriceMinor: 0 }] // Corrupted base
+      }
+    ],
+    minExpectedCombinations: 1
+  });
+  assert.equal(unknownSingle.counts.unknown, 1);
+  assert.equal(unknownSingle.selfCheckPassed, false);
+  assert.match(unknownSingle.selfCheckReason, /corrupt_or_duplicate_data_detected/);
+
+  // 2. Global minimumMinor vs per-product override in price reconciliation
+  const priceRecon = await reconcilePrices({
+    adapter: {},
+    shopId,
+    tiers,
+    policy: { minimumMinor: 8000 }, // Global min 80.00
+    catalogProducts: [
+      {
+        guid: 'prod-global',
+        visibility: 'normal',
+        variants: [{
+          code: 'GLOBAL-MIN',
+          visible: true,
+          basePriceMinor: 10000,
+          perPricelistPrices: { 2: { priceMinor: 8000 } } // Tier 20% -> 8000, matches global min
+        }]
+      },
+      {
+        guid: 'prod-override',
+        visibility: 'normal',
+        minimumMinor: 8500, // Per-product override 85.00
+        variants: [{
+          code: 'OVERRIDE-MIN',
+          visible: true,
+          basePriceMinor: 10000,
+          perPricelistPrices: { 2: { priceMinor: 8500 } } // Clamped to 8500 by product override
+        }]
+      }
+    ],
+    minExpectedCombinations: 2
+  });
+  assert.equal(priceRecon.counts.match, 2);
+  assert.equal(priceRecon.selfCheckPassed, true);
+
+  // 3. Global minimumMinor vs per-product override in coupon reconciliation
+  const couponRecon = await reconcileCoupons({
+    adapter: {},
+    shopId,
+    tiers,
+    couponConfig: { mode: 'percent-ceiling', ceilingPercent: 30, minimumMinor: 8000 },
+    catalogProducts: [
+      {
+        guid: 'prod-coupon-global',
+        visibility: 'normal',
+        variants: [{
+          code: 'COUPON-GLOBAL',
+          visible: true,
+          basePriceMinor: 10000,
+          perPricelistPrices: {
+            2: {
+              priceMinor: 8000,
+              // Floor is 8000, tier is 8000 -> ratio 1.000 or disabled if exhausted
+              sales: { discountCoupon: false, minPriceRatio: null }
+            }
+          }
+        }]
+      },
+      {
+        guid: 'prod-coupon-override',
+        visibility: 'normal',
+        minimumMinor: 8500, // Product override
+        variants: [{
+          code: 'COUPON-OVERRIDE',
+          visible: true,
+          basePriceMinor: 10000,
+          perPricelistPrices: {
+            2: {
+              priceMinor: 9000,
+              // Floor is 8500, tier is 9000 -> ceil(8500/9000) = 0.945
+              sales: { discountCoupon: true, minPriceRatio: '0.945' }
+            }
+          }
+        }]
+      }
+    ],
+    minExpectedCombinations: 2
+  });
+  assert.equal(couponRecon.counts.match, 2);
+  assert.equal(couponRecon.selfCheckPassed, true);
 });

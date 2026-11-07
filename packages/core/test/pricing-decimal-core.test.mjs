@@ -85,7 +85,7 @@ test('FÁZE 1: Strop precedence - product -> brand -> category (hierarchy)', () 
   assert.equal(mostRestrictive, 5);
 });
 
-test('FÁZE 1: Action price is never raised by cap (INC-004)', () => {
+test('FÁZE 1: Action price is never raised by cap or minimum guardrail (INC-004 & GPT-6 P1 Blocker)', () => {
   // Base 10000, Action 8000 (20% off), Product Cap 10% (floor 9000), Tier 25%
   const res = calculateTierPrice({
     baseMinor: 10000,
@@ -96,6 +96,27 @@ test('FÁZE 1: Action price is never raised by cap (INC-004)', () => {
   });
   // Must NOT be raised to 9000
   assert.equal(res, 8000);
+
+  // P1 BLOCKER REPRODUCER:
+  // When minimumMinor = 9000, manual action price 8000 must NOT be raised to 9000!
+  const resWithMin = calculateTierPrice({
+    baseMinor: 10000,
+    actionMinor: 8000,
+    tierPercent: 25,
+    capPercent: 10,
+    salePolicy: 'okfish_compatible',
+    minimumMinor: 9000
+  });
+  assert.equal(resWithMin, 8000);
+
+  // If loyalty is chosen (e.g. action price 9500 > loyalty 7500), minimumMinor protects the margin:
+  const resLoyaltyMin = calculateTierPrice({
+    baseMinor: 10000,
+    actionMinor: 9500,
+    tierPercent: 25,
+    minimumMinor: 9000
+  });
+  assert.equal(resLoyaltyMin, 9000);
 });
 
 test('FÁZE 1: Zero-discount product cap blocks loyalty without error', () => {
@@ -183,4 +204,34 @@ test('Task 4: resolveCurrencyRoundingRules strict validation of options and curr
   assert.throws(() => resolveCurrencyRoundingRules('CZK', { incrementMinor: -10 }), /Invalid incrementMinor/);
   assert.throws(() => resolveCurrencyRoundingRules('CZK', { incrementMinor: 1.5 }), /Invalid incrementMinor/);
   assert.throws(() => resolveCurrencyRoundingRules('CZK', { incrementMinor: '100' }), /Invalid incrementMinor/);
+});
+
+test('P2: calculateTierPrice exact percent parsing and categoryCaps support', () => {
+  // Fractional percent as number and string without float errors
+  const priceFrac = calculateTierPrice({
+    baseMinor: 10000,
+    tierPercent: 12.5 // 12.5% off -> 8750
+  });
+  assert.equal(priceFrac, 8750);
+
+  const priceStr = calculateTierPrice({
+    baseMinor: 10000,
+    tierPercent: '12.5'
+  });
+  assert.equal(priceStr, 8750);
+
+  // Invalid percents throw
+  assert.throws(() => calculateTierPrice({ baseMinor: 10000, tierPercent: NaN }), /Invalid tierPercent/);
+  assert.throws(() => calculateTierPrice({ baseMinor: 10000, tierPercent: -5 }), /Invalid tierPercent/);
+  assert.throws(() => calculateTierPrice({ baseMinor: 10000, tierPercent: 105 }), /Invalid tierPercent/);
+
+  // categoryCaps array support
+  const catCapResult = calculateTierPrice({
+    baseMinor: 10000,
+    tierPercent: 20,
+    categoryCaps: [15, 8, 12], // min is 8%
+    capPriority: 'most_restrictive'
+  });
+  // Cap = 8% -> price = 9200
+  assert.equal(catCapResult, 9200);
 });

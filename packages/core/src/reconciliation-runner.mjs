@@ -10,15 +10,22 @@ import { evaluateCouponSettings, normalizeCouponPolicy } from './coupon-engine.m
 
 /**
  * Validates self-check coverage against minimum expected cardinality.
+ * Fails closed if unknown/duplicate data is encountered or valid coverage is insufficient.
  */
-function evaluateSelfCheck({ totalChecked, minExpectedCombinations }) {
-  if (minExpectedCombinations > 0 && totalChecked < minExpectedCombinations) {
+function evaluateSelfCheck({ totalChecked, validlyEvaluated, unknownCount = 0, minExpectedCombinations }) {
+  if (unknownCount > 0) {
     return {
       passed: false,
-      reason: `insufficient_coverage: checked ${totalChecked} combinations, expected minimum ${minExpectedCombinations}`
+      reason: `corrupt_or_duplicate_data_detected: ${unknownCount} unknown combinations encountered`
     };
   }
-  if (totalChecked === 0 && minExpectedCombinations > 0) {
+  if (minExpectedCombinations > 0 && validlyEvaluated < minExpectedCombinations) {
+    return {
+      passed: false,
+      reason: `insufficient_coverage: evaluated ${validlyEvaluated} valid combinations, expected minimum ${minExpectedCombinations}`
+    };
+  }
+  if (validlyEvaluated === 0 && minExpectedCombinations > 0) {
     return {
       passed: false,
       reason: 'zero_items_checked_when_cardinality_required'
@@ -131,7 +138,7 @@ export async function reconcilePrices({
           categoryCap: categoryCaps.length ? Math.min(...categoryCaps) : null,
           capPriority: policy?.capPriority ?? 'most_restrictive',
           salePolicy: policy?.salePolicy ?? 'okfish_compatible',
-          minimumMinor: policy?.minimumMinor ?? null
+          minimumMinor: variant.minimumMinor ?? product.minimumMinor ?? policy?.minimumMinor ?? null
         });
 
         // Actual price in target pricelist
@@ -172,6 +179,8 @@ export async function reconcilePrices({
 
   let selfCheck = evaluateSelfCheck({
     totalChecked: counts.total,
+    validlyEvaluated: counts.match + counts.drift + counts.missing,
+    unknownCount: counts.unknown,
     minExpectedCombinations
   });
 
@@ -194,6 +203,7 @@ export async function reconcilePrices({
       productsChecked: checkedProducts.size,
       pricelistsChecked: checkedPricelists.size,
       combinationsChecked: counts.total,
+      combinationsValid: counts.match + counts.drift + counts.missing,
       minExpected: minExpectedCombinations
     },
     remediationMode: 'OFF',
@@ -325,7 +335,7 @@ export async function reconcileCoupons({
           capPriority: couponPolicy.capPriority,
           hasActiveSale: Boolean(variant.actionPriceMinor),
           manualCouponDisabled,
-          minimumMinor: product.minimumMinor ?? null
+          minimumMinor: variant.minimumMinor ?? product.minimumMinor ?? couponPolicy.minimumMinor ?? null
         });
 
         const actualCoupon = actualEntry.sales?.discountCoupon ?? true;
@@ -364,6 +374,8 @@ export async function reconcileCoupons({
 
   let selfCheck = evaluateSelfCheck({
     totalChecked: counts.total,
+    validlyEvaluated: counts.match + counts.drift + counts.missing,
+    unknownCount: counts.unknown,
     minExpectedCombinations
   });
 
@@ -386,6 +398,7 @@ export async function reconcileCoupons({
       productsChecked: checkedProducts.size,
       pricelistsChecked: checkedPricelists.size,
       combinationsChecked: counts.total,
+      combinationsValid: counts.match + counts.drift + counts.missing,
       minExpected: minExpectedCombinations
     },
     remediationMode: 'OFF',

@@ -1,10 +1,8 @@
 // Pure pricing primitives. Monetary inputs are integer minor units (cents/halere).
 // Aligned with OKfish decision logic supporting both okfish_compatible and lowest_price modes.
-const percentBps = (value, label) => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100 ||
-      Number(value.toFixed(2)) !== value) throw new TypeError('Invalid ' + label);
-  return BigInt(value.toFixed(2).replace('.', ''));
-};
+import { parsePercentBps } from './coupon-engine.mjs';
+
+const percentBps = (value, label) => parsePercentBps(value, label);
 const checkedMinor = (value, label) => {
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError('Invalid ' + label);
   return BigInt(value);
@@ -63,15 +61,19 @@ export function resolveCurrencyRoundingRules(currencyCode, options = {}) {
   return { currencyCode, decimals, rounding, incrementMinor };
 }
 
-export function resolveDiscountCap({ productCap = null, brandCap = null, categoryCap = null, priority = 'most_restrictive' }) {
-  for (const [key, value] of Object.entries({ productCap, brandCap, categoryCap })) {
+export function resolveDiscountCap({ productCap = null, brandCap = null, categoryCap = null, categoryCaps = [], priority = 'most_restrictive' }) {
+  let resolvedCategoryCap = categoryCap;
+  if ((resolvedCategoryCap === null || resolvedCategoryCap === undefined) && Array.isArray(categoryCaps) && categoryCaps.length > 0) {
+    resolvedCategoryCap = Math.min(...categoryCaps);
+  }
+  for (const [key, value] of Object.entries({ productCap, brandCap, categoryCap: resolvedCategoryCap })) {
     if (value !== null && value !== undefined && (!Number.isFinite(value) || value < 0 || value > 100)) {
       throw new TypeError(`Invalid ${key}`);
     }
   }
   const normProduct = (productCap !== undefined && productCap !== null) ? productCap : null;
   const normBrand = (brandCap !== undefined && brandCap !== null) ? brandCap : null;
-  const normCategory = (categoryCap !== undefined && categoryCap !== null) ? categoryCap : null;
+  const normCategory = (resolvedCategoryCap !== undefined && resolvedCategoryCap !== null) ? resolvedCategoryCap : null;
 
   if (priority === 'hierarchy') {
     if (normProduct !== null) return normProduct;
@@ -92,6 +94,7 @@ export function calculateTierPrice({
   productCap = null,
   brandCap = null,
   categoryCap = null,
+  categoryCaps = [],
   capPriority = 'most_restrictive',
   salePolicy = 'okfish_compatible',
   allowLoyaltyDiscount = true,
@@ -105,8 +108,8 @@ export function calculateTierPrice({
   const tier = percentBps(tierPercent, 'tierPercent');
 
   let resolvedCap = capPercent;
-  if (resolvedCap === null && (productCap !== null || brandCap !== null || categoryCap !== null)) {
-    resolvedCap = resolveDiscountCap({ productCap, brandCap, categoryCap, priority: capPriority });
+  if (resolvedCap === null && (productCap !== null || brandCap !== null || categoryCap !== null || (Array.isArray(categoryCaps) && categoryCaps.length > 0))) {
+    resolvedCap = resolveDiscountCap({ productCap, brandCap, categoryCap, categoryCaps, priority: capPriority });
   }
   const cap = resolvedCap === null ? null : percentBps(resolvedCap, 'capPercent');
 
@@ -132,6 +135,14 @@ export function calculateTierPrice({
   if (loyalty > base) loyalty = base;
 
   const validAction = action !== null && action < base ? action : null;
+
+  // Protect loyalty discounting against going below minimum margin floor.
+  // Manual merchant action price (validAction) is NEVER raised by minimumMinor.
+  if (minimumMinor !== null) {
+    const minFloor = checkedMinor(minimumMinor, 'minimumMinor');
+    if (loyalty < minFloor) loyalty = minFloor;
+  }
+
   let chosen = loyalty;
 
   if (salePolicy === 'okfish_compatible') {
@@ -142,11 +153,6 @@ export function calculateTierPrice({
     }
   } else {
     chosen = (validAction !== null && validAction < loyalty) ? validAction : loyalty;
-  }
-
-  if (minimumMinor !== null) {
-    const minFloor = checkedMinor(minimumMinor, 'minimumMinor');
-    if (chosen < minFloor) chosen = minFloor;
   }
 
   return safeResult(chosen);

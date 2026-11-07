@@ -13,8 +13,8 @@ test('FÁZE 2: formatPriceRatio - exact 3-decimal places relative to tier price'
   // Base 100 EUR, Tier 90 EUR, Floor 80 EUR -> 80/90 = 0.88888... -> 0.889
   assert.equal(formatPriceRatio(8000, 9000), '0.889');
 
-  // Base 100 EUR, Tier 95 EUR, Floor 80 EUR -> 80/95 = 0.84210... -> 0.842
-  assert.equal(formatPriceRatio(8000, 9500), '0.842');
+  // Base 100 EUR, Tier 95 EUR, Floor 80 EUR -> 80/95 = 0.84210... -> 0.843 (CEILING)
+  assert.equal(formatPriceRatio(8000, 9500), '0.843');
 
   // Floor >= Tier -> 1.000 (no room for discount)
   assert.equal(formatPriceRatio(9000, 9000), '1.000');
@@ -71,7 +71,7 @@ test('FÁZE 2: percent-ceiling mode rules and ratio relative to tier price', () 
 
   // Product with product cap 15% on ZR10 (9000 minor)
   // Effective ceiling = min(20%, 15%) = 15%: floor = 85.00 EUR (8500 minor)
-  // Ratio = 8500 / 9000 = 0.9444... -> 0.944
+  // Ratio = ceil(8500 / 9000) = 0.945 (never breaches floor 8500)
   const capped = evaluateCouponSettings({
     mode: 'percent-ceiling',
     ceilingPercent: 20,
@@ -80,7 +80,7 @@ test('FÁZE 2: percent-ceiling mode rules and ratio relative to tier price', () 
     tierPriceMinor: 9000
   });
   assert.equal(capped.applyDiscountCoupon, true);
-  assert.equal(capped.minPriceRatio, '0.944');
+  assert.equal(capped.minPriceRatio, '0.945');
 });
 
 test('FÁZE 2: fixed-amount mode - essential distinctions (TRANSFER_RULES.md)', () => {
@@ -129,7 +129,7 @@ test('FÁZE 2: fixed-amount mode - essential distinctions (TRANSFER_RULES.md)', 
   assert.equal(saleItem.reason, 'sale_action_floor');
 
   // 5. Capped product (cap 15%, base 100 EUR, tier 90 EUR)
-  // Floor = 85.00 EUR -> ratio 8500 / 9000 = 0.944
+  // Floor = 85.00 EUR -> ratio ceil(8500 / 9000) = 0.945
   const capped = evaluateCouponSettings({
     mode: 'fixed-amount',
     productCap: 15,
@@ -137,7 +137,7 @@ test('FÁZE 2: fixed-amount mode - essential distinctions (TRANSFER_RULES.md)', 
     tierPriceMinor: 9000
   });
   assert.equal(capped.applyDiscountCoupon, true);
-  assert.equal(capped.minPriceRatio, '0.944');
+  assert.equal(capped.minPriceRatio, '0.945');
   assert.equal(capped.reason, 'cap_constrained');
 
   // 6. Unrestricted product -> coupon ON, no ratio floor
@@ -206,8 +206,12 @@ test('Task 1: parsePercentBps handles integers, decimals, strings and invalid in
   assert.equal(parsePercentBps(10), 1000n);
   assert.equal(parsePercentBps(12.5), 1250n);
   assert.equal(parsePercentBps('12.5'), 1250n);
-  assert.equal(parsePercentBps('12.345'), 1235n); // rounded half-up to bps
+  assert.equal(parsePercentBps('12.35'), 1235n);
   assert.equal(parsePercentBps(100), 10000n);
+
+  // Precision excess (>2 decimal places) throws
+  assert.throws(() => parsePercentBps(12.345), /Invalid percent/);
+  assert.throws(() => parsePercentBps('12.345'), /Invalid percent/);
 
   // Invalid inputs throw range or type errors
   assert.throws(() => parsePercentBps(NaN), /Invalid percent/);
@@ -231,9 +235,9 @@ test('Task 2: resolveCapBps and evaluateCouponSettings cap precedence (hierarchy
     tierPriceMinor: 9500
   });
   // Effective cap: min(20%, 12%) = 12% -> floor = 8800
-  // Ratio: 8800 / 9500 = 0.9263... -> 0.926
+  // Ratio: ceil(8800 / 9500) = 0.927
   assert.equal(hierarchyResult.applyDiscountCoupon, true);
-  assert.equal(hierarchyResult.minPriceRatio, '0.926');
+  assert.equal(hierarchyResult.minPriceRatio, '0.927');
 
   // In most_restrictive mode: min(12%, 8%, 5%) = 5% wins
   const mostRestrictiveResult = evaluateCouponSettings({
@@ -262,9 +266,13 @@ test('Task 3: minimumMinor margin floor protects against coupon discount breache
     baseMinor: 10000,
     tierPriceMinor: 9000
   });
-  // Floor is raised to 8500. Ratio: 8500 / 9000 = 0.944
+  // Floor is raised to 8500. Ratio: ceil(8500 / 9000) = 0.945 (never breaches floor 8500)
   assert.equal(protectedFloor.applyDiscountCoupon, true);
-  assert.equal(protectedFloor.minPriceRatio, '0.944');
+  assert.equal(protectedFloor.minPriceRatio, '0.945');
+
+  // P1 BLOCKER REGRESSION: formatPriceRatio(8500, 9000) must equal '0.945'
+  // Effective post-coupon price: 9000 * 0.945 = 8505 >= 8500
+  assert.equal(formatPriceRatio(8500, 9000), '0.945');
 
   // If tier price is already at or below minimumMinor, coupons MUST be disabled entirely
   const exhaustedMinimum = evaluateCouponSettings({
