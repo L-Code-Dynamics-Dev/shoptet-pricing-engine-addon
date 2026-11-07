@@ -18,6 +18,7 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 | Price and coupon reconciliation (read-only, coverage self-check) | Gemini | VERIFIED | Commit `f3ec446`, 3/3 targeted tests pass (`packages/core/test/reconciliation-runner.test.mjs`) |
 | Independent review | GPT-6 | REVIEW_IN_PROGRESS | Review findings issued (Tasks 1-5) |
 | Review tasks 1-5 addressed | Gemini | VERIFIED | Commit `d4f959c`, 265/265 tests pass, PR #4 updated |
+| P1 & P2 issues addressed | Gemini | VERIFIED | Commit `21c2522`, 267/267 tests pass, PR #4 updated |
 
 ## Checkpoints
 ### 2026-11-07 — GPT-6 — initial coordination
@@ -98,6 +99,29 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - **P2 — authorization is not proven by a numeric shopId.** Reconciliation functions accept any positive numeric shopId (`reconciliation-runner.mjs:43-46,217-220`) and injected data; this is fine for a pure internal function but caller/adapter must authenticate and bind shop and install generation before using it. Do not claim multi-tenant isolation from this validation alone; add integration acceptance criterion.
 - **Gemini next actions:** (1) add failing focused tests for the two P1 issues, patch with no unsafe price increases, (2) make self-check fail on unknown/incomplete data, (3) unify exact percent parsing + floor/configuration in both engines, (4) run targeted tests and `npm test`, record exact count/commit and update both shared branches safely. Do NOT merge PR #4 until P1 issues resolved, approved and independently re-reviewed. No production writes/deploy.
 - **Owner:** Gemini implementation; GPT-6 reviews follow-up commit and records verdict.
+
+### 2026-11-07 00:45 UTC — Gemini — Resolution of P1 Blockers and P2 Review Issues — VERIFIED
+- Branch / commit / PR: `feat/transfer-rules-core-engine` / HEAD `21c25220c43da52d1b790d9fdb16805d23348821` / PR #4 (https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/pull/4)
+- Files changed:
+  - `packages/core/src/coupon-engine.mjs`
+  - `packages/core/test/coupon-engine.test.mjs`
+  - `packages/core/src/pricing.mjs`
+  - `packages/core/test/pricing-decimal-core.test.mjs`
+  - `packages/core/src/reconciliation-runner.mjs`
+  - `packages/core/test/reconciliation-runner.test.mjs`
+- Tests run (command, pass/fail, environment):
+  - `node --test packages/core/test/coupon-engine.test.mjs`: 9/9 passed
+  - `node --test packages/core/test/pricing-decimal-core.test.mjs`: 9/9 passed
+  - `node --test packages/core/test/reconciliation-runner.test.mjs`: 5/5 passed
+  - Full suite `npm test` (`node --test packages/core/test/*.test.mjs`): 267/267 passed, 0 failed, 0 skipped
+- Verified behavior:
+  - **P1 Blocker 1 (Coupon ratio rounding floor breach):** Updated `formatPriceRatio` to use CEILING rounding to 3 decimal places (`(f * 1000n + t - 1n) / t`). Guarantees that effective post-coupon price $t \times r$ is mathematically $\ge f$ and never breaches `floorMinor`. Added regression test confirming `formatPriceRatio(8500, 9000) === '0.945'` ($9000 \times 0.945 = 8505 \ge 8500$, whereas 0.944 allowed 8496).
+  - **P1 Blocker 2 (Manual action price protection from minimum guardrail):** In `calculateTierPrice`, clamping to `minimumMinor` is applied strictly to calculated `loyalty` discount price. When a valid manual merchant action price (`validAction`) is present and selected (e.g. 8000), it is NEVER raised to `minimumMinor` (e.g. 9000). Reproducer test verified: `calculateTierPrice({baseMinor:10000, actionMinor:8000, tierPercent:25, capPercent:10, salePolicy:'okfish_compatible', minimumMinor:9000}) === 8000`.
+  - **P2 Item 1 (Reconciliation runner self-check on corrupt/duplicate data):** `evaluateSelfCheck` now fails closed (`selfCheckPassed: false`, reason `corrupt_or_duplicate_data_detected`) whenever `counts.unknown > 0`, even when minimum cardinality is met. Added regression test verifying 1 UNKNOWN combination with cardinality 1 causes `selfCheckPassed: false`. Added `combinationsValid` to `cardinality` report.
+  - **P2 Item 2 (Exact percentage parsing in pricing.mjs):** Replaced `percentBps` in `pricing.mjs` with exact `parsePercentBps` imported from `coupon-engine.mjs`. Enforces precision excess checks (at most 2 decimal places for percentages, rejecting e.g. 12.345 or '12.345') while safely handling exact fractional numbers/strings (12.5, '12.5') and safe integer basis points without floating-point drift.
+  - **P2 Item 3 (Category caps array & minimumMinor cross-module alignment):** `resolveDiscountCap` and `calculateTierPrice` now accept `categoryCaps` array. Both `reconcilePrices` and `reconcileCoupons` resolve `minimumMinor` consistently via `variant.minimumMinor ?? product.minimumMinor ?? policy?.minimumMinor ?? null`. Tested global vs per-product override consistency in both audits.
+- Risks / blockers: None. All 267 test cases pass. Auto-remediation is OFF. Zero live price writes or Shoptet API mutations performed.
+- Next owner / action: GPT-6 / Re-review PR #4 at commit `21c2522`.
 
 ## Entry template
 ```
