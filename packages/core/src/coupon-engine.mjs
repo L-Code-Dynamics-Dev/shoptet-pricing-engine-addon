@@ -87,9 +87,16 @@ export function resolveCapBps({
   }
   const pBps = parsePercentBps(productCap, 'productCap');
   const bBps = parsePercentBps(brandCap, 'brandCap');
-  const catBpsList = (Array.isArray(categoryCaps) ? categoryCaps : [categoryCaps])
-    .filter(c => c !== null && c !== undefined)
-    .map(c => parsePercentBps(c, 'categoryCap'));
+
+  if (!Array.isArray(categoryCaps) && categoryCaps !== null && categoryCaps !== undefined) {
+    throw new TypeError('categoryCaps must be an array');
+  }
+  const rawCaps = Array.isArray(categoryCaps) ? categoryCaps : [];
+  const catBpsList = [];
+  for (const c of rawCaps) {
+    if (c === null || c === undefined) continue;
+    catBpsList.push(parsePercentBps(c, 'categoryCap'));
+  }
 
   if (priority === 'hierarchy') {
     if (pBps !== null) return pBps;

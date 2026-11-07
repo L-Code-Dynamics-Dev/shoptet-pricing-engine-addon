@@ -62,18 +62,25 @@ export function resolveCurrencyRoundingRules(currencyCode, options = {}) {
 }
 
 export function resolveDiscountCap({ productCap = null, brandCap = null, categoryCap = null, categoryCaps = [], priority = 'most_restrictive' }) {
-  let resolvedCategoryCap = categoryCap;
-  if ((resolvedCategoryCap === null || resolvedCategoryCap === undefined) && Array.isArray(categoryCaps) && categoryCaps.length > 0) {
-    resolvedCategoryCap = Math.min(...categoryCaps);
+  if (!Array.isArray(categoryCaps) && categoryCaps !== null && categoryCaps !== undefined) {
+    throw new TypeError('categoryCaps must be an array');
   }
-  for (const [key, value] of Object.entries({ productCap, brandCap, categoryCap: resolvedCategoryCap })) {
-    if (value !== null && value !== undefined && (!Number.isFinite(value) || value < 0 || value > 100)) {
-      throw new TypeError(`Invalid ${key}`);
-    }
+  const cleanCatPercents = [];
+  const rawCaps = Array.isArray(categoryCaps) ? categoryCaps : [];
+  for (const c of rawCaps) {
+    if (c === null || c === undefined) continue;
+    const bps = percentBps(c, 'categoryCap');
+    cleanCatPercents.push(Number(bps) / 100);
   }
-  const normProduct = (productCap !== undefined && productCap !== null) ? productCap : null;
-  const normBrand = (brandCap !== undefined && brandCap !== null) ? brandCap : null;
-  const normCategory = (resolvedCategoryCap !== undefined && resolvedCategoryCap !== null) ? resolvedCategoryCap : null;
+
+  let resolvedCategoryCap = categoryCap !== null && categoryCap !== undefined ? Number(percentBps(categoryCap, 'categoryCap')) / 100 : null;
+  if (resolvedCategoryCap === null && cleanCatPercents.length > 0) {
+    resolvedCategoryCap = cleanCatPercents.reduce((min, cur) => cur < min ? cur : min, cleanCatPercents[0]);
+  }
+
+  const normProduct = productCap !== null && productCap !== undefined ? Number(percentBps(productCap, 'productCap')) / 100 : null;
+  const normBrand = brandCap !== null && brandCap !== undefined ? Number(percentBps(brandCap, 'brandCap')) / 100 : null;
+  const normCategory = resolvedCategoryCap;
 
   if (priority === 'hierarchy') {
     if (normProduct !== null) return normProduct;
@@ -158,12 +165,48 @@ export function calculateTierPrice({
   return safeResult(chosen);
 }
 
-export function createPricelistPricePatch({ code, priceMinor, vatRate, includingVat = true, allowZeroPrice = false }) {
+export function evaluatePriceDecision(options = {}) {
+  const { minimumMinor = null } = options;
+  const priceMinor = calculateTierPrice(options);
+  if (minimumMinor !== null && priceMinor < minimumMinor) {
+    return {
+      status: 'BLOCKED_NO_WRITE',
+      reason: 'manual_action_below_margin_floor',
+      priceMinor,
+      minimumMinor,
+      canWrite: false
+    };
+  }
+  return {
+    status: 'CAN_WRITE',
+    reason: 'authorized',
+    priceMinor,
+    minimumMinor,
+    canWrite: true
+  };
+}
+
+export function createPricelistPricePatch({
+  code,
+  priceMinor,
+  vatRate,
+  minimumMinor = null,
+  includingVat = true,
+  allowZeroPrice = false
+}) {
   if (typeof code !== 'string' || !code.trim()) throw new TypeError('Missing product code');
   if (!Number.isSafeInteger(priceMinor) || priceMinor < 0) throw new TypeError('Invalid price');
   if (priceMinor === 0 && !allowZeroPrice) throw new TypeError('Zero price requires explicit approval');
   if (typeof vatRate !== 'string' || !/^\d{1,2}\.\d{2}$/.test(vatRate)) throw new TypeError('Explicit VAT rate required');
   if (includingVat !== true) throw new TypeError('VAT-inclusive price required');
+
+  if (minimumMinor !== null) {
+    if (!Number.isSafeInteger(minimumMinor) || minimumMinor < 0) throw new TypeError('Invalid minimumMinor');
+    if (priceMinor < minimumMinor) {
+      throw new RangeError(`BLOCKED_NO_WRITE: priceMinor ${priceMinor} breaches minimumMinor ${minimumMinor}`);
+    }
+  }
+
   const minor = BigInt(priceMinor);
   return { code, price: (minor / 100n).toString() + '.' + (minor % 100n).toString().padStart(2, '0'), includingVat: true, vatRate };
 }

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   calculateTierPrice,
+  evaluatePriceDecision,
   resolveDiscountCap,
   createPricelistPricePatch,
   resolveCurrencyRoundingRules
@@ -234,4 +235,60 @@ test('P2: calculateTierPrice exact percent parsing and categoryCaps support', ()
   });
   // Cap = 8% -> price = 9200
   assert.equal(catCapResult, 9200);
+});
+
+test('TASK C: evaluatePriceDecision and createPricelistPricePatch protect margin floor with explicit BLOCKED_NO_WRITE', () => {
+  // Case 1: Manual merchant action price (8000) is below configured margin floor (9000).
+  // calculateTierPrice preserves 8000 (never raises to 9000), but decision blocks write!
+  const decisionOkfish = evaluatePriceDecision({
+    baseMinor: 10000,
+    actionMinor: 8000,
+    tierPercent: 25,
+    minimumMinor: 9000,
+    salePolicy: 'okfish_compatible'
+  });
+  assert.equal(decisionOkfish.priceMinor, 8000);
+  assert.equal(decisionOkfish.status, 'BLOCKED_NO_WRITE');
+  assert.equal(decisionOkfish.canWrite, false);
+
+  const decisionLowest = evaluatePriceDecision({
+    baseMinor: 10000,
+    actionMinor: 8000,
+    tierPercent: 25,
+    minimumMinor: 9000,
+    salePolicy: 'lowest_price'
+  });
+  assert.equal(decisionLowest.priceMinor, 8000);
+  assert.equal(decisionLowest.status, 'BLOCKED_NO_WRITE');
+  assert.equal(decisionLowest.canWrite, false);
+
+  // Case 2: No action price - loyalty discount clamped to minimumMinor 9000 -> CAN_WRITE
+  const decisionNoAction = evaluatePriceDecision({
+    baseMinor: 10000,
+    actionMinor: null,
+    tierPercent: 25,
+    minimumMinor: 9000
+  });
+  assert.equal(decisionNoAction.priceMinor, 9000);
+  assert.equal(decisionNoAction.status, 'CAN_WRITE');
+  assert.equal(decisionNoAction.canWrite, true);
+
+  // Case 3: createPricelistPricePatch enforces minimumMinor at the write boundary
+  assert.throws(
+    () => createPricelistPricePatch({ code: 'SKU-CONFLICT', priceMinor: 8000, vatRate: '21.00', minimumMinor: 9000 }),
+    /BLOCKED_NO_WRITE/
+  );
+  // Compliant price succeeds
+  const validPatch = createPricelistPricePatch({ code: 'SKU-OK', priceMinor: 9000, vatRate: '21.00', minimumMinor: 9000 });
+  assert.equal(validPatch.price, '90.00');
+});
+
+test('TASK D: resolveDiscountCap categoryCaps array validation', () => {
+  assert.throws(() => resolveDiscountCap({ categoryCaps: 'invalid' }), /categoryCaps must be an array/);
+  assert.throws(() => resolveDiscountCap({ categoryCaps: [NaN] }), /Invalid categoryCap/);
+  assert.throws(() => resolveDiscountCap({ categoryCaps: [{}] }), /Invalid categoryCap/);
+
+  // Safe with null/undefined entries
+  const cap = resolveDiscountCap({ categoryCaps: [15, null, 10], priority: 'most_restrictive' });
+  assert.equal(cap, 10);
 });

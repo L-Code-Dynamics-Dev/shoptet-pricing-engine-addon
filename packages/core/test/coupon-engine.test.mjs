@@ -286,3 +286,31 @@ test('Task 3: minimumMinor margin floor protects against coupon discount breache
   assert.equal(exhaustedMinimum.minPriceRatio, null);
   assert.equal(exhaustedMinimum.reason, 'minimum_floor_exhausted');
 });
+
+test('TASK B: formatPriceRatio boundary test vectors and ceiling proof', () => {
+  // floor 8500, tier 9000 -> 0.945
+  assert.equal(formatPriceRatio(8500, 9000), '0.945');
+  // tiny positive floor (1 cent) on tier 9000 -> 0.001
+  assert.equal(formatPriceRatio(1, 9000), '0.001');
+  // floor near tier (8999 vs 9000) -> 1.000
+  assert.equal(formatPriceRatio(8999, 9000), '1.000');
+  // floor equal tier -> 1.000
+  assert.equal(formatPriceRatio(9000, 9000), '1.000');
+  // zero floor -> 0.000
+  assert.equal(formatPriceRatio(0, 9000), '0.000');
+});
+
+test('TASK D: resolveCapBps categoryCaps array validation and multiple categories', () => {
+  // Valid multiple categoryCaps
+  const cap = resolveCapBps({ categoryCaps: [15, 8, '12.5'], priority: 'most_restrictive' });
+  assert.equal(cap, 800n);
+
+  // Hierarchy mode with categoryCaps fallback
+  const hier = resolveCapBps({ productCap: null, brandCap: null, categoryCaps: [10, 5], priority: 'hierarchy' });
+  assert.equal(hier, 500n);
+
+  // Invalid categoryCaps elements throw
+  assert.throws(() => resolveCapBps({ categoryCaps: [NaN] }), /Invalid categoryCap/);
+  assert.throws(() => resolveCapBps({ categoryCaps: [{}] }), /Invalid categoryCap/);
+  assert.throws(() => resolveCapBps({ categoryCaps: 'not-array' }), /categoryCaps must be an array/);
+});

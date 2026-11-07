@@ -86,6 +86,22 @@ export async function reconcilePrices({
         continue;
       }
 
+      if (!code || typeof code !== 'string' || !code.trim()) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code: code || `unknown-${product.guid}`,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_variant_code',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+
       // Duplicate variant detection (INC-010)
       if (seenVariantCodes.has(code)) {
         for (const tier of tiers) {
@@ -262,6 +278,22 @@ export async function reconcileCoupons({
       const code = variant.code;
       if (!variant.visible && variant.visible !== undefined) {
         counts.skipped += tiers.length;
+        continue;
+      }
+
+      if (!code || typeof code !== 'string' || !code.trim()) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code: code || `unknown-${product.guid}`,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_variant_code',
+            expected: null,
+            actual: null
+          });
+        }
         continue;
       }
 

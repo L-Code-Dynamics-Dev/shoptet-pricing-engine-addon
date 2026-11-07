@@ -335,3 +335,47 @@ test('P2: Self-check fails on single UNKNOWN with cardinality 1, and consistent 
   assert.equal(couponRecon.counts.match, 2);
   assert.equal(couponRecon.selfCheckPassed, true);
 });
+
+test('TASK E: Reconciliation runner detects missing variant code as UNKNOWN and fails self-check', async () => {
+  const shopId = 826800;
+  const tiers = [{ name: 'VIP', percent: 10, pricelistId: 2 }];
+
+  // Price reconciliation with missing variant code
+  const priceResult = await reconcilePrices({
+    adapter: {},
+    shopId,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-no-code',
+        visibility: 'normal',
+        variants: [{ code: null, visible: true, basePriceMinor: 1000 }]
+      }
+    ],
+    minExpectedCombinations: 1
+  });
+  assert.equal(priceResult.counts.unknown, 1);
+  assert.equal(priceResult.selfCheckPassed, false);
+  const drift = priceResult.drifts.find(d => d.reason === 'missing_variant_code');
+  assert.ok(drift);
+  assert.equal(drift.status, 'UNKNOWN');
+
+  // Coupon reconciliation with empty variant code
+  const couponResult = await reconcileCoupons({
+    adapter: {},
+    shopId,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-empty-code',
+        visibility: 'normal',
+        variants: [{ code: '   ', visible: true, basePriceMinor: 1000 }]
+      }
+    ],
+    minExpectedCombinations: 1
+  });
+  assert.equal(couponResult.counts.unknown, 1);
+  assert.equal(couponResult.selfCheckPassed, false);
+  const couponDrift = couponResult.drifts.find(d => d.reason === 'missing_variant_code');
+  assert.ok(couponDrift);
+});
