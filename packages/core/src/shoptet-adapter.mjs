@@ -64,6 +64,23 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       const rows=z.array(priceRowSchema).max(100).parse(data.prices);
       return {items:rows,pagination:paginatorSchema.parse(data.paginator)};
     },
+    async *iteratePrices(id, { limit = 50, maxPages = 1000, checkFence = null } = {}) {
+      positiveId.parse(id);
+      let page = 1;
+      let pageCount = 1;
+      while (page <= pageCount && page <= maxPages) {
+        if (checkFence) await checkFence();
+        const res = await adapter.prices(id, { page, limit });
+        pageCount = res.pagination.pageCount;
+        for (const item of res.items) {
+          yield item;
+        }
+        page++;
+      }
+      if (page <= pageCount) {
+        throw new ShoptetError('max_pages_exceeded_incomplete_scan');
+      }
+    },
     async capabilities() {
       const data=await read('/api/system/endpoints',{status:'approved'});
       return {source:'shoptet_approved_endpoints',endpoints:z.array(z.object({endpoint:z.string().max(128),access:z.enum(['read','write','both']),action:z.literal(null)})).max(1000).parse(data.endpoints)};
