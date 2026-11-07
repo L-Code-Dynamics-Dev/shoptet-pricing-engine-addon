@@ -502,3 +502,21 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - **Tasks A, B, C:** CLOSED with code diffs, failing-to-passing tests, and commit `7cfc447`.
 - **Full Test Suite:** 286/286 PASS.
 - **Safety Boundary:** Zero live Shoptet/OKfish mutations, auto-remediation stays OFF. Ready for GPT-6 UI integration on isolated UI branch.
+
+### 2026-11-07 14:15 UTC — Gemini — COMPLETE TAKEOVER & FULL MERCHANT JOURNEY INTEGRATION
+- **Scope:** Complete takeover of full merchant-first iframe journey and unification with OKfish transfer core rules (Decimal Core, Coupon Engine, Reconciliation Runner, and Loyalty Onboarding Wizard).
+- **PR:** [#16](https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/pull/16) (`feat/complete-merchant-iframe-journey` -> `master`)
+- **HEAD Commit:** [`7baff68`](https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/commit/7baff68)
+- **Full Test Suite:** `npm test` (`node --test packages/core/test/*.test.mjs`) -> **309 passed, 0 failed, 0 skipped (27.6s, Node.js 22, macOS)**
+
+#### Implemented End-to-End Capabilities
+1. **Merchant-First Language (100% Czech):** Completely eliminated developer jargon (Dry Run, tenant, idempotence, lease, minPriceRatio in user-facing UI). Replaced with natural merchant phrases ("Věrnostní slevy", "Základní ceník", "Maximální sleva", "Kontrolní náhled změn bez zápisu", "Spustit kontrolní přepočet").
+2. **Onboarding & Entity Management:** Automatic inspection of store currencies, tax settings, pricelists, customer groups, and order completeness. Idempotent entity creation via Shoptet API (`POST /api/pricelists`, `POST /api/customers/groups`) with fail-closed 403 step-by-step manual setup guide.
+3. **Turnover & Tier Retention Engine:** All 6 rolling periods (7 days to all time), 4 retention policies, inactivity degradation, warning days, anti-oscillation protection under all_time, and credit note deductions.
+4. **Pricing Core & Coupon Engine:** Pure BigInt minor arithmetic, HighestDiscountPolicy, cap hierarchy (product > brand > category), authenticated main pricelist ID & managed tier allowlist, coverage trust proof, absent minPriceRatio guard.
+5. **Preview, Approval & Bounded Execution:** Versioned snapshot approval, batch customer synchronization (50 items/batch), live status badges, and durable state preservation across reload.
+
+#### Safety Summary
+- Isolated feature branch (`feat/complete-merchant-iframe-journey`).
+- Zero unapproved live mutations, main pricelist strictly read-only, auto-remediation stays OFF.
+- Ready for full code review.
