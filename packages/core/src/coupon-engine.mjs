@@ -149,8 +149,10 @@ export function evaluateCouponSettings({
   mode = 'percent-ceiling',
   ceilingPercent = 20,
   isLocked = false,
+  isGuest = false,
   baseMinor,
   tierPriceMinor,
+  actionPriceMinor = null,
   productCap = null,
   brandCap = null,
   categoryCap = null,
@@ -169,12 +171,18 @@ export function evaluateCouponSettings({
   if (!Number.isSafeInteger(tierPriceMinor) || tierPriceMinor <= 0) {
     throw new TypeError('Invalid tierPriceMinor');
   }
+  if (actionPriceMinor !== null && (!Number.isSafeInteger(actionPriceMinor) || actionPriceMinor < 0)) {
+    throw new TypeError('Invalid actionPriceMinor');
+  }
   if (minimumMinor !== null && (!Number.isSafeInteger(minimumMinor) || minimumMinor < 0)) {
     throw new TypeError('Invalid minimumMinor');
   }
 
+  // Guest tier is never subject to tier locks (TRANSFER_RULES.md / INC-011)
+  const effectiveLocked = isGuest ? false : isLocked;
+
   // 1. Tier lock rule: locked tiers NEVER get coupons
-  if (isLocked) {
+  if (effectiveLocked) {
     return {
       applyDiscountCoupon: false,
       minPriceRatio: null,
@@ -189,6 +197,12 @@ export function evaluateCouponSettings({
       minPriceRatio: null,
       reason: 'manual_disabled'
     };
+  }
+
+  // Derive active sale from explicit actionPriceMinor if provided
+  let activeSale = hasActiveSale;
+  if (actionPriceMinor !== null && actionPriceMinor > 0 && actionPriceMinor < baseMinor) {
+    activeSale = true;
   }
 
   // 3. Minimum price / margin floor protection
@@ -222,7 +236,7 @@ export function evaluateCouponSettings({
     }
 
     // Existing sale or action price: coupon ON with zero remaining room (ratio 1.000)
-    if (hasActiveSale) {
+    if (activeSale) {
       return {
         applyDiscountCoupon: true,
         minPriceRatio: '1.000',
@@ -257,6 +271,15 @@ export function evaluateCouponSettings({
   }
 
   // 5. Percent-ceiling mode logic (standard percentage cap)
+  // Explicit zero cap in percent mode: product disallows discounts entirely -> coupon OFF (Rule 1)
+  if (capBps === 0n) {
+    return {
+      applyDiscountCoupon: false,
+      minPriceRatio: null,
+      reason: 'zero_discount_cap'
+    };
+  }
+
   const ceilingBps = parsePercentBps(ceilingPercent, 'ceilingPercent');
   const effectiveCeilingBps = capBps !== null ? (ceilingBps < capBps ? ceilingBps : capBps) : ceilingBps;
 
@@ -277,7 +300,15 @@ export function evaluateCouponSettings({
   }
 
   // If sale/action already exists:
-  if (hasActiveSale) {
+  if (activeSale) {
+    if (actionPriceMinor !== null && actionPriceMinor <= floorMinor) {
+      return {
+        applyDiscountCoupon: false,
+        minPriceRatio: null,
+        reason: 'ceiling_exhausted_by_sale'
+      };
+    }
+    // If sale exists and is at/above ceiling or zero room remains
     return {
       applyDiscountCoupon: true,
       minPriceRatio: '1.000',

@@ -314,3 +314,75 @@ test('TASK D: resolveCapBps categoryCaps array validation and multiple categorie
   assert.throws(() => resolveCapBps({ categoryCaps: [{}] }), /Invalid categoryCap/);
   assert.throws(() => resolveCapBps({ categoryCaps: 'not-array' }), /categoryCaps must be an array/);
 });
+
+test('TASK H: Coupon-mode parity and boundary invariants', () => {
+  // 1. Guest tier immunity to tier locks (TRANSFER_RULES.md / INC-011)
+  const guestResult = evaluateCouponSettings({
+    mode: 'fixed-amount',
+    isLocked: true,
+    isGuest: true, // Guest tier overrides isLocked
+    baseMinor: 10000,
+    tierPriceMinor: 10000
+  });
+  assert.equal(guestResult.applyDiscountCoupon, true);
+  assert.equal(guestResult.reason, 'unrestricted');
+
+  // 2. Explicit zero cap (0% limit) distinction between fixed-amount and percent-ceiling
+  // Fixed-amount: coupon ON with zero remaining room (ratio 1.000)
+  const fixedZeroCap = evaluateCouponSettings({
+    mode: 'fixed-amount',
+    productCap: 0,
+    baseMinor: 10000,
+    tierPriceMinor: 9000
+  });
+  assert.equal(fixedZeroCap.applyDiscountCoupon, true);
+  assert.equal(fixedZeroCap.minPriceRatio, '1.000');
+  assert.equal(fixedZeroCap.reason, 'explicit_zero_cap');
+
+  // Percent-ceiling: product disallows discounts entirely -> coupon OFF (Rule 1)
+  const percentZeroCap = evaluateCouponSettings({
+    mode: 'percent-ceiling',
+    productCap: 0,
+    baseMinor: 10000,
+    tierPriceMinor: 9000
+  });
+  assert.equal(percentZeroCap.applyDiscountCoupon, false);
+  assert.equal(percentZeroCap.minPriceRatio, null);
+  assert.equal(percentZeroCap.reason, 'zero_discount_cap');
+
+  // 3. Active sale / clearance price behavior
+  // Fixed-amount: active sale takes precedence -> coupon ON with zero room (ratio 1.000)
+  const fixedSale = evaluateCouponSettings({
+    mode: 'fixed-amount',
+    actionPriceMinor: 8500,
+    baseMinor: 10000,
+    tierPriceMinor: 9000
+  });
+  assert.equal(fixedSale.applyDiscountCoupon, true);
+  assert.equal(fixedSale.minPriceRatio, '1.000');
+  assert.equal(fixedSale.reason, 'sale_action_floor');
+
+  // Percent-ceiling: sale already meets or exceeds ceiling (e.g. 20% sale on 20% ceiling) -> coupon OFF
+  const percentSaleExhausted = evaluateCouponSettings({
+    mode: 'percent-ceiling',
+    ceilingPercent: 20,
+    actionPriceMinor: 8000, // 20% sale -> floor 8000
+    baseMinor: 10000,
+    tierPriceMinor: 9000
+  });
+  assert.equal(percentSaleExhausted.applyDiscountCoupon, false);
+  assert.equal(percentSaleExhausted.minPriceRatio, null);
+  assert.equal(percentSaleExhausted.reason, 'ceiling_exhausted_by_sale');
+
+  // Percent-ceiling: sale deeper than ceiling (e.g. 30% sale) -> coupon OFF
+  const percentDeeperSale = evaluateCouponSettings({
+    mode: 'percent-ceiling',
+    ceilingPercent: 20,
+    actionPriceMinor: 7000,
+    baseMinor: 10000,
+    tierPriceMinor: 9000
+  });
+  assert.equal(percentDeeperSale.applyDiscountCoupon, false);
+  assert.equal(percentDeeperSale.minPriceRatio, null);
+  assert.equal(percentDeeperSale.reason, 'ceiling_exhausted_by_sale');
+});
