@@ -19,6 +19,8 @@ const toolScope = {
   shoptet_sync_tier_price: 'pricing:sync'
 };
 
+const READ_ONLY_TOOLS = new Set(['installation_status', 'pricing_preview', 'frontend_assets_preview', 'shoptet_get_info', 'shoptet_get_products', 'shoptet_get_tiers']);
+
 const definitions = [
   {
     name: 'pricing_preview',
@@ -249,7 +251,7 @@ export async function handleMcp(request, env) {
       jsonrpc: '2.0',
       id,
       result: {
-        tools: definitions.filter(t => identity.scopes.has(toolScope[t.name] || 'installation:read'))
+        tools: definitions.filter(t => READ_ONLY_TOOLS.has(t.name) && identity.scopes.has(toolScope[t.name] || 'installation:read'))
       }
     });
   }
@@ -257,7 +259,7 @@ export async function handleMcp(request, env) {
   if (rpc.method === 'tools/call') {
     const name = rpc.params?.name;
     const args = rpc.params?.arguments ?? {};
-    if (!definitions.some(t => t.name === name)) return rpcError(id, -32602, 'Unknown tool');
+    if (!READ_ONLY_TOOLS.has(name) || !definitions.some(t => t.name === name)) return rpcError(id, -32602, 'Unknown tool');
 
     const required = toolScope[name] || 'installation:read';
     if (!identity.scopes.has(required)) return rpcError(id, -32603, 'Forbidden', 403);

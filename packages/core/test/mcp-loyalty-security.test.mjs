@@ -362,8 +362,8 @@ test('MCP Security: AI Agent is strictly forbidden from direct pricelist modific
       })
     });
     const syncRes = await (await handleMcp(legacyReq, env)).json();
-    assert.equal(syncRes.error.code, -32603);
-    assert.match(syncRes.error.message, /forbidden/i);
+    assert.equal(syncRes.error.code, -32602);
+    assert.match(syncRes.error.message, /unknown tool/i);
   } finally {
     cleanup();
   }
