@@ -1,11 +1,12 @@
 # ACCEPTANCE_MATRIX — Requirements vs Current Verified Evidence
 
-Updated at commit `852cf95` on branch `feat/argon4-complete-loyalty-engine` (PR [#17](https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/pull/17)).
+Updated at commit `91ab045` on branch `feat/argon4-complete-loyalty-engine` (PR [#17](https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/pull/17)).
 Full test suite command: `npm test` (`node --test packages/core/test/*.test.mjs`) -> **320/320 PASS, 0 FAIL, 0 SKIPPED** (Node.js 22, macOS).
-- **Test-shop ID (non-secret harness):** `826800` (main pricelist `17`, managed tier pricelist `2`)
-- **Verified GitHub Actions CI run:** [`42380637112`](https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/actions/runs/42380637112) (`SUCCESS`)
+- **Wire-level simulation harness ID (non-secret mock HTTP fixture):** `826800` (main pricelist `17`, managed tier pricelist `2` in `packages/core/test/admin-settings.test.mjs:385-765`)
+- **Live external Shoptet test-shop run:** `NOT_EXECUTED_IN_CI` (requires owner-authorized staging/test-shop OAuth credentials; zero live external Shoptet calls or writes executed in CI)
+- **Verified GitHub Actions CI runs:** [`42381738595`](https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/actions/runs/42381738595) (`SUCCESS` on `9a34c79`), [`42380637112`](https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/actions/runs/42380637112) (`SUCCESS` on `45bf76f`)
 - **Rollback steps:**
-  1. Code rollback: `git revert 852cf95 2af8b28 caff7da` on target branch (zero destructive DB migrations introduced).
+  1. Code rollback: `git revert 91ab045 852cf95 2af8b28 caff7da` on target branch (zero destructive DB migrations introduced).
   2. Configuration rollback: Create and merchant-approve a new revision from `config_revisions` history via `/admin/settings/api/configuration/history` + `/configuration/approve` (immutable revision log).
   3. Live Shoptet safety: `LIVE_PRICELIST_WRITE` gate (`live_execution_not_activated`) and `remediationMode: 'OFF'` ensure zero automatic writes to default or unmanaged pricelists.
 
@@ -13,7 +14,7 @@ Statuses: `NOT_VERIFIED` | `IMPLEMENTED` | `TESTED` | `BLOCKED` | `NOT_APPLICABL
 
 ## 1. PRICING_RULES (`PRICE-001..012`)
 
-| ID | Domain / Requirement | Status | Code Path & Lines (`852cf95`) | Executable Test Command & Observed Result |
+| ID | Domain / Requirement | Status | Code Path & Lines (`91ab045`) | Executable Test Command & Observed Result |
 |---|---|---|---|---|
 | `PRICE-001` | Per-shop loyalty tiers, percentages, thresholds, period, native pricelist mapping; zero OKfish defaults | `TESTED` | `packages/core/src/loyalty-onboarding.mjs:11-165`, `apps/api/src/iframe-settings.mjs:58-101` | `node --test packages/core/test/loyalty-onboarding.test.mjs packages/core/test/admin-onboarding-api.test.mjs` -> 15/15 PASS |
 | `PRICE-002` | Eligible turnover from paid/completed orders, credit note deductions, pagination & currency checks | `TESTED` | `packages/core/src/turnover.mjs:1-129`, `packages/core/src/loyalty-batch-runner.mjs:15-260` | `node --test packages/core/test/turnover.test.mjs packages/core/test/loyalty-pipeline.test.mjs` -> 19/19 PASS |
@@ -30,7 +31,7 @@ Statuses: `NOT_VERIFIED` | `IMPLEMENTED` | `TESTED` | `BLOCKED` | `NOT_APPLICABL
 
 ## 2. COUPON_RULES (`COUPON-001..009`)
 
-| ID | Domain / Requirement | Status | Code Path & Lines (`852cf95`) | Executable Test Command & Observed Result |
+| ID | Domain / Requirement | Status | Code Path & Lines (`91ab045`) | Executable Test Command & Observed Result |
 |---|---|---|---|---|
 | `COUPON-001` | Two explicit modes (`percent-ceiling` and `fixed-amount`), never silently converted; explicit `couponCeilingPercent` required for `percent-ceiling` | `TESTED` | `packages/core/src/coupon-engine.mjs:117-156,159-335`, `apps/api/src/iframe-settings.mjs:146-165,494-504` | `node --test packages/core/test/coupon-engine.test.mjs packages/core/test/admin-settings.test.mjs` -> 29/29 PASS |
 | `COUPON-002` | Merchant-configured tier locks, product/brand disables & guest immunity; no hardcoded ZR20/ZR25 defaults | `TESTED` | `packages/core/src/coupon-engine.mjs:126-127,175-195`, `apps/api/src/storefront-routes.mjs:59-120` | `node --test packages/core/test/coupon-engine.test.mjs packages/core/test/storefront.test.mjs` -> 19/19 PASS |
@@ -44,7 +45,7 @@ Statuses: `NOT_VERIFIED` | `IMPLEMENTED` | `TESTED` | `BLOCKED` | `NOT_APPLICABL
 
 ## 3. ONBOARDING_IFRAME (`IFRAME-001..012`)
 
-| ID | Domain / Requirement | Status | Code Path & Lines (`852cf95`) | Executable Test Command & Observed Result |
+| ID | Domain / Requirement | Status | Code Path & Lines (`91ab045`) | Executable Test Command & Observed Result |
 |---|---|---|---|---|
 | `IFRAME-001` | Marketplace install, OAuth verification, embedded iframe session, CSP `frame-ancestors`, expired/blocked permission guidance | `TESTED` | `apps/api/src/admin-session.mjs:1-140`, `apps/api/src/iframe-settings.mjs:35-54,172-180,2495-2516` | `node --test packages/core/test/admin-settings.test.mjs packages/core/test/shoptet-oauth.test.mjs` -> 21/21 PASS |
 | `IFRAME-002` | Welcome wizard with persistent per-shop drafts, reload continuity, step validation, zero automatic live writes | `TESTED` | `packages/core/src/loyalty-onboarding.mjs:1-285`, `apps/api/src/iframe-settings.mjs:413-498` | `node --test packages/core/test/loyalty-onboarding.test.mjs packages/core/test/admin-onboarding-api.test.mjs` -> 15/15 PASS |
@@ -61,15 +62,15 @@ Statuses: `NOT_VERIFIED` | `IMPLEMENTED` | `TESTED` | `BLOCKED` | `NOT_APPLICABL
 
 ## 4. SYNC_AND_SECURITY (`SYNC-001..013`)
 
-| ID | Domain / Requirement | Status | Code Path & Lines (`852cf95`) | Executable Test Command & Observed Result |
+| ID | Domain / Requirement | Status | Code Path & Lines (`91ab045`) | Executable Test Command & Observed Result |
 |---|---|---|---|---|
 | `SYNC-001` | Signed authenticated Shoptet lifecycle & order webhooks; bounded body validation; durable staging before ACK | `TESTED` | `packages/core/src/webhooks.mjs:1-49`, `apps/api/src/shoptet-webhooks.mjs:1-75`, `packages/core/src/loyalty-webhook-processor.mjs:1-245` | `node --test packages/core/test/lifecycle.test.mjs packages/core/test/loyalty-repository.test.mjs` -> 10/10 PASS |
-| `SYNC-002` | Full catalog & order pagination proof (`iteratePrices`, credit notes, `fullCatalogVerified = false` default); missing variants/VAT/cost fails closed | `TESTED` | `packages/core/src/shoptet-adapter.mjs:67-83`, `packages/core/src/reconciliation-runner.mjs:90-180,365-455`, `apps/api/src/iframe-settings.mjs:247-390` | `node --test packages/core/test/shoptet-adapter.test.mjs packages/core/test/reconciliation-runner.test.mjs packages/core/test/admin-settings.test.mjs` -> 34/34 PASS |
+| `SYNC-002` | Full catalog, price & order pagination proof (`iteratePrices` `totalCount`/empty-page verification, credit notes, `fullCatalogVerified = false` default); missing variants/VAT/cost fails closed | `TESTED` | `packages/core/src/shoptet-adapter.mjs:60-112`, `packages/core/src/reconciliation-runner.mjs:90-180,365-455`, `apps/api/src/iframe-settings.mjs:247-407` | `node --test packages/core/test/shoptet-adapter.test.mjs packages/core/test/reconciliation-runner.test.mjs packages/core/test/admin-settings.test.mjs` -> 34/34 PASS |
 | `SYNC-003` | Incremental order webhooks & full batch sync converge via idempotent ledger deltas; config version invalidates stale plans | `TESTED` | `packages/core/src/loyalty-repository.mjs:95-238`, `packages/core/src/loyalty-webhook-processor.mjs:1-245` | `node --test packages/core/test/loyalty-repository.test.mjs packages/core/test/webhook-promotion-mock.test.mjs` -> 6/6 PASS |
 | `SYNC-004` | Protected main pricelist, managed-list allowlist, explicit VAT metadata (`includingVat`, `vatRate`) & immediate read-back | `TESTED` | `packages/core/src/pricing.mjs:188-211`, `packages/core/src/sync-runner.mjs:35-65` | `node --test packages/core/test/pricing-decimal-core.test.mjs packages/core/test/sync.test.mjs` -> 24/24 PASS |
-| `SYNC-005` | Bulk HTTP 200 per-item `errors` parsed as `partial` failure; timeout/5xx `unknown` outcome quarantines shop without retry | `TESTED` | `packages/core/src/shoptet-adapter.mjs:88-103`, `packages/core/src/sync-runner.mjs:45-70` | `node --test packages/core/test/shoptet-adapter.test.mjs packages/core/test/sync.test.mjs` -> 18/18 PASS |
+| `SYNC-005` | Bulk HTTP 200 per-item `errors` parsed as `partial` failure; timeout/5xx `unknown` outcome quarantines shop without retry | `TESTED` | `packages/core/src/shoptet-adapter.mjs:117-132`, `packages/core/src/sync-runner.mjs:45-70` | `node --test packages/core/test/shoptet-adapter.test.mjs packages/core/test/sync.test.mjs` -> 18/18 PASS |
 | `SYNC-006` | Durable D1 per-shop lock/lease (`d1-shop-lock.mjs`), fencing token, per-item idempotency, rate limiter & 429 Retry-After backoff | `TESTED` | `packages/core/src/d1-shop-lock.mjs:1-45`, `packages/core/src/rate-limiter.mjs:1-79`, `packages/core/src/sync-runner.mjs:1-73` | `node --test packages/core/test/install-services.test.mjs packages/core/test/sync.test.mjs packages/core/test/loyalty-pipeline.test.mjs` -> 29/29 PASS |
-| `SYNC-007` | Separate server-verified read-only price & coupon reconciliation (`fetchVerifiedStoreCatalogForReconciliation`, `reconcilePrices`, `reconcileCoupons`) rejecting caller-supplied catalog or unsafe defaults | `TESTED` | `packages/core/src/reconciliation-runner.mjs:42-570`, `apps/api/src/iframe-settings.mjs:247-390,480-715` | `node --test packages/core/test/reconciliation-runner.test.mjs packages/core/test/admin-settings.test.mjs` -> 25/25 PASS |
+| `SYNC-007` | Separate server-verified read-only price & coupon reconciliation (`fetchVerifiedStoreCatalogForReconciliation`, `reconcilePrices`, `reconcileCoupons`) rejecting caller-supplied catalog, unsafe defaults, or incomplete price scans | `TESTED` | `packages/core/src/reconciliation-runner.mjs:42-570`, `apps/api/src/iframe-settings.mjs:247-407,497-732` | `node --test packages/core/test/reconciliation-runner.test.mjs packages/core/test/admin-settings.test.mjs` -> 25/25 PASS |
 | `SYNC-008` | 5-stage pipeline: config validation -> pre-write preview/fuse -> negative tests -> verified sync commit -> independent reconciliation | `TESTED` | `packages/core/src/configuration.mjs:25-73`, `packages/core/src/sync-planner.mjs:5-73`, `packages/core/src/sync-runner.mjs:1-73`, `packages/core/src/reconciliation-runner.mjs:42-570` | `node --test packages/core/test/configuration.test.mjs packages/core/test/sync.test.mjs packages/core/test/reconciliation-runner.test.mjs` -> 31/31 PASS |
 | `SYNC-009` | Self-healing state machine (`AUTO`/`REVIEW`/`BLOCK`) with `AUTO` strictly `OFF` by default, circuit breaker & frozen audit log | `TESTED` | `packages/core/src/self-healing-engine.mjs:1-437`, `apps/api/src/iframe-settings.mjs:480-715` | `node --test packages/core/test/self-healing-engine.test.mjs` -> 9/9 PASS |
 | `SYNC-010` | Authenticated shop isolation across D1 tables, token vault (`AES-GCM`), session/CSRF & MCP boundaries | `TESTED` | `packages/core/src/tenant.mjs:1-40`, `packages/core/src/token-vault.mjs:1-75`, `packages/core/src/mcp-oauth.mjs:1-83` | `node --test packages/core/test/tenant.test.mjs packages/core/test/shoptet-oauth.test.mjs packages/core/test/mcp-loyalty-security.test.mjs` -> 30/30 PASS |
