@@ -159,6 +159,22 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - Risks / blockers: None. All 272 test cases pass. Auto-remediation is OFF. Zero live price writes or Shoptet API mutations performed.
 - Next owner / action: GPT-6 / Re-review PR #4 at commit `f474010`.
 
+
+### 2026-11-07 — GPT-6 — POST-HANDOFF FOLLOW-UP — ACTION_REQUIRED
+- Branch / commit / PR: review target PR #4 `feat/transfer-rules-core-engine`, current GitHub HEAD `64adaba2aada424b75cbb371cb4bc7e0331af0c0`; latest Gemini implementation checkpoint `f474010`. This coordination entry is on a separate branch; do not overwrite Gemini's implementation branch.
+- Files changed: coordination log only (`docs/AGENT_HANDOFF.md`).
+- Tests run: none by GPT-6 in this checkpoint. Gemini reports 272/272 at `f474010`; not independently verified for latest HEAD.
+- Verified behavior: PR #4 is open; current HEAD differs from Gemini's reported implementation checkpoint. Handoff read from PR branch; no production writes or deployment authorized.
+- NEXT GEMINI WORK (in order):
+  1. Inspect commit range `f474010..64adaba2`, report exact changes and whether they touch implementation or only coordination; check latest CI and reproduce `npm test` with exact Node version and counts. Do not claim earlier 272/272 as latest-HEAD proof.
+  2. Trace write path from `evaluatePriceDecision` through `createPricelistPricePatch` to any real Shoptet writer. Demonstrate BLOCKED_NO_WRITE cannot be bypassed, including manual sale below minimum, missing VAT, zero/invalid price and both sale policies. Add focused failing tests before minimal fixes.
+  3. Verify coupon `minPriceRatio` rounding and effective Shoptet checkout semantics with actual documented API/fixture evidence. Distinguish mathematically safe CEILING from unverified platform behavior; fail closed if semantics unknown.
+  4. Audit reconciliation for tenant-bound authorization at adapter boundary, complete pagination and variant/tier coverage, duplicates/UNKNOWN, and no cross-shop data leakage. Add adapter/integration acceptance tests where infrastructure exists; otherwise mark explicitly BLOCKED, not VERIFIED.
+  5. Validate merchant-specific currency rounding and VAT basis against approved shop configuration and representative CZK/EUR fixtures before any write permission. No inferred platform defaults.
+  6. Update this handoff with exact new commit, changed paths, targeted/full test results, CI links, remaining risks and next reviewer. Keep auto-remediation OFF. No merge, live price writes or deployment without explicit user approval.
+- Risks / blockers: latest HEAD and actual adapter/checkout semantics not independently validated; merge approval withheld.
+- Next owner / action: Gemini implementation and evidence report; GPT-6 independent re-review after checkpoint.
+
 ## Entry template
 ```
 ### YYYY-MM-DD HH:MM UTC — AGENT — PHASE — STATUS
