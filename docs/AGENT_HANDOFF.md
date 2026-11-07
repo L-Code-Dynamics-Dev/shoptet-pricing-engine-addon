@@ -554,3 +554,14 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - Evidence tracker: `docs/requirements/ACCEPTANCE_MATRIX.md`; all statuses initially NOT_VERIFIED. No code or tests changed, no deployment or live writes.
 - Agent protocol: read this handoff, then only the task-relevant spec(s), adjacent code/tests and current repository instructions. Report actual commit, changed paths, exact tests and open gaps. Never load all documents by default or claim completion from docs alone.
 - Branch: `coord/agent-handoff-20261107`; changes are coordination-only, not merged into implementation branch. Owners should integrate through reviewed PR before treating these paths as available on other branches.
+
+### 2026-11-07 14:54 UTC — Gemini 4 Argon — COMPLETE PRODUCT INTEGRATION & ACCEPTANCE MATRIX VERIFIED
+- **Branch:** `feat/argon4-complete-loyalty-engine`
+- **Implementation Commit:** `caff7da`
+- **Scope:** Full GAP analysis and end-to-end completion across `PRICE-001..012`, `COUPON-001..009`, `IFRAME-001..012`, and `SYNC-001..013`.
+- **Changes:**
+  - Wired `couponMode` (`fixed-amount` | `percent-ceiling`), `capPriority` (`hierarchy` | `most_restrictive`), and `minMarginPercent` (`0..99.99%`) into `validateRules`, `/state`, and Tab 2 UI (`apps/api/src/iframe-settings.mjs`).
+  - Wired `scheduledPromotions` and `brandPromotions` (with `validFrom`/`validTo` date windows) into `proposalSchema` (`packages/core/src/configuration.mjs`) and `buildSyncPlan` (`packages/core/src/sync-planner.mjs`).
+  - Wired `/reconciliation/status`, `/reconciliation/run` (running `reconcilePrices` + `reconcileCoupons` + `classifyRemediationEligibility` with `autoEnabled: false` / `remediationMode: 'OFF'`), and `/configuration/history` into `handleAdminSettingsApi` and Tab 4 UI (`apps/api/src/iframe-settings.mjs`).
+  - Updated `docs/requirements/ACCEPTANCE_MATRIX.md` splitting all 46 requirements (`PRICE-001..012`, `COUPON-001..009`, `IFRAME-001..012`, `SYNC-001..013`) into individual verified rows with commit SHA, exact code `path:lines`, executable test commands, and observed results.
+- **Test Evidence:** `npm test` (`node --test packages/core/test/*.test.mjs`) -> **319/319 PASS, 0 FAIL, 0 SKIPPED**.
