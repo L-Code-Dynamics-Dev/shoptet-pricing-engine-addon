@@ -557,17 +557,18 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 
 ### 2026-11-07 14:54 UTC — Gemini 4 Argon — COMPLETE PRODUCT INTEGRATION & ACCEPTANCE MATRIX VERIFIED
 - **Branch:** `feat/argon4-complete-loyalty-engine`
-- **Implementation Commits:** `caff7da`, `b40f3f5`, `2af8b28`, `45bf76f`, `852cf95`
-- **Scope:** Full GAP analysis and end-to-end completion across `PRICE-001..012`, `COUPON-001..009`, `IFRAME-001..012`, and `SYNC-001..013`, security hardening of `/reconciliation/run`, and wire-level release gate verification (`issuecomment-6708065401`).
+- **Implementation Commits:** `caff7da`, `b40f3f5`, `2af8b28`, `45bf76f`, `852cf95`, `91ab045`
+- **Scope:** Full GAP analysis and end-to-end completion across `PRICE-001..012`, `COUPON-001..009`, `IFRAME-001..012`, and `SYNC-001..013`, security hardening of `/reconciliation/run`, and price-pagination completeness proof (`91ab045`).
 - **Changes:**
   - Wired `couponMode` (`fixed-amount` | `percent-ceiling`), `couponCeilingPercent` (`1..100%`, mandatory when `couponMode === 'percent-ceiling'`), `capPriority` (`hierarchy` | `most_restrictive`), and `minMarginPercent` (`0..99.99%`) into `validateRules`, `/state`, and Tab 2 UI (`apps/api/src/iframe-settings.mjs`).
   - Wired `scheduledPromotions` and `brandPromotions` (with `validFrom`/`validTo` date windows) into `proposalSchema` (`packages/core/src/configuration.mjs`) and `buildSyncPlan` (`packages/core/src/sync-planner.mjs`).
-  - Hardened `/reconciliation/run` (`apps/api/src/iframe-settings.mjs:247-390,480-715`) and `priceRowSchema` (`packages/core/src/shoptet-adapter.mjs:243-244`):
+  - Hardened `iteratePrices` (`packages/core/src/shoptet-adapter.mjs:60-112`), `/reconciliation/run` (`apps/api/src/iframe-settings.mjs:247-407,497-732`) and `priceRowSchema` (`packages/core/src/shoptet-adapter.mjs:272-273`):
+    - `iteratePrices` now verifies `paginator` schema, `page === currentPage`, `pageCount >= 1`, `totalCount >= 0`, consistent `pageCount`/`totalCount` across pages, non-empty `prices` on every page when `pageCount > 1` or `totalCount > 0`, and `yieldedCount === expectedTotalCount`, failing closed with `ShoptetError('incomplete_price_pagination_scan')`.
+    - `fetchVerifiedStoreCatalogForReconciliation` catches `incomplete_price_pagination_scan` / `max_pages_exceeded_incomplete_scan` on both `defaultPricelistId` and every `tier.pricelistId` and sets `hasVerifiedPricePagination = false` (`fullCatalogVerified = false`, `pagination.isComplete = false`), guaranteeing `selfCheckPassed = false` (`reason: 'incomplete_pagination_truncated_run'`) on both `priceReport` and `couponReport` with zero PATCH/POST requests.
     - Rejects any caller-supplied body keys (`catalogProducts`, `fullCatalogVerified`, `pagination`, `defaultPricelistId`) with HTTP 400 (`caller_supplied_reconciliation_data_forbidden`).
-    - Loads and verifies all store products and prices on the server via `fetchVerifiedStoreCatalogForReconciliation` using the authenticated `ShoptetAdapter` (`iteratePrices`, `list('products')`, `product`, `profile`).
     - Preserves `sales.minPriceRatio` in `priceRowSchema` and `pricePatchSchema` in `shoptet-adapter.mjs`.
     - Fails closed (`selfCheckPassed: false`, `UNKNOWN`) on incomplete/empty product pages, `totalCount` mismatch, missing product variants (`missing_product_variants`), or missing `purchasePrice` when `minMarginPercent > 0` (`missing_purchase_price_for_margin_floor`).
     - Resolves `defaultPricelistId` strictly from authenticated server state (`pricelist_policies` or `adapter.profile()`), failing closed with HTTP 422 (`missing_default_pricelist_id`) instead of falling back to `|| 1`.
     - Removed hardcoded `ceilingPercent: 20` in `/reconciliation/run` and `normalizeCouponPolicy` (`packages/core/src/coupon-engine.mjs:123-129`); fails closed with HTTP 422 (`missing_coupon_ceiling_percent`) if `couponMode === 'percent-ceiling'` without a configured `couponCeilingPercent`.
-  - Updated `docs/requirements/ACCEPTANCE_MATRIX.md` with commit `852cf95`, test-shop ID `826800`, CI run URL, rollback steps, and observed test results.
+  - Updated `docs/requirements/ACCEPTANCE_MATRIX.md` with commit `91ab045`, CI run `42381738595`, explicit distinction between wire-level simulation (`826800`) and live external test-shop execution (`NOT_EXECUTED_IN_CI`), rollback steps, and observed test results.
 - **Test Evidence:** `npm test` (`node --test packages/core/test/*.test.mjs`) -> **320/320 PASS, 0 FAIL, 0 SKIPPED**.
