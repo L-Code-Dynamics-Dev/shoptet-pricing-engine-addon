@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formatPriceRatio,
+  parsePercentBps,
+  resolveCapBps,
   normalizeCouponPolicy,
   evaluateCouponSettings,
   createPricelistCouponPatch
@@ -197,4 +199,82 @@ test('FÁZE 2: INC-011 regression - locked tiers ZR20 and ZR25 strictly disable 
     assert.equal(evalResult.minPriceRatio, null);
     assert.equal(evalResult.reason, 'tier_locked');
   }
+});
+
+test('Task 1: parsePercentBps handles integers, decimals, strings and invalid inputs without float rounding', () => {
+  assert.equal(parsePercentBps(0), 0n);
+  assert.equal(parsePercentBps(10), 1000n);
+  assert.equal(parsePercentBps(12.5), 1250n);
+  assert.equal(parsePercentBps('12.5'), 1250n);
+  assert.equal(parsePercentBps('12.345'), 1235n); // rounded half-up to bps
+  assert.equal(parsePercentBps(100), 10000n);
+
+  // Invalid inputs throw range or type errors
+  assert.throws(() => parsePercentBps(NaN), /Invalid percent/);
+  assert.throws(() => parsePercentBps(Infinity), /Invalid percent/);
+  assert.throws(() => parsePercentBps(-1), /Invalid percent/);
+  assert.throws(() => parsePercentBps(101), /Invalid percent/);
+  assert.throws(() => parsePercentBps('not-a-number'), /Invalid percent/);
+});
+
+test('Task 2: resolveCapBps and evaluateCouponSettings cap precedence (hierarchy vs most_restrictive)', () => {
+  // Product 12%, Brand 8%, Category 5%
+  // In hierarchy mode: productCap (12%) wins
+  const hierarchyResult = evaluateCouponSettings({
+    mode: 'percent-ceiling',
+    ceilingPercent: 20,
+    capPriority: 'hierarchy',
+    productCap: 12,
+    brandCap: 8,
+    categoryCap: 5,
+    baseMinor: 10000,
+    tierPriceMinor: 9500
+  });
+  // Effective cap: min(20%, 12%) = 12% -> floor = 8800
+  // Ratio: 8800 / 9500 = 0.9263... -> 0.926
+  assert.equal(hierarchyResult.applyDiscountCoupon, true);
+  assert.equal(hierarchyResult.minPriceRatio, '0.926');
+
+  // In most_restrictive mode: min(12%, 8%, 5%) = 5% wins
+  const mostRestrictiveResult = evaluateCouponSettings({
+    mode: 'percent-ceiling',
+    ceilingPercent: 20,
+    capPriority: 'most_restrictive',
+    productCap: 12,
+    brandCap: 8,
+    categoryCap: 5,
+    baseMinor: 10000,
+    tierPriceMinor: 9600
+  });
+  // Effective cap: min(20%, 5%) = 5% -> floor = 9500
+  // Ratio: 9500 / 9600 = 0.9895... -> 0.990
+  assert.equal(mostRestrictiveResult.applyDiscountCoupon, true);
+  assert.equal(mostRestrictiveResult.minPriceRatio, '0.990');
+});
+
+test('Task 3: minimumMinor margin floor protects against coupon discount breaches', () => {
+  // Base 10000, Tier 9000, Ceiling 20% (would be floor 8000)
+  // But configured minimumMinor (cost + margin) is 8500
+  const protectedFloor = evaluateCouponSettings({
+    mode: 'percent-ceiling',
+    ceilingPercent: 20,
+    minimumMinor: 8500,
+    baseMinor: 10000,
+    tierPriceMinor: 9000
+  });
+  // Floor is raised to 8500. Ratio: 8500 / 9000 = 0.944
+  assert.equal(protectedFloor.applyDiscountCoupon, true);
+  assert.equal(protectedFloor.minPriceRatio, '0.944');
+
+  // If tier price is already at or below minimumMinor, coupons MUST be disabled entirely
+  const exhaustedMinimum = evaluateCouponSettings({
+    mode: 'percent-ceiling',
+    ceilingPercent: 20,
+    minimumMinor: 9000,
+    baseMinor: 10000,
+    tierPriceMinor: 9000
+  });
+  assert.equal(exhaustedMinimum.applyDiscountCoupon, false);
+  assert.equal(exhaustedMinimum.minPriceRatio, null);
+  assert.equal(exhaustedMinimum.reason, 'minimum_floor_exhausted');
 });

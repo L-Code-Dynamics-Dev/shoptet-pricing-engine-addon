@@ -172,3 +172,61 @@ test('FÁZE 3: reconcileCoupons - audits coupon settings and catches INC-011 loc
   assert.equal(lockDrift.expected.discountCoupon, false);
   assert.equal(lockDrift.actual.discountCoupon, true);
 });
+
+test('Task 5: Reconciliation runner validation - invalid shopId, truncated pagination and duplicate variant codes', async () => {
+  const tiers = [{ name: 'VIP', percent: 10, pricelistId: 2 }];
+
+  // 1. Invalid shopId fails closed
+  await assert.rejects(
+    () => reconcilePrices({ adapter: {}, shopId: 'not-a-number', tiers }),
+    /Invalid shopId/
+  );
+  await assert.rejects(
+    () => reconcileCoupons({ adapter: {}, shopId: -5, tiers }),
+    /Invalid shopId/
+  );
+
+  // 2. Truncated pagination causes selfCheckPassed to fail
+  const truncatedResult = await reconcilePrices({
+    adapter: {},
+    shopId: 826800,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-1',
+        visibility: 'normal',
+        variants: [{ code: 'VAR-1', visible: true, basePriceMinor: 1000, perPricelistPrices: { 2: { priceMinor: 900 } } }]
+      }
+    ],
+    pagination: { isComplete: false },
+    minExpectedCombinations: 1
+  });
+  assert.equal(truncatedResult.selfCheckPassed, false);
+  assert.equal(truncatedResult.selfCheckReason, 'incomplete_pagination_truncated_run');
+
+  // 3. Duplicate variant codes marked as UNKNOWN with reason 'duplicate_variant_code'
+  const duplicateResult = await reconcilePrices({
+    adapter: {},
+    shopId: 826800,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-1',
+        visibility: 'normal',
+        variants: [{ code: 'DUP-1', visible: true, basePriceMinor: 1000, perPricelistPrices: { 2: { priceMinor: 900 } } }]
+      },
+      {
+        guid: 'prod-2',
+        visibility: 'normal',
+        variants: [{ code: 'DUP-1', visible: true, basePriceMinor: 1000, perPricelistPrices: { 2: { priceMinor: 900 } } }]
+      }
+    ],
+    minExpectedCombinations: 2
+  });
+  assert.equal(duplicateResult.counts.match, 1);
+  assert.equal(duplicateResult.counts.unknown, 1);
+  const dupEntry = duplicateResult.drifts.find(d => d.reason === 'duplicate_variant_code');
+  assert.ok(dupEntry);
+  assert.equal(dupEntry.status, 'UNKNOWN');
+  assert.equal(dupEntry.code, 'DUP-1');
+});

@@ -151,3 +151,36 @@ test('FÁZE 1: Fail closed on missing VAT, zero prices or invalid data (INC-010,
   });
   assert.equal(marginProtected, 8500); // Clamped to minimum margin floor
 });
+
+test('Task 4: resolveCurrencyRoundingRules strict validation of options and currency codes', () => {
+  // Valid overrides
+  const customCzk = resolveCurrencyRoundingRules('czk', {
+    priceDecimalPlaces: 0,
+    rounding: 'up',
+    incrementMinor: 100
+  });
+  assert.equal(customCzk.decimals, 0);
+  assert.equal(customCzk.rounding, 'up');
+  assert.equal(customCzk.incrementMinor, 100);
+
+  // Invalid currencyCode
+  assert.throws(() => resolveCurrencyRoundingRules(''), /Invalid currencyCode/);
+  assert.throws(() => resolveCurrencyRoundingRules('XYZ'), /Unsupported currencyCode/);
+  assert.throws(() => resolveCurrencyRoundingRules(123), /Invalid currencyCode/);
+
+  // Invalid priceDecimalPlaces
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { priceDecimalPlaces: -1 }), /Invalid priceDecimalPlaces/);
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { priceDecimalPlaces: 5 }), /Invalid priceDecimalPlaces/);
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { priceDecimalPlaces: 2.5 }), /Invalid priceDecimalPlaces/);
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { priceDecimalPlaces: 'two' }), /Invalid priceDecimalPlaces/);
+
+  // Invalid rounding method
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { rounding: 'floor' }), /Invalid rounding/);
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { rounding: 1 }), /Invalid rounding/);
+
+  // Invalid incrementMinor
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { incrementMinor: 0 }), /Invalid incrementMinor/);
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { incrementMinor: -10 }), /Invalid incrementMinor/);
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { incrementMinor: 1.5 }), /Invalid incrementMinor/);
+  assert.throws(() => resolveCurrencyRoundingRules('CZK', { incrementMinor: '100' }), /Invalid incrementMinor/);
+});

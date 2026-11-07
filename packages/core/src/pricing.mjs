@@ -24,8 +24,9 @@ const divideWithRounding = (n, d, mode = 'math') => {
 };
 
 export function resolveCurrencyRoundingRules(currencyCode, options = {}) {
-  if (typeof currencyCode !== 'string' || !/^[A-Z]{3}$/.test(currencyCode)) {
-    throw new TypeError('Invalid currencyCode: expected 3 uppercase letters');
+  const code = typeof currencyCode === 'string' ? currencyCode.trim().toUpperCase() : null;
+  if (!code || !/^[A-Z]{3}$/.test(code)) {
+    throw new TypeError('Invalid currencyCode: expected 3-letter currency code');
   }
   const defaults = {
     CZK: { decimals: 2, rounding: 'math', incrementMinor: 100 },
@@ -33,10 +34,32 @@ export function resolveCurrencyRoundingRules(currencyCode, options = {}) {
     HUF: { decimals: 0, rounding: 'math', incrementMinor: 100 },
     PLN: { decimals: 2, rounding: 'math', incrementMinor: 1 }
   };
-  const standard = defaults[currencyCode] || { decimals: 2, rounding: 'math', incrementMinor: 1 };
-  const decimals = options.priceDecimalPlaces ?? standard.decimals;
-  const rounding = options.rounding ?? standard.rounding;
-  const incrementMinor = options.incrementMinor ?? (decimals === 0 ? 100 : (options.priceDecimalPlaces !== undefined ? 10 ** (2 - options.priceDecimalPlaces) : standard.incrementMinor));
+  const standard = defaults[code];
+  if (!standard && options.priceDecimalPlaces === undefined) {
+    throw new TypeError(`Unsupported currencyCode ${code}: explicit priceDecimalPlaces required`);
+  }
+  const baseStandard = standard || { decimals: 2, rounding: 'math', incrementMinor: 1 };
+
+  const decimals = options.priceDecimalPlaces ?? baseStandard.decimals;
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 4) {
+    throw new TypeError('Invalid priceDecimalPlaces: expected integer between 0 and 4');
+  }
+
+  const rounding = options.rounding ?? baseStandard.rounding;
+  if (!['math', 'up', 'down', 'none'].includes(rounding)) {
+    throw new TypeError(`Invalid rounding: ${rounding}`);
+  }
+
+  let incrementMinor = options.incrementMinor;
+  if (incrementMinor === undefined) {
+    if (decimals === 0) incrementMinor = 100;
+    else if (options.priceDecimalPlaces !== undefined) incrementMinor = Math.max(1, 10 ** (2 - decimals));
+    else incrementMinor = baseStandard.incrementMinor;
+  }
+  if (!Number.isSafeInteger(incrementMinor) || incrementMinor < 1) {
+    throw new TypeError('Invalid incrementMinor: must be positive integer');
+  }
+
   return { currencyCode, decimals, rounding, incrementMinor };
 }
 

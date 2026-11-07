@@ -37,15 +37,28 @@ export async function reconcilePrices({
   policy,
   tiers = [],
   catalogProducts = [],
+  pagination = null,
   minExpectedCombinations = 1
 }) {
-  if (!shopId) throw new TypeError('Missing shopId');
+  const numShopId = Number(shopId);
+  if (!Number.isSafeInteger(numShopId) || numShopId <= 0 || (typeof shopId !== 'number' && typeof shopId !== 'string') || (typeof shopId === 'string' && !/^\d+$/.test(shopId.trim()))) {
+    throw new TypeError('Invalid shopId: must be positive numeric tenant ID');
+  }
   if (!Array.isArray(tiers) || tiers.length === 0) throw new TypeError('Tiers must be non-empty array');
+
+  // Verify pagination completeness (INC-012)
+  const isTruncated = Boolean(
+    pagination && (
+      pagination.isComplete === false ||
+      (pagination.pageCount > 1 && pagination.page !== undefined && pagination.page < pagination.pageCount)
+    )
+  );
 
   const counts = { total: 0, match: 0, drift: 0, missing: 0, skipped: 0, unknown: 0 };
   const drifts = [];
   const checkedProducts = new Set();
   const checkedPricelists = new Set();
+  const seenVariantCodes = new Set();
 
   for (const product of catalogProducts) {
     checkedProducts.add(product.guid);
@@ -65,6 +78,24 @@ export async function reconcilePrices({
         counts.skipped += tiers.length;
         continue;
       }
+
+      // Duplicate variant detection (INC-010)
+      if (seenVariantCodes.has(code)) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'duplicate_variant_code',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+      seenVariantCodes.add(code);
 
       // Read base price from default pricelist
       const baseMinor = variant.basePriceMinor;
@@ -96,9 +127,11 @@ export async function reconcilePrices({
           tierPercent: tier.percent,
           productCap,
           brandCap,
+          categoryCaps,
           categoryCap: categoryCaps.length ? Math.min(...categoryCaps) : null,
           capPriority: policy?.capPriority ?? 'most_restrictive',
-          salePolicy: policy?.salePolicy ?? 'okfish_compatible'
+          salePolicy: policy?.salePolicy ?? 'okfish_compatible',
+          minimumMinor: policy?.minimumMinor ?? null
         });
 
         // Actual price in target pricelist
@@ -137,10 +170,17 @@ export async function reconcilePrices({
     }
   }
 
-  const selfCheck = evaluateSelfCheck({
+  let selfCheck = evaluateSelfCheck({
     totalChecked: counts.total,
     minExpectedCombinations
   });
+
+  if (isTruncated) {
+    selfCheck = {
+      passed: false,
+      reason: 'incomplete_pagination_truncated_run'
+    };
+  }
 
   return {
     shopId,
@@ -171,16 +211,29 @@ export async function reconcileCoupons({
   couponConfig = {},
   tiers = [],
   catalogProducts = [],
+  pagination = null,
   minExpectedCombinations = 1
 }) {
-  if (!shopId) throw new TypeError('Missing shopId');
+  const numShopId = Number(shopId);
+  if (!Number.isSafeInteger(numShopId) || numShopId <= 0 || (typeof shopId !== 'number' && typeof shopId !== 'string') || (typeof shopId === 'string' && !/^\d+$/.test(shopId.trim()))) {
+    throw new TypeError('Invalid shopId: must be positive numeric tenant ID');
+  }
   if (!Array.isArray(tiers) || tiers.length === 0) throw new TypeError('Tiers must be non-empty array');
+
+  // Verify pagination completeness (INC-012)
+  const isTruncated = Boolean(
+    pagination && (
+      pagination.isComplete === false ||
+      (pagination.pageCount > 1 && pagination.page !== undefined && pagination.page < pagination.pageCount)
+    )
+  );
 
   const couponPolicy = normalizeCouponPolicy(couponConfig);
   const counts = { total: 0, match: 0, drift: 0, missing: 0, skipped: 0, unknown: 0 };
   const drifts = [];
   const checkedProducts = new Set();
   const checkedPricelists = new Set();
+  const seenVariantCodes = new Set();
 
   for (const product of catalogProducts) {
     checkedProducts.add(product.guid);
@@ -192,6 +245,7 @@ export async function reconcileCoupons({
 
     const productCap = product.productCap ?? null;
     const brandCap = product.brandCap ?? null;
+    const categoryCaps = product.categoryCaps ?? [];
     const manualCouponDisabled = product.manualCouponDisabled === true;
 
     for (const variant of (product.variants || [])) {
@@ -200,6 +254,24 @@ export async function reconcileCoupons({
         counts.skipped += tiers.length;
         continue;
       }
+
+      // Duplicate variant detection (INC-010)
+      if (seenVariantCodes.has(code)) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'duplicate_variant_code',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+      seenVariantCodes.add(code);
 
       const baseMinor = variant.basePriceMinor;
       if (!Number.isSafeInteger(baseMinor) || baseMinor <= 0) {
@@ -249,8 +321,11 @@ export async function reconcileCoupons({
           tierPriceMinor,
           productCap,
           brandCap,
+          categoryCaps,
+          capPriority: couponPolicy.capPriority,
           hasActiveSale: Boolean(variant.actionPriceMinor),
-          manualCouponDisabled
+          manualCouponDisabled,
+          minimumMinor: product.minimumMinor ?? null
         });
 
         const actualCoupon = actualEntry.sales?.discountCoupon ?? true;
@@ -287,10 +362,17 @@ export async function reconcileCoupons({
     }
   }
 
-  const selfCheck = evaluateSelfCheck({
+  let selfCheck = evaluateSelfCheck({
     totalChecked: counts.total,
     minExpectedCombinations
   });
+
+  if (isTruncated) {
+    selfCheck = {
+      passed: false,
+      reason: 'incomplete_pagination_truncated_run'
+    };
+  }
 
   return {
     shopId,
