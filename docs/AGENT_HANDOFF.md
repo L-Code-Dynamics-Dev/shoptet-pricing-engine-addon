@@ -520,3 +520,28 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - Isolated feature branch (`feat/complete-merchant-iframe-journey`).
 - Zero unapproved live mutations, main pricelist strictly read-only, auto-remediation stays OFF.
 - Ready for full code review.
+
+### 2026-11-07 14:35 UTC — Gemini — SCHEDULED PROMOTIONS & CLEARANCE SALES FEATURE COMPLETE
+- **Scope:** Complete implementation of scheduled product clearance sales and brand-wide promotions with date windows (`validFrom` / `validTo`), answering the OKfish transfer rule gap.
+- **PR:** [#16](https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/pull/16) (`feat/complete-merchant-iframe-journey` -> `master`)
+- **HEAD Commit:** [`0f3dcc8`](https://github.com/L-Code-Dynamics-Dev/shoptet-pricing-engine-addon/commit/0f3dcc8)
+- **Full Test Suite:** `npm test` (`node --test packages/core/test/*.test.mjs`) -> **314 passed, 0 failed, 0 skipped (16.4s, Node.js 22, macOS)**
+
+#### Implemented Features
+1. **Dynamic Time-Window Evaluation (`packages/core/src/promotions.mjs`):**
+   - Pure-core `isValidDateString` strictly validating `YYYY-MM-DD` (rejects non-existent dates e.g. Feb 29 on non-leap years, invalid months, format anomalies).
+   - Dynamic `isPromotionActive({ validFrom, validTo, now })` evaluated at runtime against reference `now` (midnight UTC bounds: `validFrom` 00:00:00Z to `validTo` 23:59:59.999Z). Fixes OKfish migration gap where Worker isolates cached promotions at import time.
+   - Chronological validation: `validFrom > validTo` fails closed with descriptive Czech error before evaluation.
+   - `resolveScheduledPromotionActionMinor`: Synthesizes action price from `baseMinor` under `HighestDiscountPolicy`, choosing the steepest active discount between product-level clearance and brand-wide promotions.
+2. **Reconciliation Engine Integration (`packages/core/src/reconciliation-runner.mjs`):**
+   - Product-level and brand-level scheduled promotions dynamically factor into `actionMinor`.
+   - Protects manual/scheduled action prices from being raised by loyalty caps or margin floor.
+   - Inactive or expired promotions cleanly return `null`, allowing standard tier pricing to prevail.
+3. **Admin Settings UI Integration (`apps/api/src/iframe-settings.mjs`):**
+   - Tab 2 (Pravidla slev a stropy) expanded with two new merchant-friendly sections:
+     - *Plánované akce a výprodeje produktů (časová okna od–do)*: Dynamic rows with product code, discount %, start date (`validFrom`), and end date (`validTo`).
+     - *Plošné akce na značky (časová okna od–do)*: Dynamic rows with brand name, discount %, start date (`validFrom`), and end date (`validTo`).
+   - Client-side DOM builders `addScheduledPromoRow` and `addBrandPromoRow` with accessible remove buttons (`×`).
+   - Full round-trip persistence via `/admin/settings/api/rules` with optimistic version tracking.
+4. **Test Evidence (`packages/core/test/promotions.test.mjs`):**
+   - 5 comprehensive test suites covering date format parsing, edge-of-day window boundaries, input sanitization, dynamic action price synthesis, and full reconciliation drift detection for active vs expired promotions. All 5/5 pass. Full suite 314/314 pass.
