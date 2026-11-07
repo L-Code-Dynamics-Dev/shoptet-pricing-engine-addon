@@ -1,0 +1,54 @@
+name: Agent handoff monitor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: agent-handoff-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Inspect repository activity
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+            const { data: commits } = await github.rest.repos.listCommits({ owner, repo, since, per_page: 30 });
+            const { data: prs } = await github.rest.pulls.list({ owner, repo, state: 'open', per_page: 100 });
+            const relevant = prs.filter(p => p.updated_at >= since);
+            const lines = [
+              '# L-Code agent handoff monitor',
+              '',
+              'Checked (UTC): ' + new Date().toISOString(),
+              'Recent commits (default branch, last 15 min): ' + commits.length,
+              'Open PRs: ' + prs.length,
+              'Recently updated PRs: ' + relevant.length,
+              '',
+              '## Recent commits',
+              ...commits.map(c => '- ' + c.sha.slice(0, 12) + ' ' + c.commit.message.split('\\n')[0].slice(0, 120)),
+              '',
+              '## Recently updated PRs',
+              ...relevant.map(p => '- #' + p.number + ' ' + p.title.slice(0, 120) + ' (' + p.html_url + ')'),
+              '',
+              '## Coordination file',
+              'docs/AGENT_HANDOFF.md: check the coordination branch or merged default branch.',
+              '',
+              'This job only reads GitHub metadata. It does not execute tests, review code, update the handoff, or deploy.'
+            ];
+            const summary = lines.join('\\n');
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary + '\\n');
+            core.info(summary);

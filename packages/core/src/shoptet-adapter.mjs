@@ -64,6 +64,23 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       const rows=z.array(priceRowSchema).max(100).parse(data.prices);
       return {items:rows,pagination:paginatorSchema.parse(data.paginator)};
     },
+    async *iteratePrices(id, { limit = 50, maxPages = 1000, checkFence = null } = {}) {
+      positiveId.parse(id);
+      let page = 1;
+      let pageCount = 1;
+      while (page <= pageCount && page <= maxPages) {
+        if (checkFence) await checkFence();
+        const res = await adapter.prices(id, { page, limit });
+        pageCount = res.pagination.pageCount;
+        for (const item of res.items) {
+          yield item;
+        }
+        page++;
+      }
+      if (page <= pageCount) {
+        throw new ShoptetError('max_pages_exceeded_incomplete_scan');
+      }
+    },
     async capabilities() {
       const data=await read('/api/system/endpoints',{status:'approved'});
       return {source:'shoptet_approved_endpoints',endpoints:z.array(z.object({endpoint:z.string().max(128),access:z.enum(['read','write','both']),action:z.literal(null)})).max(1000).parse(data.endpoints)};
@@ -130,6 +147,89 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
         return { outcome: 'failed', error: 'readback_mismatch', expectedPricelistId: pricelistId, actualPricelistId: verified.priceList?.id ?? null, requiresReadback: true };
       }
       return { outcome: 'accepted', customerGuid: guid, previousPricelistId: current.priceList?.id ?? null, pricelistId, verified: true, requiresReadback: false };
+    },
+    async createPricelist({ name }) {
+      z.string().min(1).max(128).parse(name);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ action: 'createPricelist', name });
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/pricelists', {
+          method: 'POST',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { name } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { outcome: 'failed', error: response.status === 401 ? 'oauth_expired' : 'permission_missing', status: response.status };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response' }; }
+      if (!response.ok || !body?.data) {
+        return { outcome: 'failed', error: 'create_pricelist_failed', status: response.status, errors: body?.errors ?? [] };
+      }
+      return { outcome: 'accepted', pricelist: { id: body.data.id, name: body.data.name } };
+    },
+    async createCustomerGroup({ name, defaultPricelistId = null }) {
+      z.string().min(1).max(128).parse(name);
+      if (defaultPricelistId !== null && defaultPricelistId !== undefined) positiveId.parse(defaultPricelistId);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ action: 'createCustomerGroup', name, defaultPricelistId });
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/customers/groups', {
+          method: 'POST',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { name, ...(defaultPricelistId ? { defaultPricelistId } : {}) } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { outcome: 'failed', error: response.status === 401 ? 'oauth_expired' : 'permission_missing', status: response.status };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response' }; }
+      if (!response.ok || !body?.data) {
+        return { outcome: 'failed', error: 'create_customer_group_failed', status: response.status, errors: body?.errors ?? [] };
+      }
+      return { outcome: 'accepted', customerGroup: { id: body.data.id, name: body.data.name, defaultPricelistId: body.data.defaultPricelistId ?? defaultPricelistId ?? null } };
+    },
+    async updateCustomerGroup(id, { defaultPricelistId }) {
+      positiveId.parse(id);
+      positiveId.parse(defaultPricelistId);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ action: 'updateCustomerGroup', id, defaultPricelistId });
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/customers/groups/' + id, {
+          method: 'PATCH',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { defaultPricelistId } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { outcome: 'failed', error: response.status === 401 ? 'oauth_expired' : 'permission_missing', status: response.status };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response' }; }
+      if (!response.ok || !body?.data) {
+        return { outcome: 'failed', error: 'update_customer_group_failed', status: response.status, errors: body?.errors ?? [] };
+      }
+      return { outcome: 'accepted', id, defaultPricelistId };
     }
   };
   return adapter;
