@@ -1,0 +1,153 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  calculateTierPrice,
+  resolveDiscountCap,
+  createPricelistPricePatch,
+  resolveCurrencyRoundingRules
+} from '../src/pricing.mjs';
+import { evaluatePricing, formatApiPrice } from '../src/pricing-policy.mjs';
+
+test('FÁZE 1: Exact Decimal arithmetic - boundary values and zero rounding error', () => {
+  // Test with large integers up to safe bounds
+  const largeBase = 90071992547400; // Large safe integer minor units
+  const res = calculateTierPrice({ baseMinor: largeBase, tierPercent: 10 });
+  assert.equal(res, 81064793292660);
+
+  // Exact penny / cent half-up rounding
+  assert.equal(calculateTierPrice({ baseMinor: 105, tierPercent: 10, rounding: 'math', incrementMinor: 1 }), 95); // 105 * 0.90 = 94.5 -> 95
+  assert.equal(calculateTierPrice({ baseMinor: 105, tierPercent: 10, rounding: 'down', incrementMinor: 1 }), 94);
+  assert.equal(calculateTierPrice({ baseMinor: 105, tierPercent: 10, rounding: 'up', incrementMinor: 1 }), 95);
+});
+
+test('FÁZE 1: HighestDiscountPolicy - lower of sale and loyalty price, zero stacking', () => {
+  // Base 1000 CZK (100000 minor)
+  // Loyalty 10% -> 900 CZK (90000 minor)
+  // Sale 850 CZK (85000 minor) -> Sale wins
+  const saleWins = calculateTierPrice({
+    baseMinor: 100000,
+    actionMinor: 85000,
+    tierPercent: 10,
+    salePolicy: 'lowest_price'
+  });
+  assert.equal(saleWins, 85000);
+
+  // Loyalty 20% -> 800 CZK (80000 minor)
+  // Sale 850 CZK -> Loyalty wins
+  const loyaltyWins = calculateTierPrice({
+    baseMinor: 100000,
+    actionMinor: 85000,
+    tierPercent: 20,
+    salePolicy: 'lowest_price'
+  });
+  assert.equal(loyaltyWins, 80000);
+
+  // Stacking is NEVER performed (no 20% off 850)
+  assert.notEqual(loyaltyWins, 68000);
+});
+
+test('FÁZE 1: Strop precedence - product -> brand -> category (hierarchy)', () => {
+  // Product cap 12%, Brand cap 8%, Category cap 5%
+  // In hierarchy mode, product cap 12% is authoritative
+  const hierarchyProduct = resolveDiscountCap({
+    productCap: 12,
+    brandCap: 8,
+    categoryCap: 5,
+    priority: 'hierarchy'
+  });
+  assert.equal(hierarchyProduct, 12);
+
+  // If product cap is null, brand cap 8% takes precedence over category cap 5%
+  const hierarchyBrand = resolveDiscountCap({
+    productCap: null,
+    brandCap: 8,
+    categoryCap: 5,
+    priority: 'hierarchy'
+  });
+  assert.equal(hierarchyBrand, 8);
+
+  // If product and brand caps are null, category cap 5% takes effect
+  const hierarchyCat = resolveDiscountCap({
+    productCap: null,
+    brandCap: null,
+    categoryCap: 5,
+    priority: 'hierarchy'
+  });
+  assert.equal(hierarchyCat, 5);
+
+  // In most_restrictive mode, min(12, 8, 5) = 5%
+  const mostRestrictive = resolveDiscountCap({
+    productCap: 12,
+    brandCap: 8,
+    categoryCap: 5,
+    priority: 'most_restrictive'
+  });
+  assert.equal(mostRestrictive, 5);
+});
+
+test('FÁZE 1: Action price is never raised by cap (INC-004)', () => {
+  // Base 10000, Action 8000 (20% off), Product Cap 10% (floor 9000), Tier 25%
+  const res = calculateTierPrice({
+    baseMinor: 10000,
+    actionMinor: 8000,
+    tierPercent: 25,
+    capPercent: 10,
+    salePolicy: 'okfish_compatible'
+  });
+  // Must NOT be raised to 9000
+  assert.equal(res, 8000);
+});
+
+test('FÁZE 1: Zero-discount product cap blocks loyalty without error', () => {
+  // Product with cap 0% (strictly no loyalty discount)
+  const capZero = resolveDiscountCap({ productCap: 0, brandCap: 15 });
+  assert.equal(capZero, 0);
+
+  const price = calculateTierPrice({
+    baseMinor: 10000,
+    tierPercent: 20,
+    capPercent: capZero
+  });
+  assert.equal(price, 10000); // Full base price preserved
+});
+
+test('FÁZE 1: Currency rounding rules and Shoptet conventions', () => {
+  const czk = resolveCurrencyRoundingRules('CZK');
+  assert.equal(czk.currencyCode, 'CZK');
+  assert.equal(czk.decimals, 2);
+  assert.equal(czk.incrementMinor, 100); // whole CZK default for customer pricing
+
+  const eur = resolveCurrencyRoundingRules('EUR');
+  assert.equal(eur.currencyCode, 'EUR');
+  assert.equal(eur.decimals, 2);
+  assert.equal(eur.incrementMinor, 1); // 0.01 cent
+
+  const huf = resolveCurrencyRoundingRules('HUF');
+  assert.equal(huf.decimals, 0);
+  assert.equal(huf.incrementMinor, 100); // whole HUF
+
+  assert.throws(() => resolveCurrencyRoundingRules('INVALID'), /Invalid currencyCode/);
+});
+
+test('FÁZE 1: Fail closed on missing VAT, zero prices or invalid data (INC-010, INC-014, INC-015)', () => {
+  // Reject zero prices without explicit approval
+  assert.throws(() => createPricelistPricePatch({ code: 'SKU1', priceMinor: 0, vatRate: '21.00' }), /Zero price/);
+  // Allow zero price only when explicitly approved
+  const freeItem = createPricelistPricePatch({ code: 'FREE1', priceMinor: 0, vatRate: '21.00', allowZeroPrice: true });
+  assert.equal(freeItem.price, '0.00');
+
+  // Reject missing VAT
+  assert.throws(() => createPricelistPricePatch({ code: 'SKU1', priceMinor: 1000 }), /Explicit VAT rate/);
+  assert.throws(() => createPricelistPricePatch({ code: 'SKU1', priceMinor: 1000, vatRate: 'invalid' }), /Explicit VAT rate/);
+
+  // Reject non-inclusive VAT writes
+  assert.throws(() => createPricelistPricePatch({ code: 'SKU1', priceMinor: 1000, vatRate: '21.00', includingVat: false }), /VAT-inclusive/);
+
+  // Minimum margin floor violation
+  const marginProtected = calculateTierPrice({
+    baseMinor: 10000,
+    tierPercent: 25, // would be 7500
+    minimumMinor: 8500
+  });
+  assert.equal(marginProtected, 8500); // Clamped to minimum margin floor
+});
