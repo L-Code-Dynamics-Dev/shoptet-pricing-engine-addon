@@ -123,6 +123,17 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - Risks / blockers: None. All 267 test cases pass. Auto-remediation is OFF. Zero live price writes or Shoptet API mutations performed.
 - Next owner / action: GPT-6 / Re-review PR #4 at commit `21c2522`.
 
+### 2026-11-07 — GPT-6 — NEXT GEMINI WORK AFTER 267/267 REPORT — ACTION_REQUIRED
+- Review pinned to current PR #4 HEAD `5ac57cab314ee01db778ac9a75d1e7dbce4beb17` (newer than Gemini's `21c2522` checkpoint). Source inspected via GitHub; GPT-6 has NOT run local tests. Do not infer PR approval from test counts.
+- **TASK A — verify latest head and tests (first):** inspect commits between `21c2522` and `5ac57cab`; check `AGENTS.md`, PR CI status, diff, exact `npm test` results; report why HEAD advanced. Do not overwrite newer concurrent edits.
+- **TASK B — coupon ratio floor:** inspect `coupon-engine.mjs:56-73` at latest head; prove CEILING ratio and actual Shoptet 3-decimal semantics with test vectors floor=8500/tier=9000 and tiny positive floor. Add regression for representable rounding boundaries; fail closed if platform semantics unknown.
+- **TASK C — manual sale vs margin floor:** inspect `pricing.mjs:137-157` and price patch writer. Verify no engine-authorized price write raises protected merchant action 8000 to minimum 9000; ensure conflicting margin floor produces explicit `BLOCKED/NO_WRITE` rather than silently claiming compliance. Tests for both salePolicy modes and no-action case.
+- **TASK D — malformed percent and cap policy:** `pricing.mjs:64-85` uses `Math.min(...categoryCaps)` and `coupon-engine.mjs:8-49` parses percent strings. Test invalid category array values (NaN, null, objects, empty), long decimal precision, and agreement between hierarchy/most_restrictive for multiple categories. Preserve backward compatibility for valid inputs.
+- **TASK E — reconciliation trustworthy coverage:** verify `reconciliation-runner.mjs` selfCheck on UNKNOWN, duplicates, missing variant codes, incomplete pagination, absent expected combinations and cross-shop injected data. Do not claim authenticated shop isolation from positive numeric `shopId`; require adapter authorization test separately.
+- **TASK F — currency / VAT integration gate:** before any live writes, verify merchant rounding settings, explicit VAT basis and Shoptet API contract against fixture data; current pure core alone is not proof of production compatibility. Record unsupported cases as BLOCKED rather than inventing defaults.
+- Implement smallest failing-test-first patches only where evidence demonstrates a defect; update handoff with exact commit, tests and risk status. Never merge/deploy, enable remediation or write live Shoptet prices without explicit approval.
+- **Owner:** Gemini; **next reviewer:** GPT-6 after new commit. Status: TASKS_ASSIGNED / REVIEW_PENDING.
+
 ## Entry template
 ```
 ### YYYY-MM-DD HH:MM UTC — AGENT — PHASE — STATUS
