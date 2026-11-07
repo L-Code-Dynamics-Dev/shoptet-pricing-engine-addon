@@ -62,23 +62,52 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       if(code!==undefined)z.string().min(1).max(128).parse(code);
       const data=await read('/api/price-lists/'+id+'/prices',{page,itemsPerPage:limit,...(code!==undefined?{code}:{})});
       const rows=z.array(priceRowSchema).max(100).parse(data.prices);
-      return {items:rows,pagination:paginatorSchema.parse(data.paginator)};
+      const pagParsed=paginatorSchema.safeParse(data.paginator);
+      if(!pagParsed.success)throw new ShoptetError('incomplete_price_pagination_scan');
+      return {items:rows,pagination:pagParsed.data};
     },
     async *iteratePrices(id, { limit = 50, maxPages = 1000, checkFence = null } = {}) {
       positiveId.parse(id);
       let page = 1;
       let pageCount = 1;
+      let expectedTotalCount = null;
+      let yieldedCount = 0;
       while (page <= pageCount && page <= maxPages) {
         if (checkFence) await checkFence();
         const res = await adapter.prices(id, { page, limit });
-        pageCount = res.pagination.pageCount;
-        for (const item of res.items) {
+        const pag = res?.pagination;
+        if (
+          !pag ||
+          !Number.isSafeInteger(pag.page) ||
+          pag.page !== page ||
+          !Number.isSafeInteger(pag.pageCount) ||
+          pag.pageCount < 1 ||
+          !Number.isSafeInteger(pag.totalCount) ||
+          pag.totalCount < 0
+        ) {
+          throw new ShoptetError('incomplete_price_pagination_scan');
+        }
+        if (page === 1) {
+          pageCount = pag.pageCount;
+          expectedTotalCount = pag.totalCount;
+        } else if (pag.pageCount !== pageCount || pag.totalCount !== expectedTotalCount) {
+          throw new ShoptetError('incomplete_price_pagination_scan');
+        }
+        const items = Array.isArray(res?.items) ? res.items : null;
+        if (!items || (items.length === 0 && (pageCount > 1 || expectedTotalCount > 0))) {
+          throw new ShoptetError('incomplete_price_pagination_scan');
+        }
+        for (const item of items) {
+          yieldedCount++;
           yield item;
         }
         page++;
       }
       if (page <= pageCount) {
         throw new ShoptetError('max_pages_exceeded_incomplete_scan');
+      }
+      if (expectedTotalCount === null || yieldedCount !== expectedTotalCount) {
+        throw new ShoptetError('incomplete_price_pagination_scan');
       }
     },
     async capabilities() {

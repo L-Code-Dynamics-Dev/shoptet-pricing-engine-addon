@@ -256,39 +256,56 @@ async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, de
     ? Math.round(minMarginPercent * 100)
     : null;
 
+  let hasVerifiedPricePagination = true;
   const basePriceByCode = new Map();
-  for await (const row of adapter.iteratePrices(defaultPricelistId)) {
-    const basePriceMinor = grossApiPrice(row, vatPayer);
-    const actionPriceMinor = activeActionMinor(row, vatPayer, date);
-    let minimumMinor = null;
-    let missingMarginCost = false;
-    if (minMarginBps !== null) {
-      const purchase = row.prices?.purchasePrice;
-      if (purchase?.price && purchase.vatRate === row.vatRate) {
-        const vat = BigInt(parseApiPrice(row.vatRate));
-        const cost = BigInt(parseApiPrice(purchase.price));
-        if (cost > 0n) {
-          const grossCost = purchase.includingVat ? cost : (cost * (10000n + vat) + 9999n) / 10000n;
-          const denom = 10000n - BigInt(minMarginBps);
-          const floor = (grossCost * 10000n + denom - 1n) / denom;
-          if (floor <= BigInt(Number.MAX_SAFE_INTEGER)) minimumMinor = Number(floor);
+  try {
+    for await (const row of adapter.iteratePrices(defaultPricelistId)) {
+      const basePriceMinor = grossApiPrice(row, vatPayer);
+      const actionPriceMinor = activeActionMinor(row, vatPayer, date);
+      let minimumMinor = null;
+      let missingMarginCost = false;
+      if (minMarginBps !== null) {
+        const purchase = row.prices?.purchasePrice;
+        if (purchase?.price && purchase.vatRate === row.vatRate) {
+          const vat = BigInt(parseApiPrice(row.vatRate));
+          const cost = BigInt(parseApiPrice(purchase.price));
+          if (cost > 0n) {
+            const grossCost = purchase.includingVat ? cost : (cost * (10000n + vat) + 9999n) / 10000n;
+            const denom = 10000n - BigInt(minMarginBps);
+            const floor = (grossCost * 10000n + denom - 1n) / denom;
+            if (floor <= BigInt(Number.MAX_SAFE_INTEGER)) minimumMinor = Number(floor);
+          }
+        }
+        if (minimumMinor === null) {
+          missingMarginCost = true;
         }
       }
-      if (minimumMinor === null) {
-        missingMarginCost = true;
-      }
+      basePriceByCode.set(row.code, { basePriceMinor, actionPriceMinor, minimumMinor, missingMarginCost });
     }
-    basePriceByCode.set(row.code, { basePriceMinor, actionPriceMinor, minimumMinor, missingMarginCost });
+  } catch (err) {
+    if (err?.code === 'incomplete_price_pagination_scan' || err?.code === 'max_pages_exceeded_incomplete_scan') {
+      hasVerifiedPricePagination = false;
+    } else {
+      throw err;
+    }
   }
 
   const tierPricesByPricelist = new Map();
   for (const tier of tiers) {
     const byCode = new Map();
-    for await (const row of adapter.iteratePrices(tier.pricelistId)) {
-      byCode.set(row.code, {
-        priceMinor: grossApiPrice(row, vatPayer),
-        sales: row.sales
-      });
+    try {
+      for await (const row of adapter.iteratePrices(tier.pricelistId)) {
+        byCode.set(row.code, {
+          priceMinor: grossApiPrice(row, vatPayer),
+          sales: row.sales
+        });
+      }
+    } catch (err) {
+      if (err?.code === 'incomplete_price_pagination_scan' || err?.code === 'max_pages_exceeded_incomplete_scan') {
+        hasVerifiedPricePagination = false;
+      } else {
+        throw err;
+      }
     }
     tierPricesByPricelist.set(tier.pricelistId, byCode);
   }
@@ -374,7 +391,7 @@ async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, de
     hasVerifiedPagination = false;
   }
 
-  const fullCatalogVerified = hasVerifiedPagination && page > pageCount;
+  const fullCatalogVerified = hasVerifiedPagination && hasVerifiedPricePagination && page > pageCount;
   const pagination = {
     page: Math.max(1, page - 1),
     pageCount,

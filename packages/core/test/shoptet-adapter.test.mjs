@@ -132,4 +132,53 @@ test('K4: iteratePrices streams paginated prices with fence check and fails clos
     },
     /max_pages_exceeded_incomplete_scan/
   );
+
+  // 3. Fails closed if an intermediate/second page returns empty prices array
+  const emptySecondPageAdapter = createShoptetAdapter({
+    getToken: async () => 'token',
+    fetchImpl: async (url) => {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      if (page === 1) return response(pages[1]);
+      return response({ prices: [], paginator: { page: 2, pageCount: 2, totalCount: 2 } });
+    }
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _ of emptySecondPageAdapter.iteratePrices(2, { limit: 1 })) {}
+    },
+    /incomplete_price_pagination_scan/
+  );
+
+  // 4. Fails closed if total yielded rows across pages is fewer than paginator.totalCount
+  const fewerRowsAdapter = createShoptetAdapter({
+    getToken: async () => 'token',
+    fetchImpl: async (url) => {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      return response({
+        prices: pages[page].prices,
+        paginator: { page, pageCount: 2, totalCount: 3 }
+      });
+    }
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _ of fewerRowsAdapter.iteratePrices(2, { limit: 1 })) {}
+    },
+    /incomplete_price_pagination_scan/
+  );
+
+  // 5. Fails closed if paginator.totalCount is missing or invalid
+  const invalidTotalCountAdapter = createShoptetAdapter({
+    getToken: async () => 'token',
+    fetchImpl: async () => response({
+      prices: pages[1].prices,
+      paginator: { page: 1, pageCount: 1, totalCount: null }
+    })
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _ of invalidTotalCountAdapter.iteratePrices(2, { limit: 1 })) {}
+    },
+    /incomplete_price_pagination_scan/
+  );
 });

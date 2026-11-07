@@ -622,4 +622,149 @@ test('reconciliation release gates 1-3: wire-level Shoptet adapter pagination, i
   const incompleteBody = await incompleteRes.json();
   assert.equal(incompleteBody.lastReconciliation.priceReport.selfCheckPassed, false);
   assert.equal(incompleteBody.lastReconciliation.couponReport.selfCheckPassed, false);
+
+  // Gate 1d: Wire-level incomplete price pagination (empty page 2, fewer total rows than totalCount, and missing totalCount)
+  // on both default pricelist (17) and managed tier pricelist (2) must NEVER produce selfCheckPassed=true and never issue PATCH/POST
+  for (const scenario of ['default_empty_page2', 'tier_empty_page2', 'tier_fewer_than_total_count', 'tier_missing_total_count']) {
+    const scenarioMethods = [];
+    const scenarioAdapter = createShoptetAdapter({
+      getToken: async () => 'shoptet-test-tok',
+      fetchImpl: async (urlStr, opts = {}) => {
+        scenarioMethods.push(opts.method || 'GET');
+        const u = new URL(urlStr);
+        const page = Number(u.searchParams.get('page') || '1');
+
+        if (u.pathname === '/api/eshop') {
+          return new Response(JSON.stringify({
+            data: {
+              contactInformation: { eshopId: 826800, eshopName: 'Test Shop 826800' },
+              settings: { vatPayer: true, defaultPricelist: { id: 17 }, timezone: 'Europe/Prague' },
+              currencies: [{ code: 'CZK', isDefault: true, priceDecimalPlaces: 2, rounding: 'math' }]
+            },
+            errors: null
+          }), { status: 200 });
+        }
+        if (u.pathname === '/api/products') {
+          return new Response(JSON.stringify({
+            data: {
+              products: [
+                { guid: guid1, name: 'Prod 1', visibility: 'normal' },
+                { guid: guid2, name: 'Prod 2', visibility: 'normal' }
+              ],
+              paginator: { totalCount: 2, page: 1, pageCount: 1, itemsOnPage: 2, perPage: 50 }
+            },
+            errors: null
+          }), { status: 200 });
+        }
+        if (u.pathname === `/api/products/${guid1}` || u.pathname === `/api/products/${guid2}`) {
+          const isFirst = u.pathname.endsWith(guid1);
+          return new Response(JSON.stringify({
+            data: {
+              guid: isFirst ? guid1 : guid2,
+              name: isFirst ? 'Prod 1' : 'Prod 2',
+              visibility: 'normal',
+              brand: null,
+              defaultCategory: { guid: '123e4567-e89b-42d3-a456-426614174099' },
+              categories: [{ guid: '123e4567-e89b-42d3-a456-426614174099' }],
+              variants: [{ code: isFirst ? 'SKU-P1' : 'SKU-P2', visible: true }]
+            },
+            errors: null
+          }), { status: 200 });
+        }
+        if (u.pathname === '/api/price-lists/17/prices') {
+          if (scenario === 'default_empty_page2' && page === 2) {
+            return new Response(JSON.stringify({
+              data: { prices: [], paginator: { totalCount: 2, page: 2, pageCount: 2 } },
+              errors: null
+            }), { status: 200 });
+          }
+          const row = page === 1
+            ? {
+                code: 'SKU-P1',
+                currencyCode: 'CZK',
+                vatRate: '21.00',
+                includingVat: true,
+                price: { price: '1000.00', commonPrice: '1000.00', actionPrice: null, priceRatio: '1.000' },
+                prices: { purchasePrice: { price: '600.00', vatRate: '21.00', includingVat: true } },
+                sales: { minPriceRatio: null, discountCoupon: true }
+              }
+            : {
+                code: 'SKU-P2',
+                currencyCode: 'CZK',
+                vatRate: '21.00',
+                includingVat: true,
+                price: { price: '1000.00', commonPrice: '1000.00', actionPrice: null, priceRatio: '1.000' },
+                prices: { purchasePrice: { price: '600.00', vatRate: '21.00', includingVat: true } },
+                sales: { minPriceRatio: null, discountCoupon: true }
+              };
+          return new Response(JSON.stringify({
+            data: { prices: [row], paginator: { totalCount: 2, page, pageCount: 2 } },
+            errors: null
+          }), { status: 200 });
+        }
+        if (u.pathname === '/api/price-lists/2/prices') {
+          if (scenario === 'tier_empty_page2' && page === 2) {
+            return new Response(JSON.stringify({
+              data: { prices: [], paginator: { totalCount: 2, page: 2, pageCount: 2 } },
+              errors: null
+            }), { status: 200 });
+          }
+          if (scenario === 'tier_missing_total_count') {
+            return new Response(JSON.stringify({
+              data: {
+                prices: [{
+                  code: 'SKU-P1',
+                  currencyCode: 'CZK',
+                  vatRate: '21.00',
+                  includingVat: true,
+                  price: { price: '900.00', commonPrice: '1000.00', actionPrice: null, priceRatio: '1.000' },
+                  prices: { purchasePrice: { price: '600.00', vatRate: '21.00', includingVat: true } },
+                  sales: { minPriceRatio: '0.889', discountCoupon: true }
+                }],
+                paginator: { page: 1, pageCount: 1 }
+              },
+              errors: null
+            }), { status: 200 });
+          }
+          const row = page === 1
+            ? {
+                code: 'SKU-P1',
+                currencyCode: 'CZK',
+                vatRate: '21.00',
+                includingVat: true,
+                price: { price: '900.00', commonPrice: '1000.00', actionPrice: null, priceRatio: '1.000' },
+                prices: { purchasePrice: { price: '600.00', vatRate: '21.00', includingVat: true } },
+                sales: { minPriceRatio: '0.889', discountCoupon: true }
+              }
+            : {
+                code: 'SKU-P2',
+                currencyCode: 'CZK',
+                vatRate: '21.00',
+                includingVat: true,
+                price: { price: '900.00', commonPrice: '1000.00', actionPrice: null, priceRatio: '1.000' },
+                prices: { purchasePrice: { price: '600.00', vatRate: '21.00', includingVat: true } },
+                sales: { minPriceRatio: '0.889', discountCoupon: true }
+              };
+          const totalCount = scenario === 'tier_fewer_than_total_count' ? 3 : 2;
+          return new Response(JSON.stringify({
+            data: { prices: [row], paginator: { totalCount, page, pageCount: 2 } },
+            errors: null
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: null, errors: [{ errorCode: 'not_found' }] }), { status: 404 });
+      }
+    });
+
+    const scenRes = await handleAdminSettingsApi(
+      await apiReq('/reconciliation/run', { method: 'POST', session, body: {} }),
+      { ...env, createShoptetAdapter: async () => scenarioAdapter }
+    );
+    assert.equal(scenRes.status, 200, `scenario ${scenario} status`);
+    const scenBody = await scenRes.json();
+    assert.equal(scenBody.lastReconciliation.priceReport.selfCheckPassed, false, `scenario ${scenario} price selfCheckPassed`);
+    assert.equal(scenBody.lastReconciliation.priceReport.selfCheckReason, 'incomplete_pagination_truncated_run', `scenario ${scenario} price selfCheckReason`);
+    assert.equal(scenBody.lastReconciliation.couponReport.selfCheckPassed, false, `scenario ${scenario} coupon selfCheckPassed`);
+    assert.equal(scenBody.lastReconciliation.couponReport.selfCheckReason, 'incomplete_pagination_truncated_run', `scenario ${scenario} coupon selfCheckReason`);
+    assert.ok(scenarioMethods.every(m => m === 'GET'), `scenario ${scenario} must only issue GET requests`);
+  }
 });
