@@ -175,11 +175,15 @@ export function resolveScheduledPromotionActionMinor({
   }
 
   // 2. Brand-level promotion (fallback if no direct product promo)
-  if (activeDiscountPercent === null && Array.isArray(brandPromotions) && typeof brand === 'string' && brand.trim()) {
-    const cleanBrand = brand.trim().toLowerCase();
-    const brandPromo = brandPromotions.find(b => b.brand && b.brand.trim().toLowerCase() === cleanBrand);
-    if (brandPromo && isPromotionActive({ validFrom: brandPromo.validFrom, validTo: brandPromo.validTo, now })) {
-      activeDiscountPercent = brandPromo.discountPercent;
+  if (activeDiscountPercent === null && Array.isArray(brandPromotions) && brand !== null && brand !== undefined) {
+    const candidates = (Array.isArray(brand) ? brand : [brand])
+      .filter(b => typeof b === 'string' && b.trim())
+      .map(b => b.trim().toLowerCase());
+    if (candidates.length > 0) {
+      const brandPromo = brandPromotions.find(b => b.brand && candidates.includes(b.brand.trim().toLowerCase()));
+      if (brandPromo && isPromotionActive({ validFrom: brandPromo.validFrom, validTo: brandPromo.validTo, now })) {
+        activeDiscountPercent = brandPromo.discountPercent;
+      }
     }
   }
 

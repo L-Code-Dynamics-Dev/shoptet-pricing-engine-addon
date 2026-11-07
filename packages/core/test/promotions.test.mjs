@@ -235,3 +235,28 @@ test('promotions: reconcilePrices dynamically applies scheduled product and bran
   assert.equal(expiredReport.drifts[0].expected, 90000);
   assert.equal(expiredReport.drifts[0].actual, 80000);
 });
+
+test('promotions: buildSyncPlan (PRICE-005) applies scheduled product clearance and brand promotions with time windows', async () => {
+  const { syncFixture, BRAND } = await import('./helpers/sync-fixture.mjs');
+  const f = await syncFixture({
+    scheduledPromotions: [
+      { code: 'TEST/A', discountPercent: 25, validFrom: '2020-01-01', validTo: '2099-12-31' }
+    ],
+    brandPromotions: [
+      { brand: BRAND, discountPercent: 15, validFrom: '2020-01-01', validTo: '2099-12-31' }
+    ]
+  });
+  try {
+    const p = await f.plan();
+    // TEST/A has 25% scheduled clearance -> 75.00 (overrides 5% loyalty tier and 15% brand promo)
+    assert.equal(p.plan.actions[0].code, 'TEST/A');
+    assert.equal(p.plan.actions[0].expected.price, '75.00');
+    assert.equal(p.plan.actions[0].calculation.source, 'sale');
+    // TEST/B has no SKU clearance, inherits 15% active brand promo -> 85.00 (overrides 5% loyalty tier)
+    assert.equal(p.plan.actions[1].code, 'TEST/B');
+    assert.equal(p.plan.actions[1].expected.price, '85.00');
+    assert.equal(p.plan.actions[1].calculation.source, 'sale');
+  } finally {
+    f.db.sql.close();
+  }
+});

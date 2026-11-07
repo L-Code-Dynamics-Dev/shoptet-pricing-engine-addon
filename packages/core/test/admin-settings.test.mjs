@@ -154,6 +154,28 @@ test('rule validation', () => {
 
   const invalidProduct = validateRules({ productLimits: { 'bad-guid': 10 } });
   assert.match(invalidProduct.error, /Produkt vyberte/);
+
+  const invalidCouponMode = validateRules({ couponMode: 'invalid-mode' });
+  assert.match(invalidCouponMode.error, /Neznámý režim kupónů/);
+
+  const invalidCapPriority = validateRules({ capPriority: 'invalid-priority' });
+  assert.match(invalidCapPriority.error, /Neznámá priorita stropů/);
+
+  const invalidMargin = validateRules({ minMarginPercent: 100 });
+  assert.match(invalidMargin.error, /Minimální marže musí být 0–99,99 %/);
+
+  const validExtended = validateRules({
+    couponMode: 'percent-ceiling',
+    capPriority: 'most_restrictive',
+    minMarginPercent: 20,
+    scheduledPromotions: [{ code: 'SKU-1', discountPercent: 15, validFrom: '2026-11-01', validTo: '2026-11-30' }],
+    brandPromotions: [{ brand: 'Delphin', discountPercent: 10, validFrom: '2026-11-01', validTo: '2026-11-30' }]
+  });
+  assert.equal(validExtended.rules.couponMode, 'percent-ceiling');
+  assert.equal(validExtended.rules.capPriority, 'most_restrictive');
+  assert.equal(validExtended.rules.minMarginPercent, 20);
+  assert.equal(validExtended.rules.scheduledPromotions.length, 1);
+  assert.equal(validExtended.rules.brandPromotions.length, 1);
 });
 
 async function apiReq(path, { method = 'GET', body, session, origin } = {}) {
@@ -215,4 +237,60 @@ test('mcp token is returned once, stored hashed and revokes previous', async () 
   assert.equal(insert.args[1], '826800');
   assert.ok(!JSON.parse(insert.args[2]).includes('assets:install'));
   assert.ok(db.calls.some(c => c.sql.startsWith('UPDATE mcp_credentials SET revoked_at')));
+});
+
+test('reconciliation status and run endpoints execute separate price and coupon audits with AUTO OFF', async () => {
+  const db = fakeDb({
+    config: {
+      tiers: [{ name: 'Bronz', percent: 10, minTurnover: 1000, pricelistId: 2 }],
+      rules: { couponMode: 'fixed-amount', capPriority: 'hierarchy', couponLockTopTiers: false }
+    },
+    version: 1
+  });
+  const env = { DB: db, ADMIN_SESSION_SECRET: SECRET };
+  const session = await issueSession('826800', SECRET);
+
+  const statusBefore = await (await handleAdminSettingsApi(await apiReq('/reconciliation/status', { session }), env)).json();
+  assert.equal(statusBefore.status, 'idle');
+  assert.equal(statusBefore.remediationMode, 'OFF');
+  assert.equal(statusBefore.autoRemediationEnabled, false);
+
+  const runRes = await handleAdminSettingsApi(await apiReq('/reconciliation/run', {
+    method: 'POST',
+    session,
+    body: {
+      defaultPricelistId: 1,
+      fullCatalogVerified: true,
+      pagination: { isComplete: true, page: 1, pageCount: 1 },
+      catalogProducts: [
+        {
+          guid: '123e4567-e89b-42d3-a456-426614174010',
+          visibility: 'normal',
+          variants: [
+            {
+              code: 'SKU-REC-1',
+              visible: true,
+              basePriceMinor: 100000,
+              perPricelistPrices: {
+                2: {
+                  priceMinor: 90000,
+                  sales: { discountCoupon: true, minPriceRatio: null }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }), env);
+
+  assert.equal(runRes.status, 200);
+  const runData = await runRes.json();
+  assert.equal(runData.status, 'completed');
+  assert.equal(runData.remediationMode, 'OFF');
+  assert.equal(runData.autoRemediationEnabled, false);
+  assert.equal(runData.lastReconciliation.priceReport.selfCheckPassed, true);
+  assert.equal(runData.lastReconciliation.priceReport.counts.match, 1);
+  assert.equal(runData.lastReconciliation.couponReport.selfCheckPassed, true);
+  assert.equal(runData.lastReconciliation.couponReport.counts.match, 1);
 });

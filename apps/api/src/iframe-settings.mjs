@@ -26,6 +26,13 @@ import {
   validateProductPromotion,
   validateBrandPromotion
 } from '../../../packages/core/src/promotions.mjs';
+import {
+  reconcilePrices,
+  reconcileCoupons
+} from '../../../packages/core/src/reconciliation-runner.mjs';
+import {
+  classifyRemediationEligibility
+} from '../../../packages/core/src/self-healing-engine.mjs';
 /**
  * L-Code Loyalty Pricing Engine — addon settings page embedded in Shoptet administration.
  * High-fidelity native Shoptet administration theme with Shoptet tabs, cards, and buttons.
@@ -130,6 +137,31 @@ export function validateRules(input) {
     couponLockMinPercent = Math.round(minP * 100) / 100;
   }
 
+  let couponMode = 'fixed-amount';
+  if (input.couponMode !== undefined && input.couponMode !== null && input.couponMode !== '') {
+    if (!['fixed-amount', 'percent-ceiling'].includes(input.couponMode)) {
+      return { error: 'Neznámý režim kupónů. Povolené hodnoty jsou pevná částka nebo procentní strop.' };
+    }
+    couponMode = input.couponMode;
+  }
+
+  let capPriority = 'hierarchy';
+  if (input.capPriority !== undefined && input.capPriority !== null && input.capPriority !== '') {
+    if (!['hierarchy', 'most_restrictive'].includes(input.capPriority)) {
+      return { error: 'Neznámá priorita stropů slev.' };
+    }
+    capPriority = input.capPriority;
+  }
+
+  let minMarginPercent = null;
+  if (input.minMarginPercent !== undefined && input.minMarginPercent !== null && input.minMarginPercent !== '') {
+    const mm = Number(input.minMarginPercent);
+    if (!Number.isFinite(mm) || mm < 0 || mm > 99.99 || Math.abs(Math.round(mm * 100) - mm * 100) > 1e-9) {
+      return { error: 'Minimální marže musí být 0–99,99 %.' };
+    }
+    minMarginPercent = Math.round(mm * 100) / 100;
+  }
+
   const scheduledPromotions = [];
   if (Array.isArray(input.scheduledPromotions)) {
     if (input.scheduledPromotions.length > 500) return { error: 'Maximálně 500 položek plánovaného výprodeje.' };
@@ -155,6 +187,9 @@ export function validateRules(input) {
       couponLockTopTiers: input.couponLockTopTiers !== false,
       couponLockMinPercent,
       couponLockMaxRemaining: input.couponLockMaxRemaining !== false,
+      couponMode,
+      capPriority,
+      minMarginPercent,
       highestDiscountWins: input.highestDiscountWins !== false,
       vatIntegrity: true,
       postWriteVerify: input.postWriteVerify !== false,
@@ -267,6 +302,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
     const service=createConfigurationService(env.DB);
     try {
       if(route==='/configuration/pending' && request.method==='GET') return jsonRes({approvals:await service.pending(shopId)});
+      if(route==='/configuration/history' && request.method==='GET') return jsonRes(await service.history(shopId));
       if(route==='/configuration/preview' && request.method==='POST') {
         const body=await request.json();
         if(Object.keys(body).length!==1 || typeof body.revisionId!=='string') return jsonRes({error:'invalid_request'},400);
@@ -279,6 +315,192 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       }
     } catch {return jsonRes({error:'configuration_action_failed'},409);}
     return jsonRes({error:'not_found'},404);
+  }
+
+  if (route.startsWith('/reconciliation/')) {
+    const installed = await env.DB.prepare('SELECT i.state FROM installations i LEFT JOIN shoptet_oauth o ON o.shop_id=i.shop_id WHERE i.shop_id=?').bind(shopId).first();
+    if (installed?.state !== 'active') return jsonRes({ error: 'inactive_installation' }, 403);
+
+    if (route === '/reconciliation/status' && request.method === 'GET') {
+      const row = await env.DB.prepare('SELECT config_json FROM tenant_settings WHERE shop_id=?').bind(shopId).first();
+      const { config } = parseConfig(row);
+      return jsonRes({
+        status: config.lastReconciliation ? 'completed' : 'idle',
+        lastReconciliation: config.lastReconciliation || null,
+        remediationMode: 'OFF',
+        autoRemediationEnabled: false
+      });
+    }
+
+    if (route === '/reconciliation/run' && request.method === 'POST') {
+      let body = {};
+      try { body = await request.json(); } catch { body = {}; }
+      const row = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id=?').bind(shopId).first();
+      const { config, version } = parseConfig(row);
+      const rawTiers = Array.isArray(config.tiers) ? config.tiers : [];
+      const tiers = rawTiers.filter(t => Number.isSafeInteger(Number(t.pricelistId)) && Number(t.pricelistId) > 0).map(t => ({
+        name: t.name,
+        percent: Number(t.percent),
+        pricelistId: Number(t.pricelistId)
+      }));
+      if (!tiers.length) {
+        return jsonRes({ error: 'no_configured_tier_pricelists', message: 'Pro spuštění kontroly nejprve nastavte a namapujte věrnostní ceníky.' }, 422);
+      }
+
+      const rules = config.rules || {};
+      const policyRow = await getPricelistPolicy(env.DB, shopId);
+      const defaultPricelistId = Number(policyRow?.defaultPricelistId || body.defaultPricelistId || 1);
+      const managedPricelistIds = tiers.map(t => t.pricelistId);
+
+      const brandCaps = Object.entries(rules.brandLimits || {}).map(([id, percent]) => ({ id, percent: Number(percent) }));
+      const categoryCaps = Object.entries(rules.categoryLimits || {}).map(([id, percent]) => ({ id, percent: Number(percent) }));
+      const productCaps = Object.entries(rules.productLimits || {}).map(([id, percent]) => ({ id, percent: Number(percent) }));
+
+      const lockedTierNames = [];
+      if (rules.couponLockTopTiers !== false && tiers.length > 0) {
+        const sorted = tiers.slice().sort((a, b) => b.percent - a.percent);
+        const topCount = Math.max(1, Math.ceil(sorted.length * 0.25));
+        for (let i = 0; i < topCount; i++) {
+          if (sorted[i]?.name) lockedTierNames.push(sorted[i].name);
+        }
+      }
+      if (rules.couponLockMinPercent != null && Number(rules.couponLockMinPercent) > 0) {
+        for (const t of tiers) {
+          if (t.percent >= Number(rules.couponLockMinPercent) && !lockedTierNames.includes(t.name)) {
+            lockedTierNames.push(t.name);
+          }
+        }
+      }
+
+      const policy = {
+        version,
+        capPriority: rules.capPriority || 'hierarchy',
+        salePolicy: rules.highestDiscountWins !== false ? 'okfish_compatible' : 'lowest_price',
+        brandCaps,
+        categoryCaps,
+        productCaps,
+        scheduledPromotions: Array.isArray(rules.scheduledPromotions) ? rules.scheduledPromotions : [],
+        brandPromotions: Array.isArray(rules.brandPromotions) ? rules.brandPromotions : []
+      };
+
+      const couponConfig = {
+        mode: rules.couponMode || 'fixed-amount',
+        ceilingPercent: 20,
+        capPriority: rules.capPriority || 'hierarchy',
+        defaultPricelistId,
+        managedPricelistIds,
+        lockedTierNames,
+        brandCaps,
+        categoryCaps,
+        productCaps
+      };
+
+      const catalogProducts = Array.isArray(body.catalogProducts) ? body.catalogProducts : [];
+      const pagination = body.pagination || null;
+      const fullCatalogVerified = body.fullCatalogVerified === true && Boolean(pagination && pagination.isComplete !== false);
+      const minExpectedCombinations = Number.isSafeInteger(body.minExpectedCombinations) && body.minExpectedCombinations >= 0
+        ? body.minExpectedCombinations
+        : Math.max(1, catalogProducts.length * tiers.length);
+
+      try {
+        const [priceReport, couponReport] = await Promise.all([
+          reconcilePrices({
+            adapter: {},
+            shopId,
+            policy,
+            tiers,
+            catalogProducts,
+            pagination,
+            fullCatalogVerified,
+            minExpectedCombinations
+          }),
+          reconcileCoupons({
+            adapter: {},
+            shopId,
+            couponConfig,
+            tiers,
+            catalogProducts,
+            pagination,
+            fullCatalogVerified,
+            minExpectedCombinations
+          })
+        ]);
+
+        const classifiedDrifts = [
+          ...priceReport.drifts.map(d => ({
+            ...d,
+            domain: 'price',
+            remediation: classifyRemediationEligibility({
+              item: {
+                shopId,
+                variantCode: d.code,
+                pricelistId: d.targetPricelistId,
+                driftType: 'price_drift',
+                field: 'price',
+                expected: d.expected,
+                actual: d.actual
+              },
+              selfCheckPassed: priceReport.selfCheckPassed,
+              autoEnabled: false,
+              verifiedTenantShopId: shopId,
+              managedPricelistIds,
+              isProtectedPricelist: d.targetPricelistId === defaultPricelistId,
+              hasManualSaleConflict: d.reason === 'manual_action_below_margin_floor'
+            })
+          })),
+          ...couponReport.drifts.map(d => ({
+            ...d,
+            domain: 'coupon',
+            remediation: classifyRemediationEligibility({
+              item: {
+                shopId,
+                variantCode: d.code,
+                pricelistId: d.targetPricelistId,
+                driftType: d.reason === 'locked_tier_coupon_enabled' ? 'locked_tier_violation' : 'coupon_drift',
+                field: 'discountCoupon',
+                expected: d.expected,
+                actual: d.actual
+              },
+              selfCheckPassed: couponReport.selfCheckPassed,
+              autoEnabled: false,
+              verifiedTenantShopId: shopId,
+              managedPricelistIds,
+              isProtectedPricelist: d.targetPricelistId === defaultPricelistId
+            })
+          }))
+        ];
+
+        const lastReconciliation = {
+          checkedAt: new Date().toISOString(),
+          policyVersion: version,
+          remediationMode: 'OFF',
+          autoRemediationEnabled: false,
+          priceReport,
+          couponReport,
+          classifiedDrifts
+        };
+
+        const nextConfig = { ...config, lastReconciliation };
+        if (row) {
+          await env.DB.prepare('UPDATE tenant_settings SET config_json = ? WHERE shop_id = ?')
+            .bind(JSON.stringify(nextConfig), shopId).run();
+        } else {
+          await env.DB.prepare('INSERT INTO tenant_settings (shop_id, config_json, version) VALUES (?, ?, 1) ON CONFLICT(shop_id) DO UPDATE SET config_json = excluded.config_json')
+            .bind(shopId, JSON.stringify(nextConfig)).run();
+        }
+
+        return jsonRes({
+          status: 'completed',
+          lastReconciliation,
+          remediationMode: 'OFF',
+          autoRemediationEnabled: false
+        });
+      } catch (err) {
+        return jsonRes({ error: 'reconciliation_failed', message: err.message || 'Kontrolu souladu cen a kupónů se nepodařilo dokončit.' }, 422);
+      }
+    }
+
+    return jsonRes({ error: 'not_found' }, 404);
   }
 
   if (route.startsWith('/loyalty/')) {
@@ -486,12 +708,17 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       couponLockTopTiers: true,
       couponLockMinPercent: null,
       couponLockMaxRemaining: true,
+      couponMode: 'fixed-amount',
+      capPriority: 'hierarchy',
+      minMarginPercent: null,
       highestDiscountWins: true,
       vatIntegrity: true,
       postWriteVerify: true,
       brandLimits: {},
       categoryLimits: {},
-      productLimits: {}
+      productLimits: {},
+      scheduledPromotions: [],
+      brandPromotions: []
     };
     const rules = { ...defaultRules, ...(config.rules || {}) };
 
@@ -1227,6 +1454,37 @@ export function renderAdminHtml(eshopId, auth) {
       </div>
 
       <div class="form-row">
+        <label class="form-label" for="rule-coupon-mode">Režim slevových kupónů</label>
+        <div class="form-field">
+          <select id="rule-coupon-mode" class="input-select" style="width: 320px;">
+            <option value="fixed-amount">Pevná částka kupónu (dárkové a ambasadorské šeky)</option>
+            <option value="percent-ceiling">Procentní kupón s celkovým stropem slevy</option>
+          </select>
+          <span class="info-icon" title="Určuje, jak se slevové kupóny kombinují se stropy slev a akčními cenami.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label" for="rule-cap-priority">Priorita stropů slev</label>
+        <div class="form-field">
+          <select id="rule-cap-priority" class="input-select" style="width: 320px;">
+            <option value="hierarchy">Podle hierarchie (Produkt → Značka → Kategorie)</option>
+            <option value="most_restrictive">Nejpřísnější platný strop</option>
+          </select>
+          <span class="info-icon" title="Stejné pořadí stropů slev se použije pro věrnostní ceny i slevové kupóny.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label" for="rule-min-margin">Ochrana minimální marže</label>
+        <div class="form-field">
+          <input type="number" id="rule-min-margin" class="input-text w-small" min="0" max="99.99" step="0.01" placeholder="např. 20">
+          <span>% z prodejní ceny (dle nákupní ceny v Shoptetu)</span>
+          <span class="info-icon" title="Věrnostní sleva ani kupón nesníží prodejní cenu pod požadovanou obchodní marži.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
         <label class="form-label">Okamžitá kontrola uložení cen</label>
         <div class="form-field">
           <input type="checkbox" id="rule-post-write-verify" checked style="width: 16px; height: 16px; cursor: pointer;">
@@ -1458,8 +1716,10 @@ export function renderAdminHtml(eshopId, auth) {
       </div>
 
       <div id="loyalty-onboarding-container"></div>
+      <div id="reconciliation-container"></div>
       <div id="approvals-container"></div>
       <div id="sync-approvals-container"></div>
+      <div id="history-container"></div>
     </section>
   </div>
 
@@ -1800,6 +2060,9 @@ export function renderAdminHtml(eshopId, auth) {
       $('rule-coupon-min-percent').value = (r.couponLockMinPercent !== undefined && r.couponLockMinPercent !== null) ? r.couponLockMinPercent : '';
       $('rule-coupon-min-percent').disabled = !$('rule-coupon-lock-top').checked;
       $('rule-coupon-min-price-ratio').checked = r.couponLockMaxRemaining !== false;
+      if ($('rule-coupon-mode')) $('rule-coupon-mode').value = r.couponMode || 'fixed-amount';
+      if ($('rule-cap-priority')) $('rule-cap-priority').value = r.capPriority || 'hierarchy';
+      if ($('rule-min-margin')) $('rule-min-margin').value = (r.minMarginPercent !== undefined && r.minMarginPercent !== null) ? r.minMarginPercent : '';
       $('rule-post-write-verify').checked = r.postWriteVerify !== false;
 
       const c = $('brand-limits-container');
@@ -1892,11 +2155,15 @@ export function renderAdminHtml(eshopId, auth) {
       });
 
       const minP = $('rule-coupon-min-percent').value.trim();
+      const minMarginRaw = $('rule-min-margin') ? $('rule-min-margin').value.trim() : '';
       const rules = {
         highestDiscountWins: $('rule-highest-discount').checked,
         couponLockTopTiers: $('rule-coupon-lock-top').checked,
         couponLockMinPercent: $('rule-coupon-lock-top').checked && minP !== '' ? Number(minP) : null,
         couponLockMaxRemaining: $('rule-coupon-min-price-ratio').checked,
+        couponMode: $('rule-coupon-mode') ? $('rule-coupon-mode').value : 'fixed-amount',
+        capPriority: $('rule-cap-priority') ? $('rule-cap-priority').value : 'hierarchy',
+        minMarginPercent: minMarginRaw !== '' ? Number(minMarginRaw) : null,
         postWriteVerify: $('rule-post-write-verify').checked,
         brandLimits,
         categoryLimits,
@@ -2388,6 +2655,104 @@ export function renderAdminHtml(eshopId, auth) {
       resize();
     }
 
+    async function renderReconciliation() {
+      const root = $('reconciliation-container');
+      if (!root) return;
+      root.textContent = '';
+      try {
+        const res = await api('/reconciliation/status');
+        const card = document.createElement('div');
+        card.style.cssText = 'background: #ffffff; border: 1px solid #d9d9d9; border-radius: 4px; padding: 18px 20px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);';
+
+        const heading = document.createElement('div');
+        heading.className = 'section-heading';
+        heading.style.marginTop = '0';
+        heading.textContent = 'Kontrola souladu cen a slevových kupónů';
+        card.append(heading);
+
+        const autoNotice = document.createElement('div');
+        autoNotice.style.cssText = 'font-size: 12px; color: #555555; margin-bottom: 12px; background: #f8f9fa; border: 1px solid #e2e5e8; border-radius: 3px; padding: 6px 10px;';
+        autoNotice.textContent = 'Automatická oprava cen: VYPNUTO (veškeré změny cen v e-shopu vždy vyžadují schválení obchodníka).';
+        card.append(autoNotice);
+
+        const rec = res.lastReconciliation;
+        if (rec && rec.priceReport && rec.couponReport) {
+          const p = rec.priceReport.counts || { total: 0, match: 0, drift: 0, missing: 0, skipped: 0, unknown: 0 };
+          const c = rec.couponReport.counts || { total: 0, match: 0, drift: 0, missing: 0, skipped: 0, unknown: 0 };
+          const grid = document.createElement('div');
+          grid.style.cssText = 'display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px;';
+          grid.innerHTML =
+            '<div style="background:#f7f9fa;border:1px solid #e2e5e8;border-radius:3px;padding:8px 12px;text-align:center;"><div style="font-size:11px;color:#777;">Ceny v pořádku</div><div style="font-size:16px;font-weight:bold;color:#3c763d;">' + p.match + ' / ' + p.total + '</div></div>' +
+            '<div style="background:#f7f9fa;border:1px solid #e2e5e8;border-radius:3px;padding:8px 12px;text-align:center;"><div style="font-size:11px;color:#777;">Rozdíly v cenách</div><div style="font-size:16px;font-weight:bold;color:' + (p.drift > 0 ? '#a94442' : '#333') + ';">' + p.drift + '</div></div>' +
+            '<div style="background:#f7f9fa;border:1px solid #e2e5e8;border-radius:3px;padding:8px 12px;text-align:center;"><div style="font-size:11px;color:#777;">Kupóny v pořádku</div><div style="font-size:16px;font-weight:bold;color:#3c763d;">' + c.match + ' / ' + c.total + '</div></div>' +
+            '<div style="background:#f7f9fa;border:1px solid #e2e5e8;border-radius:3px;padding:8px 12px;text-align:center;"><div style="font-size:11px;color:#777;">Rozdíly u kupónů</div><div style="font-size:16px;font-weight:bold;color:' + (c.drift > 0 ? '#a94442' : '#333') + ';">' + c.drift + '</div></div>';
+          card.append(grid);
+        } else {
+          const empty = document.createElement('p');
+          empty.style.cssText = 'font-size: 13px; color: #777777; margin-bottom: 12px;';
+          empty.textContent = 'Dosud nebyla spuštěna žádná kontrola souladu cen a slevových kupónů.';
+          card.append(empty);
+        }
+
+        const btnRun = document.createElement('button');
+        btnRun.type = 'button';
+        btnRun.className = 'btn-secondary';
+        btnRun.id = 'btn-run-reconciliation';
+        btnRun.textContent = 'Spustit kontrolu cen a kupónů';
+        btnRun.addEventListener('click', async () => {
+          btnRun.disabled = true;
+          btnRun.textContent = 'Kontroluji ceny a kupóny…';
+          try {
+            await api('/reconciliation/run', { method: 'POST', body: '{}' });
+            flash('Kontrola souladu cen a kupónů byla dokončena.');
+            await renderReconciliation();
+          } catch (err) {
+            btnRun.disabled = false;
+            btnRun.textContent = 'Spustit kontrolu cen a kupónů';
+            flash(err.message, true);
+          }
+        });
+        card.append(btnRun);
+        root.append(card);
+      } catch {
+        // Fallback gracefully
+      }
+      resize();
+    }
+
+    async function renderConfigurationHistory() {
+      const root = $('history-container');
+      if (!root) return;
+      root.textContent = '';
+      try {
+        const data = await api('/configuration/history');
+        const heading = document.createElement('div');
+        heading.className = 'section-heading';
+        heading.textContent = 'Historie schválených změn nastavení';
+        root.append(heading);
+        if (!data.history || !data.history.length) {
+          const empty = document.createElement('p');
+          empty.style.cssText = 'color: #777777; font-size: 13px; margin: 10px 0 18px;';
+          empty.textContent = 'Zatím nebyly zaznamenány žádné historické verze nastavení.';
+          root.append(empty);
+          return;
+        }
+        const list = document.createElement('div');
+        list.style.cssText = 'display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px;';
+        for (const item of data.history) {
+          const row = document.createElement('div');
+          row.style.cssText = 'font-size: 12px; color: #555555; background: #fafbfc; border: 1px solid #e2e5e8; border-radius: 3px; padding: 8px 12px; display: flex; justify-content: space-between;';
+          const dt = item.applied_at ? new Date(item.applied_at * 1000).toLocaleString('cs-CZ') : '—';
+          row.innerHTML = '<span><strong>Verze #' + escapeHtml(item.version) + '</strong> (revize ' + escapeHtml(String(item.revision_id || '').slice(0, 8)) + ')</span><span>' + escapeHtml(dt) + '</span>';
+          list.append(row);
+        }
+        root.append(list);
+      } catch {
+        // Fallback gracefully
+      }
+      resize();
+    }
+
     $('onboarding-retry').addEventListener('click',async()=>{try{await api('/installation/retry',{method:'POST',body:'{}'});state=await api('/state');renderOverview();}catch(e){flash(e.message,true);}});
 
     async function renderWebhookStatus(){try{const result=await api('/webhooks/status');$('webhook-status').textContent=result.ready?'Podpisový klíč je nastaven. Doručení oznámení je třeba ověřit.':'Bezpečná oznámení nejsou nastavená.';$('webhook-enable').disabled=result.ready||state.installation?.state!=='active';if(!result.ready)$('token-new').disabled=true;}catch{$('webhook-status').textContent='Stav bezpečných oznámení nelze načíst.';}}
@@ -2408,7 +2773,7 @@ export function renderAdminHtml(eshopId, auth) {
           state.customerGroups = [];
         }
         $('loading').remove();
-        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals(); renderWebhookStatus(); renderLoyaltyOnboarding();
+        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals(); renderWebhookStatus(); renderLoyaltyOnboarding(); renderReconciliation(); renderConfigurationHistory();
       } catch (e) {
         $('loading').textContent = '';
         flash(e.message, true);

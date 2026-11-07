@@ -11,6 +11,8 @@ export const proposalSchema=z.object({
   salePolicy:z.enum(['okfish_compatible','lowest_price']).default('okfish_compatible'),
   capPriority:z.enum(['hierarchy','most_restrictive']).default('most_restrictive'),
   couponPolicy:z.enum(['no_loyalty_combination','unchanged']),
+  scheduledPromotions:z.array(z.object({code:z.string().trim().min(1).max(128),discountPercent:percent,validFrom:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),validTo:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()}).strict()).max(500).optional(),
+  brandPromotions:z.array(z.object({brand:z.string().trim().min(1).max(120),discountPercent:percent,validFrom:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),validTo:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()}).strict()).max(100).optional(),
   turnoverPolicy:turnoverPolicySchema.optional()
 }).strict().superRefine((v,c)=>{
   const names=new Set();let threshold=-1;

@@ -1,6 +1,7 @@
 import {z} from 'zod';
 import {proposalSchema} from './configuration.mjs';
 import {evaluatePricing,grossApiPrice,activeActionMinor,formatApiPrice,parseApiPrice,shopDate} from './pricing-policy.mjs';
+import {resolveScheduledPromotionActionMinor} from './promotions.mjs';
 export const syncSelectionSchema=z.object({revisionId:z.string().uuid(),tierName:z.string().min(1).max(60),targetPricelistId:z.number().int().positive(),sourcePricelistId:z.number().int().positive().optional(),products:z.array(z.object({guid:z.string().uuid(),codes:z.array(z.string().min(1).max(128)).min(1).max(20)}).strict()).min(1).max(25)}).strict().superRefine((v,c)=>{if(v.products.reduce((n,p)=>n+p.codes.length,0)>100)c.addIssue({code:'custom',path:['products'],message:'Maximum 100 variants per plan'});});
 export async function buildSyncPlan({adapter,proposal,selection,instant=new Date()}) {
  const policy=proposalSchema.parse(proposal),selected=syncSelectionSchema.parse(selection);
@@ -37,7 +38,10 @@ export async function buildSyncPlan({adapter,proposal,selection,instant=new Date
    if(base.currencyCode!==policy.currency||before.currencyCode!==policy.currency||base.vatRate!==before.vatRate)throw Error('currency_or_vat_mismatch');
    // Unsupported target ratios/promotions could change native checkout price independently.
    if(before.price.priceRatio!=='1.000'||activeActionMinor(before,profile.vatPayer,date)!==null)throw Error('target_price_modifier_requires_separate_plan');
-   const baseMinor=grossApiPrice(base,profile.vatPayer),actionMinor=activeActionMinor(base,profile.vatPayer,date);
+   const baseMinor=grossApiPrice(base,profile.vatPayer);
+   const nativeActionMinor=activeActionMinor(base,profile.vatPayer,date);
+   const scheduledActionMinor=resolveScheduledPromotionActionMinor({baseMinor,code,brand:[product.brand?.name,product.brand?.code,brandId],productPromotions:policy.scheduledPromotions,brandPromotions:policy.brandPromotions,now:date});
+   const actionMinor=nativeActionMinor!==null&&scheduledActionMinor!==null?Math.min(nativeActionMinor,scheduledActionMinor):(nativeActionMinor??scheduledActionMinor);
    if(policy.categoryCaps.length && !Array.isArray(product.categories))throw Error('all_product_categories_required');
    const categories=new Set([product.defaultCategory.guid,...(product.categories??[]).map(c=>c.guid)].filter(Boolean));
    const categoryCaps=policy.categoryCaps.filter(c=>categories.has(c.id)).map(c=>c.percent);

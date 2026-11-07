@@ -150,7 +150,7 @@ export async function reconcilePrices({
       const scheduledActionMinor = resolveScheduledPromotionActionMinor({
         baseMinor,
         code,
-        brand: product.brand || product.brandName || product.brandId || null,
+        brand: [product.brand, product.brandName, product.brandId],
         productPromotions: policy?.scheduledPromotions,
         brandPromotions: policy?.brandPromotions,
         now: policy?.now
