@@ -19,13 +19,31 @@ function renderTiers(){document.getElementById('tiers').innerHTML=state.tiers.ma
 document.getElementById('tiers').addEventListener('input',e=>{const {index,key}=e.target.dataset;if(index===undefined)return;state.tiers[Number(index)][key]=key==='discount'||key==='turnover'?Number(e.target.value):e.target.value});
 document.getElementById('tiers').addEventListener('click',e=>{if(e.target.dataset.remove!==undefined){state.tiers.splice(Number(e.target.dataset.remove),1);renderTiers()}});
 document.getElementById('addTier').onclick=()=>{state.tiers.push({name:'Nový věrnostní ceník',discount:0,turnover:0,pricelist:''});renderTiers()};
-const rules=[['best','Výhodnější cena má přednost'],['lock','Zákaz kupónů pro nejvyšší slevy'],['stack','Sčítání slevového kupónu s věrností'],['verify','Okamžitá kontrola uložení cen']];
+const rules=[['best','Výhodnější cena má přednost'],['lock','Zákaz kupónů pro nejvyšší slevy'],['verify','Okamžitá kontrola uložení cen']];
+// The B2C engine forbids stacking loyalty discounts with coupons; never offer a toggle that contradicts this invariant.
+delete state.rules.stack;
 document.getElementById('ruleChecks').innerHTML=rules.map(([id,label])=>'<div class="rule"><input type="checkbox" id="r_'+id+'" '+(state.rules[id]?'checked':'')+'><label for="r_'+id+'">'+label+'</label></div>').join('');
 document.getElementById('ruleChecks').onchange=e=>{state.rules[e.target.id.slice(2)]=e.target.checked};
 const perms=['installation:read','pricing:preview','assets:preview','shoptet:read','shoptet:write','pricing:sync'];document.getElementById('permissions').innerHTML=perms.map(p=>'<div class="rule"><input type="checkbox" id="p_'+p+'" disabled><label for="p_'+p+'">'+p+'</label></div>').join('');
-function save(){if(state.tiers.some(t=>!Number.isFinite(t.discount)||t.discount<0||t.discount>100||!Number.isSafeInteger(t.turnover)||t.turnover<0)){status('Neplatné procento nebo obrat.');return}localStorage.setItem(storeKey,JSON.stringify(state));status('Lokálně uloženo. Žádná změna nebyla odeslána do Shoptetu.')}
+function validateDraft(){
+ if(!Array.isArray(state.tiers)||state.tiers.length===0)return 'Je nutné nastavit alespoň jeden věrnostní ceník.';
+ const names=new Set(),ids=new Set();let lastTurnover=-1,lastDiscount=-1;
+ for(const tier of state.tiers){
+  const name=String(tier.name??'').trim();if(!name||name.length>120)return 'Název ceníku musí mít 1 až 120 znaků.';
+  if(names.has(name.toLocaleLowerCase('cs')))return 'Názvy ceníků se nesmějí opakovat.';names.add(name.toLocaleLowerCase('cs'));
+  if(!Number.isFinite(tier.discount)||tier.discount<0||tier.discount>100||Math.round(tier.discount*100)!==tier.discount*100)return 'Sleva musí být v rozsahu 0–100 % a mít nejvýše dvě desetinná místa.';
+  if(!Number.isSafeInteger(tier.turnover)||tier.turnover<0)return 'Obrat musí být nezáporné celé číslo.';
+  if(tier.turnover<=lastTurnover||tier.discount<lastDiscount)return 'Ceníky musí mít rostoucí obrat a neklesající slevu.';
+  lastTurnover=tier.turnover;lastDiscount=tier.discount;
+  const id=String(tier.pricelist??'').trim();if(id&&!/^[1-9][0-9]*$/.test(id))return 'ID ceníku musí být kladné celé číslo.';
+  if(id&&ids.has(id))return 'ID Shoptet ceníku se nesmí opakovat.';if(id)ids.add(id);
+ }
+ return null;
+}
+function save(){const error=validateDraft();if(error){status(error);return}delete state.rules.stack;try{localStorage.setItem(storeKey,JSON.stringify(state));status('Lokálně uloženo. Žádná změna nebyla odeslána do Shoptetu.')}catch{status('Lokální uložení selhalo. Změny nebyly odeslány do Shoptetu.')}}
 ['saveTop','saveTiers','saveRules'].forEach(id=>document.getElementById(id).onclick=save);
 ['pairButton','newKey','revoke'].forEach(id=>document.getElementById(id).onclick=()=>status('Tato bezpečnostní akce vyžaduje ověřený backend a není v prototypu aktivní.'));
-document.querySelectorAll('.tab').forEach(btn=>btn.onclick=()=>{document.querySelectorAll('.tab').forEach(t=>t.setAttribute('aria-selected',String(t===btn)));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id===btn.dataset.tab))});
+function activateTab(btn){document.querySelectorAll('.tab').forEach(t=>{const selected=t===btn;t.setAttribute('aria-selected',String(selected));t.tabIndex=selected?0:-1});document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id===btn.dataset.tab))}
+document.querySelectorAll('.tab').forEach(btn=>{btn.onclick=()=>activateTab(btn);btn.onkeydown=e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();const tabs=[...document.querySelectorAll('.tab')];const index=tabs.indexOf(btn);const next=e.key==='Home'?0:e.key==='End'?tabs.length-1:(index+(e.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;activateTab(tabs[next]);tabs[next].focus()}});activateTab(document.querySelector('.tab'));
 renderTiers();
 </script></body></html>
