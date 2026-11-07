@@ -4,6 +4,8 @@
   "compatibility_date": "2026-10-01",
   "workers_dev": true,
   "vars": {
+    "ADDON_PUBLIC_ORIGIN": "https://lcode-shoptet-pricing-dev.hlancaric.workers.dev",
+    "SHOPTET_OAUTH_ORIGIN": "https://826800.myshoptet.com",
     "SYNC_MODE": "off"
   },
   "d1_databases": [
