@@ -33,6 +33,12 @@ import {
 import {
   classifyRemediationEligibility
 } from '../../../packages/core/src/self-healing-engine.mjs';
+import {
+  grossApiPrice,
+  activeActionMinor,
+  parseApiPrice,
+  shopDate
+} from '../../../packages/core/src/pricing-policy.mjs';
 /**
  * L-Code Loyalty Pricing Engine — addon settings page embedded in Shoptet administration.
  * High-fidelity native Shoptet administration theme with Shoptet tabs, cards, and buttons.
@@ -145,6 +151,18 @@ export function validateRules(input) {
     couponMode = input.couponMode;
   }
 
+  let couponCeilingPercent = null;
+  if (input.couponCeilingPercent !== undefined && input.couponCeilingPercent !== null && input.couponCeilingPercent !== '') {
+    const cp = Number(input.couponCeilingPercent);
+    if (!Number.isFinite(cp) || cp < 1 || cp > 100 || Math.abs(Math.round(cp * 100) - cp * 100) > 1e-9) {
+      return { error: 'Celkový strop slevy s kupónem musí být 1–100 %.' };
+    }
+    couponCeilingPercent = Math.round(cp * 100) / 100;
+  }
+  if (couponMode === 'percent-ceiling' && couponCeilingPercent === null) {
+    return { error: 'Při režimu procentního kupónu musíte zadat celkový strop slevy s kupónem (1–100 %).' };
+  }
+
   let capPriority = 'hierarchy';
   if (input.capPriority !== undefined && input.capPriority !== null && input.capPriority !== '') {
     if (!['hierarchy', 'most_restrictive'].includes(input.capPriority)) {
@@ -188,6 +206,7 @@ export function validateRules(input) {
       couponLockMinPercent,
       couponLockMaxRemaining: input.couponLockMaxRemaining !== false,
       couponMode,
+      couponCeilingPercent,
       capPriority,
       minMarginPercent,
       highestDiscountWins: input.highestDiscountWins !== false,
@@ -223,6 +242,116 @@ function parseConfig(row) {
 async function sha256Hex(text) {
   const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, defaultPricelistId, tiers, minMarginPercent }) {
+  const vatPayer = typeof profile?.vatPayer === 'boolean' ? profile.vatPayer : true;
+  const date = shopDate(profile?.timezone || 'Europe/Prague');
+  const minMarginBps = typeof minMarginPercent === 'number' && Number.isFinite(minMarginPercent) && minMarginPercent > 0
+    ? Math.round(minMarginPercent * 100)
+    : null;
+
+  const basePriceByCode = new Map();
+  for await (const row of adapter.iteratePrices(defaultPricelistId)) {
+    const basePriceMinor = grossApiPrice(row, vatPayer);
+    const actionPriceMinor = activeActionMinor(row, vatPayer, date);
+    let minimumMinor = null;
+    if (minMarginBps !== null) {
+      const purchase = row.prices?.purchasePrice;
+      if (purchase?.price && purchase.vatRate === row.vatRate) {
+        const vat = BigInt(parseApiPrice(row.vatRate));
+        const cost = BigInt(parseApiPrice(purchase.price));
+        if (cost > 0n) {
+          const grossCost = purchase.includingVat ? cost : (cost * (10000n + vat) + 9999n) / 10000n;
+          const denom = 10000n - BigInt(minMarginBps);
+          const floor = (grossCost * 10000n + denom - 1n) / denom;
+          if (floor <= BigInt(Number.MAX_SAFE_INTEGER)) minimumMinor = Number(floor);
+        }
+      }
+    }
+    basePriceByCode.set(row.code, { basePriceMinor, actionPriceMinor, minimumMinor });
+  }
+
+  const tierPricesByPricelist = new Map();
+  for (const tier of tiers) {
+    const byCode = new Map();
+    for await (const row of adapter.iteratePrices(tier.pricelistId)) {
+      byCode.set(row.code, {
+        priceMinor: grossApiPrice(row, vatPayer),
+        sales: row.sales
+      });
+    }
+    tierPricesByPricelist.set(tier.pricelistId, byCode);
+  }
+
+  const catalogProducts = [];
+  const brandCache = new Map();
+  let page = 1;
+  let pageCount = 1;
+  let hasVerifiedPagination = true;
+
+  while (page <= pageCount) {
+    const res = await adapter.list('products', { page, limit: 50 });
+    if (!res?.pagination || !Number.isSafeInteger(res.pagination.pageCount) || res.pagination.pageCount < 1) {
+      hasVerifiedPagination = false;
+      pageCount = 1;
+    } else {
+      pageCount = res.pagination.pageCount;
+    }
+
+    for (const item of (res?.items || [])) {
+      const detail = typeof adapter.product === 'function' ? await adapter.product(item.guid) : item;
+      let brandId = null;
+      if (detail.brand?.code && typeof adapter.brand === 'function') {
+        if (!brandCache.has(detail.brand.code)) {
+          const b = await adapter.brand(detail.brand.code);
+          brandCache.set(detail.brand.code, b.guid);
+        }
+        brandId = brandCache.get(detail.brand.code);
+      } else if (detail.brand?.guid) {
+        brandId = detail.brand.guid;
+      }
+      const categoryIds = Array.from(new Set([
+        detail.defaultCategory?.guid,
+        ...(Array.isArray(detail.categories) ? detail.categories.map(c => c.guid) : [])
+      ].filter(Boolean)));
+
+      const rawVariants = Array.isArray(detail.variants) ? detail.variants : (Array.isArray(item.variants) ? item.variants : []);
+      const variants = rawVariants.map(v => {
+        const baseEntry = basePriceByCode.get(v.code);
+        const perPricelistPrices = {};
+        for (const tier of tiers) {
+          const tEntry = tierPricesByPricelist.get(tier.pricelistId)?.get(v.code);
+          if (tEntry !== undefined) {
+            perPricelistPrices[tier.pricelistId] = tEntry;
+          }
+        }
+        return {
+          code: v.code,
+          visible: v.visible ?? v.active ?? true,
+          basePriceMinor: baseEntry?.basePriceMinor ?? null,
+          actionPriceMinor: baseEntry?.actionPriceMinor ?? null,
+          minimumMinor: baseEntry?.minimumMinor ?? null,
+          perPricelistPrices
+        };
+      });
+
+      catalogProducts.push({
+        guid: detail.guid || item.guid,
+        visibility: detail.visibility ?? (item.active === false ? 'hidden' : 'normal'),
+        brand: detail.brand?.name || detail.brand?.code || null,
+        brandId,
+        categoryIds,
+        variants
+      });
+    }
+    page++;
+  }
+
+  const fullCatalogVerified = hasVerifiedPagination && page > pageCount;
+  const pagination = hasVerifiedPagination ? { page: pageCount, pageCount, isComplete: true } : null;
+  const minExpectedCombinations = Math.max(1, catalogProducts.length * tiers.length);
+  return { catalogProducts, pagination, fullCatalogVerified, minExpectedCombinations };
 }
 
 export async function handleAdminSettingsApi(request, env, ctx=null) {
@@ -334,7 +463,22 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
 
     if (route === '/reconciliation/run' && request.method === 'POST') {
       let body = {};
-      try { body = await request.json(); } catch { body = {}; }
+      try {
+        const rawText = await request.text();
+        if (rawText && rawText.trim() !== '') {
+          body = JSON.parse(rawText);
+        }
+      } catch {
+        return jsonRes({ error: 'invalid_json', message: 'Neplatný formát požadavku.' }, 400);
+      }
+
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length > 0) {
+        return jsonRes({
+          error: 'caller_supplied_reconciliation_data_forbidden',
+          message: 'Kontrola souladu smí číst pouze serverově ověřená data přímo ze Shoptet API.'
+        }, 400);
+      }
+
       const row = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id=?').bind(shopId).first();
       const { config, version } = parseConfig(row);
       const rawTiers = Array.isArray(config.tiers) ? config.tiers : [];
@@ -348,8 +492,48 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       }
 
       const rules = config.rules || {};
+      const couponMode = rules.couponMode || 'fixed-amount';
+      const couponCeilingPercent = rules.couponCeilingPercent !== undefined && rules.couponCeilingPercent !== null
+        ? Number(rules.couponCeilingPercent)
+        : null;
+      if (couponMode === 'percent-ceiling' && (!Number.isFinite(couponCeilingPercent) || couponCeilingPercent <= 0 || couponCeilingPercent > 100)) {
+        return jsonRes({
+          error: 'missing_coupon_ceiling_percent',
+          message: 'Pro procentní režim kupónů musí být v pravidlech slev nastaven platný maximální strop kupónu v procentech.'
+        }, 422);
+      }
+
+      const adapter = typeof env.createShoptetAdapter === 'function'
+        ? await env.createShoptetAdapter(shopId)
+        : createShoptetAdapter({
+            getToken: async () => (await getShoptetApiAccessToken({ db: env.DB, shopId, tokenKeys: env.SHOPTET_TOKEN_KEYS })).apiAccessToken
+          });
+
       const policyRow = await getPricelistPolicy(env.DB, shopId);
-      const defaultPricelistId = Number(policyRow?.defaultPricelistId || body.defaultPricelistId || 1);
+      let profile = null;
+      try {
+        profile = typeof adapter.profile === 'function' ? await adapter.profile() : null;
+      } catch (err) {
+        if (!policyRow?.defaultPricelistId) {
+          return jsonRes({ error: 'reconciliation_failed', message: err.message || 'Nepodařilo se ověřit profil obchodu a výchozí ceník ze Shoptetu.' }, 422);
+        }
+      }
+
+      const resolvedDefaultPricelistId = policyRow?.defaultPricelistId ?? profile?.defaultPricelistId;
+      const defaultPricelistId = Number(resolvedDefaultPricelistId);
+      if (!Number.isSafeInteger(defaultPricelistId) || defaultPricelistId <= 0) {
+        return jsonRes({
+          error: 'missing_default_pricelist_id',
+          message: 'Výchozí (hlavní) ceník obchodu není serverově ověřen. Zkontrolujte nastavení ceníků.'
+        }, 422);
+      }
+      if (tiers.some(t => t.pricelistId === defaultPricelistId)) {
+        return jsonRes({
+          error: 'default_pricelist_protected',
+          message: 'Výchozí (hlavní) ceník obchodu nesmí být použit jako věrnostní ceník.'
+        }, 422);
+      }
+
       const managedPricelistIds = tiers.map(t => t.pricelistId);
 
       const brandCaps = Object.entries(rules.brandLimits || {}).map(([id, percent]) => ({ id, percent: Number(percent) }));
@@ -384,8 +568,8 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       };
 
       const couponConfig = {
-        mode: rules.couponMode || 'fixed-amount',
-        ceilingPercent: 20,
+        mode: couponMode,
+        ceilingPercent: couponMode === 'percent-ceiling' ? couponCeilingPercent : null,
         capPriority: rules.capPriority || 'hierarchy',
         defaultPricelistId,
         managedPricelistIds,
@@ -395,34 +579,40 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
         productCaps
       };
 
-      const catalogProducts = Array.isArray(body.catalogProducts) ? body.catalogProducts : [];
-      const pagination = body.pagination || null;
-      const fullCatalogVerified = body.fullCatalogVerified === true && Boolean(pagination && pagination.isComplete !== false);
-      const minExpectedCombinations = Number.isSafeInteger(body.minExpectedCombinations) && body.minExpectedCombinations >= 0
-        ? body.minExpectedCombinations
-        : Math.max(1, catalogProducts.length * tiers.length);
-
       try {
+        const verified = await fetchVerifiedStoreCatalogForReconciliation({
+          adapter,
+          profile,
+          defaultPricelistId,
+          tiers,
+          minMarginPercent: rules.minMarginPercent
+        });
+
+        const reconciliationAdapter = {
+          ...adapter,
+          isFullCatalogVerified: () => verified.fullCatalogVerified
+        };
+
         const [priceReport, couponReport] = await Promise.all([
           reconcilePrices({
-            adapter: {},
+            adapter: reconciliationAdapter,
             shopId,
             policy,
             tiers,
-            catalogProducts,
-            pagination,
-            fullCatalogVerified,
-            minExpectedCombinations
+            catalogProducts: verified.catalogProducts,
+            pagination: verified.pagination,
+            fullCatalogVerified: verified.fullCatalogVerified,
+            minExpectedCombinations: verified.minExpectedCombinations
           }),
           reconcileCoupons({
-            adapter: {},
+            adapter: reconciliationAdapter,
             shopId,
             couponConfig,
             tiers,
-            catalogProducts,
-            pagination,
-            fullCatalogVerified,
-            minExpectedCombinations
+            catalogProducts: verified.catalogProducts,
+            pagination: verified.pagination,
+            fullCatalogVerified: verified.fullCatalogVerified,
+            minExpectedCombinations: verified.minExpectedCombinations
           })
         ]);
 
@@ -709,6 +899,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       couponLockMinPercent: null,
       couponLockMaxRemaining: true,
       couponMode: 'fixed-amount',
+      couponCeilingPercent: null,
       capPriority: 'hierarchy',
       minMarginPercent: null,
       highestDiscountWins: true,
@@ -1465,6 +1656,15 @@ export function renderAdminHtml(eshopId, auth) {
       </div>
 
       <div class="form-row">
+        <label class="form-label" for="rule-coupon-ceiling-percent">Celkový strop pro procentní kupóny</label>
+        <div class="form-field">
+          <input type="number" id="rule-coupon-ceiling-percent" class="input-text w-small" min="1" max="100" step="0.01" placeholder="např. 20">
+          <span class="unit">%</span>
+          <span class="info-icon" title="Povinné při volbě procentního režimu kupónů: maximální celková kombinovaná sleva (věrnost + kupón).">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
         <label class="form-label" for="rule-cap-priority">Priorita stropů slev</label>
         <div class="form-field">
           <select id="rule-cap-priority" class="input-select" style="width: 320px;">
@@ -2061,6 +2261,7 @@ export function renderAdminHtml(eshopId, auth) {
       $('rule-coupon-min-percent').disabled = !$('rule-coupon-lock-top').checked;
       $('rule-coupon-min-price-ratio').checked = r.couponLockMaxRemaining !== false;
       if ($('rule-coupon-mode')) $('rule-coupon-mode').value = r.couponMode || 'fixed-amount';
+      if ($('rule-coupon-ceiling-percent')) $('rule-coupon-ceiling-percent').value = (r.couponCeilingPercent !== undefined && r.couponCeilingPercent !== null) ? r.couponCeilingPercent : '';
       if ($('rule-cap-priority')) $('rule-cap-priority').value = r.capPriority || 'hierarchy';
       if ($('rule-min-margin')) $('rule-min-margin').value = (r.minMarginPercent !== undefined && r.minMarginPercent !== null) ? r.minMarginPercent : '';
       $('rule-post-write-verify').checked = r.postWriteVerify !== false;
@@ -2155,6 +2356,7 @@ export function renderAdminHtml(eshopId, auth) {
       });
 
       const minP = $('rule-coupon-min-percent').value.trim();
+      const couponCeilingRaw = $('rule-coupon-ceiling-percent') ? $('rule-coupon-ceiling-percent').value.trim() : '';
       const minMarginRaw = $('rule-min-margin') ? $('rule-min-margin').value.trim() : '';
       const rules = {
         highestDiscountWins: $('rule-highest-discount').checked,
@@ -2162,6 +2364,7 @@ export function renderAdminHtml(eshopId, auth) {
         couponLockMinPercent: $('rule-coupon-lock-top').checked && minP !== '' ? Number(minP) : null,
         couponLockMaxRemaining: $('rule-coupon-min-price-ratio').checked,
         couponMode: $('rule-coupon-mode') ? $('rule-coupon-mode').value : 'fixed-amount',
+        couponCeilingPercent: couponCeilingRaw !== '' ? Number(couponCeilingRaw) : null,
         capPriority: $('rule-cap-priority') ? $('rule-cap-priority').value : 'hierarchy',
         minMarginPercent: minMarginRaw !== '' ? Number(minMarginRaw) : null,
         postWriteVerify: $('rule-post-write-verify').checked,

@@ -120,8 +120,13 @@ export function normalizeCouponPolicy(config = {}) {
     throw new TypeError(`Invalid coupon mode: ${mode}`);
   }
 
-  const ceilingPercent = config.ceilingPercent ?? 20;
-  const ceilingBps = parsePercentBps(ceilingPercent, 'ceilingPercent');
+  if (mode === 'percent-ceiling' && config.ceilingPercent === null) {
+    throw new TypeError('Missing or invalid ceilingPercent for percent-ceiling mode');
+  }
+  const ceilingPercent = mode === 'fixed-amount'
+    ? (config.ceilingPercent ?? null)
+    : (config.ceilingPercent ?? 20);
+  const ceilingBps = ceilingPercent !== null ? parsePercentBps(ceilingPercent, 'ceilingPercent') : 0n;
 
   const lockedPricelistIds = new Set((config.lockedPricelistIds || []).map(Number));
   const lockedTierNames = new Set(config.lockedTierNames || []);

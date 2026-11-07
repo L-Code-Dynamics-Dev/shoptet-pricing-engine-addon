@@ -164,14 +164,19 @@ test('rule validation', () => {
   const invalidMargin = validateRules({ minMarginPercent: 100 });
   assert.match(invalidMargin.error, /Minimální marže musí být 0–99,99 %/);
 
+  const missingCeilingForPercentMode = validateRules({ couponMode: 'percent-ceiling' });
+  assert.match(missingCeilingForPercentMode.error, /strop slevy s kupónem/);
+
   const validExtended = validateRules({
     couponMode: 'percent-ceiling',
+    couponCeilingPercent: 25,
     capPriority: 'most_restrictive',
     minMarginPercent: 20,
     scheduledPromotions: [{ code: 'SKU-1', discountPercent: 15, validFrom: '2026-11-01', validTo: '2026-11-30' }],
     brandPromotions: [{ brand: 'Delphin', discountPercent: 10, validFrom: '2026-11-01', validTo: '2026-11-30' }]
   });
   assert.equal(validExtended.rules.couponMode, 'percent-ceiling');
+  assert.equal(validExtended.rules.couponCeilingPercent, 25);
   assert.equal(validExtended.rules.capPriority, 'most_restrictive');
   assert.equal(validExtended.rules.minMarginPercent, 20);
   assert.equal(validExtended.rules.scheduledPromotions.length, 1);
@@ -239,7 +244,7 @@ test('mcp token is returned once, stored hashed and revokes previous', async () 
   assert.ok(db.calls.some(c => c.sql.startsWith('UPDATE mcp_credentials SET revoked_at')));
 });
 
-test('reconciliation status and run endpoints execute separate price and coupon audits with AUTO OFF', async () => {
+test('reconciliation status and run endpoints enforce server-side Shoptet verification and reject caller-supplied data or unsafe defaults', async () => {
   const db = fakeDb({
     config: {
       tiers: [{ name: 'Bronz', percent: 10, minTurnover: 1000, pricelistId: 2 }],
@@ -247,7 +252,61 @@ test('reconciliation status and run endpoints execute separate price and coupon 
     },
     version: 1
   });
-  const env = { DB: db, ADMIN_SESSION_SECRET: SECRET };
+
+  const serverAdapter = {
+    async profile() {
+      return { defaultPricelistId: 1, priceType: 'including_vat', timezone: 'Europe/Prague' };
+    },
+    async list(kind, { page = 1 } = {}) {
+      if (kind === 'products') {
+        return {
+          items: [
+            {
+              guid: '123e4567-e89b-42d3-a456-426614174010',
+              visibility: 'normal',
+              variants: [{ code: 'SKU-REC-1', visible: true }]
+            }
+          ],
+          pagination: { page, pageCount: 1, totalCount: 1 }
+        };
+      }
+      return { items: [], pagination: { page: 1, pageCount: 1, totalCount: 0 } };
+    },
+    async product(guid) {
+      return {
+        guid,
+        visibility: 'normal',
+        variants: [{ code: 'SKU-REC-1', visible: true }]
+      };
+    },
+    async *iteratePrices(pricelistId) {
+      if (pricelistId === 1) {
+        yield {
+          code: 'SKU-REC-1',
+          vatRate: '21.00',
+          includingVat: true,
+          price: { price: '1000.00', commonPrice: '1000.00', actionPrice: null, priceRatio: '1.000' },
+          prices: { purchasePrice: { price: '500.00', vatRate: '21.00', includingVat: true } },
+          sales: { discountCoupon: true, minPriceRatio: null }
+        };
+      } else if (pricelistId === 2) {
+        yield {
+          code: 'SKU-REC-1',
+          vatRate: '21.00',
+          includingVat: true,
+          price: { price: '900.00', commonPrice: '1000.00', actionPrice: null, priceRatio: '1.000' },
+          prices: { purchasePrice: { price: '500.00', vatRate: '21.00', includingVat: true } },
+          sales: { discountCoupon: true, minPriceRatio: null }
+        };
+      }
+    }
+  };
+
+  const env = {
+    DB: db,
+    ADMIN_SESSION_SECRET: SECRET,
+    createShoptetAdapter: async () => serverAdapter
+  };
   const session = await issueSession('826800', SECRET);
 
   const statusBefore = await (await handleAdminSettingsApi(await apiReq('/reconciliation/status', { session }), env)).json();
@@ -255,33 +314,60 @@ test('reconciliation status and run endpoints execute separate price and coupon 
   assert.equal(statusBefore.remediationMode, 'OFF');
   assert.equal(statusBefore.autoRemediationEnabled, false);
 
-  const runRes = await handleAdminSettingsApi(await apiReq('/reconciliation/run', {
+  // 1. Caller-supplied catalogProducts or defaultPricelistId must be rejected (HTTP 400)
+  const spoofedRes = await handleAdminSettingsApi(await apiReq('/reconciliation/run', {
     method: 'POST',
     session,
     body: {
       defaultPricelistId: 1,
       fullCatalogVerified: true,
-      pagination: { isComplete: true, page: 1, pageCount: 1 },
-      catalogProducts: [
-        {
-          guid: '123e4567-e89b-42d3-a456-426614174010',
-          visibility: 'normal',
-          variants: [
-            {
-              code: 'SKU-REC-1',
-              visible: true,
-              basePriceMinor: 100000,
-              perPricelistPrices: {
-                2: {
-                  priceMinor: 90000,
-                  sales: { discountCoupon: true, minPriceRatio: null }
-                }
-              }
-            }
-          ]
-        }
-      ]
+      catalogProducts: []
     }
+  }), env);
+  assert.equal(spoofedRes.status, 400);
+  const spoofedData = await spoofedRes.json();
+  assert.equal(spoofedData.error, 'caller_supplied_reconciliation_data_forbidden');
+
+  // 2. Missing server-verified defaultPricelistId must fail closed (HTTP 422, no fallback to 1)
+  const envNoDefaultPricelist = {
+    DB: db,
+    ADMIN_SESSION_SECRET: SECRET,
+    createShoptetAdapter: async () => ({
+      ...serverAdapter,
+      async profile() {
+        return { defaultPricelistId: null, priceType: 'including_vat' };
+      }
+    })
+  };
+  const missingDefaultRes = await handleAdminSettingsApi(await apiReq('/reconciliation/run', {
+    method: 'POST',
+    session,
+    body: {}
+  }), envNoDefaultPricelist);
+  assert.equal(missingDefaultRes.status, 422);
+  assert.equal((await missingDefaultRes.json()).error, 'missing_default_pricelist_id');
+
+  // 3. Percent-ceiling couponMode without configured couponCeilingPercent must fail closed (HTTP 422, no hardcoded 20)
+  const dbMissingCeiling = fakeDb({
+    config: {
+      tiers: [{ name: 'Bronz', percent: 10, minTurnover: 1000, pricelistId: 2 }],
+      rules: { couponMode: 'percent-ceiling', couponCeilingPercent: null, capPriority: 'hierarchy', couponLockTopTiers: false }
+    },
+    version: 1
+  });
+  const missingCeilingRes = await handleAdminSettingsApi(await apiReq('/reconciliation/run', {
+    method: 'POST',
+    session,
+    body: {}
+  }), { ...env, DB: dbMissingCeiling });
+  assert.equal(missingCeilingRes.status, 422);
+  assert.equal((await missingCeilingRes.json()).error, 'missing_coupon_ceiling_percent');
+
+  // 4. Server-verified catalog & prices reconciliation succeeds with empty body
+  const runRes = await handleAdminSettingsApi(await apiReq('/reconciliation/run', {
+    method: 'POST',
+    session,
+    body: {}
   }), env);
 
   assert.equal(runRes.status, 200);

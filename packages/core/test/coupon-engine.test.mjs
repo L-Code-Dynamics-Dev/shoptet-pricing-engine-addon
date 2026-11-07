@@ -44,11 +44,17 @@ test('FÁZE 2: normalizeCouponPolicy - defaults and configurable locked tiers', 
     lockedTierNames: ['ZR20', 'ZR25']
   });
   assert.equal(shopConfig.mode, 'fixed-amount');
+  assert.equal(shopConfig.ceilingPercent, null);
   assert.equal(shopConfig.defaultPricelistId, 17);
   assert.deepEqual(shopConfig.managedPricelistIds, [1, 2, 3]);
   assert.ok(shopConfig.lockedPricelistIds.has(26));
   assert.ok(shopConfig.lockedPricelistIds.has(29));
   assert.ok(shopConfig.lockedTierNames.has('ZR20'));
+
+  assert.throws(
+    () => normalizeCouponPolicy({ defaultPricelistId: 17, mode: 'percent-ceiling', ceilingPercent: null }),
+    /Missing or invalid ceilingPercent for percent-ceiling mode/
+  );
 });
 
 test('FÁZE 2: percent-ceiling mode rules and ratio relative to tier price', () => {
