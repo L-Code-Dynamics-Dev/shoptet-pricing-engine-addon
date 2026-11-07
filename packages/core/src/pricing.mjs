@@ -66,17 +66,14 @@ export function resolveDiscountCap({ productCap = null, brandCap = null, categor
     throw new TypeError('categoryCaps must be an array');
   }
   const cleanCatPercents = [];
-  const rawCaps = Array.isArray(categoryCaps) ? categoryCaps : [];
-  for (const c of rawCaps) {
+  const allRawCats = (categoryCap !== null && categoryCap !== undefined ? [categoryCap] : []).concat(Array.isArray(categoryCaps) ? categoryCaps : []);
+  for (const c of allRawCats) {
     if (c === null || c === undefined) continue;
     const bps = percentBps(c, 'categoryCap');
     cleanCatPercents.push(Number(bps) / 100);
   }
 
-  let resolvedCategoryCap = categoryCap !== null && categoryCap !== undefined ? Number(percentBps(categoryCap, 'categoryCap')) / 100 : null;
-  if (resolvedCategoryCap === null && cleanCatPercents.length > 0) {
-    resolvedCategoryCap = cleanCatPercents.reduce((min, cur) => cur < min ? cur : min, cleanCatPercents[0]);
-  }
+  const resolvedCategoryCap = cleanCatPercents.length > 0 ? Math.min(...cleanCatPercents) : null;
 
   const normProduct = productCap !== null && productCap !== undefined ? Number(percentBps(productCap, 'productCap')) / 100 : null;
   const normBrand = brandCap !== null && brandCap !== undefined ? Number(percentBps(brandCap, 'brandCap')) / 100 : null;
@@ -147,7 +144,9 @@ export function calculateTierPrice({
   // Manual merchant action price (validAction) is NEVER raised by minimumMinor.
   if (minimumMinor !== null) {
     const minFloor = checkedMinor(minimumMinor, 'minimumMinor');
-    if (loyalty < minFloor) loyalty = minFloor;
+    // Ensure minimum price floor is representable on the shop currency step using ceiling-to-step
+    const steppedFloor = step > 1n ? ((minFloor + step - 1n) / step) * step : minFloor;
+    if (loyalty < steppedFloor) loyalty = steppedFloor;
   }
 
   let chosen = loyalty;

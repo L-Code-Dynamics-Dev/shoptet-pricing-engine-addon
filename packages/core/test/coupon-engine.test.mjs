@@ -386,3 +386,56 @@ test('TASK H: Coupon-mode parity and boundary invariants', () => {
   assert.equal(percentDeeperSale.minPriceRatio, null);
   assert.equal(percentDeeperSale.reason, 'ceiling_exhausted_by_sale');
 });
+
+test('TASK 3: createPricelistCouponPatch strictly validates 0..1 minPriceRatio boundary', () => {
+  // Valid ratios: 0.000, 1.000, 0.889, null
+  const patchZero = createPricelistCouponPatch({
+    targetPricelistId: 2,
+    code: 'SKU-1',
+    applyDiscountCoupon: true,
+    minPriceRatio: '0.000'
+  });
+  assert.equal(patchZero.sales.minPriceRatio, '0.000');
+
+  const patchOne = createPricelistCouponPatch({
+    targetPricelistId: 2,
+    code: 'SKU-1',
+    applyDiscountCoupon: true,
+    minPriceRatio: '1.000'
+  });
+  assert.equal(patchOne.sales.minPriceRatio, '1.000');
+
+  const patchMid = createPricelistCouponPatch({
+    targetPricelistId: 2,
+    code: 'SKU-1',
+    applyDiscountCoupon: true,
+    minPriceRatio: '0.889'
+  });
+  assert.equal(patchMid.sales.minPriceRatio, '0.889');
+
+  // Invalid ratios: > 1.000 (e.g. 2.000, 9.999), negative, wrong decimals
+  assert.throws(
+    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '2.000' }),
+    /Invalid minPriceRatio/
+  );
+
+  assert.throws(
+    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '9.999' }),
+    /Invalid minPriceRatio/
+  );
+
+  assert.throws(
+    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '-0.100' }),
+    /Invalid minPriceRatio/
+  );
+
+  assert.throws(
+    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '1.001' }),
+    /Invalid minPriceRatio/
+  );
+
+  assert.throws(
+    () => createPricelistCouponPatch({ targetPricelistId: 2, code: 'SKU-1', applyDiscountCoupon: true, minPriceRatio: '0.88' }),
+    /Invalid minPriceRatio/
+  );
+});

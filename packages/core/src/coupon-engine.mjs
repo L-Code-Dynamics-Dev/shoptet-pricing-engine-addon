@@ -349,8 +349,8 @@ export function createPricelistCouponPatch({
   if (typeof applyDiscountCoupon !== 'boolean') {
     throw new TypeError('applyDiscountCoupon must be boolean');
   }
-  if (minPriceRatio !== null && (typeof minPriceRatio !== 'string' || !/^\d\.\d{3}$/.test(minPriceRatio))) {
-    throw new TypeError('Invalid minPriceRatio: expected string with 3 decimal places (e.g. 0.889) or null');
+  if (minPriceRatio !== null && (typeof minPriceRatio !== 'string' || !/^(0\.\d{3}|1\.000)$/.test(minPriceRatio))) {
+    throw new TypeError('Invalid minPriceRatio: must be string between 0.000 and 1.000 with 3 decimal places (e.g. 0.889) or null');
   }
 
   return {

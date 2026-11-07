@@ -379,3 +379,107 @@ test('TASK E: Reconciliation runner detects missing variant code as UNKNOWN and 
   const couponDrift = couponResult.drifts.find(d => d.reason === 'missing_variant_code');
   assert.ok(couponDrift);
 });
+
+test('TASK 1: Audit conflict reproducer - manual action price below margin floor cannot be MATCH', async () => {
+  const shopId = 826800;
+  const tiers = [{ name: 'VIP-10', percent: 10, pricelistId: 2 }];
+
+  // Reproducer candidate: base=10000, action=8000, tier=10%, minimum=9000, stored=8000
+  const result = await reconcilePrices({
+    adapter: {},
+    shopId,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-conflict',
+        visibility: 'normal',
+        variants: [
+          {
+            code: 'SKU-CONFLICT',
+            visible: true,
+            basePriceMinor: 10000,
+            actionPriceMinor: 8000,
+            minimumMinor: 9000,
+            perPricelistPrices: {
+              2: { priceMinor: 8000 } // Stored matches action price, but violates margin floor 9000
+            }
+          }
+        ]
+      }
+    ],
+    minExpectedCombinations: 1
+  });
+
+  // Must NOT classify as MATCH! Safety conflict must surface as UNKNOWN and fail self-check.
+  assert.equal(result.counts.match, 0);
+  assert.equal(result.counts.unknown, 1);
+  assert.equal(result.selfCheckPassed, false);
+  const conflict = result.drifts.find(d => d.reason === 'manual_action_below_margin_floor');
+  assert.ok(conflict);
+  assert.equal(conflict.status, 'UNKNOWN');
+  assert.equal(conflict.expected, 8000); // Merchant price is never raised
+  assert.equal(conflict.actual, 8000);
+});
+
+test('TASK 4: Coverage trust - absent pagination metadata with fullCatalogVerified: false fails self-check', async () => {
+  const shopId = 826800;
+  const tiers = [{ name: 'VIP', percent: 10, pricelistId: 2 }];
+
+  const result = await reconcilePrices({
+    adapter: {},
+    shopId,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-unverified',
+        visibility: 'normal',
+        variants: [{ code: 'SKU-UNV', visible: true, basePriceMinor: 1000, perPricelistPrices: { 2: { priceMinor: 900 } } }]
+      }
+    ],
+    pagination: null,
+    fullCatalogVerified: false, // Incomplete caller assurance without authenticated adapter proof
+    minExpectedCombinations: 1
+  });
+
+  assert.equal(result.selfCheckPassed, false);
+  assert.equal(result.selfCheckReason, 'unverified_coverage_pagination_metadata_missing');
+});
+
+test('TASK 5: reconcileCoupons - missing sales field or discountCoupon fails closed to UNKNOWN', async () => {
+  const shopId = 826800;
+  const tiers = [{ name: 'VIP', percent: 10, pricelistId: 2 }];
+
+  const result = await reconcileCoupons({
+    adapter: {},
+    shopId,
+    tiers,
+    catalogProducts: [
+      {
+        guid: 'prod-missing-sales',
+        visibility: 'normal',
+        variants: [
+          {
+            code: 'SKU-NO-SALES',
+            visible: true,
+            basePriceMinor: 10000,
+            perPricelistPrices: {
+              2: {
+                priceMinor: 9000
+                // sales field is completely missing!
+              }
+            }
+          }
+        ]
+      }
+    ],
+    minExpectedCombinations: 1
+  });
+
+  // Must NOT silently default to discountCoupon: true!
+  assert.equal(result.counts.unknown, 1);
+  assert.equal(result.counts.match, 0);
+  assert.equal(result.selfCheckPassed, false);
+  const drift = result.drifts.find(d => d.reason === 'missing_sales_coupon_observation');
+  assert.ok(drift);
+  assert.equal(drift.status, 'UNKNOWN');
+});

@@ -5,7 +5,7 @@
 // - Distinguishes MATCH, DRIFT, MISSING, SKIPPED, UNKNOWN
 // - Auto-remediation strictly OFF by default
 
-import { calculateTierPrice } from './pricing.mjs';
+import { calculateTierPrice, evaluatePriceDecision } from './pricing.mjs';
 import { evaluateCouponSettings, normalizeCouponPolicy } from './coupon-engine.mjs';
 
 /**
@@ -45,6 +45,7 @@ export async function reconcilePrices({
   tiers = [],
   catalogProducts = [],
   pagination = null,
+  fullCatalogVerified = true,
   minExpectedCombinations = 1
 }) {
   const numShopId = Number(shopId);
@@ -144,7 +145,8 @@ export async function reconcilePrices({
         counts.total++;
         checkedPricelists.add(tier.pricelistId);
 
-        const expectedMinor = calculateTierPrice({
+        const minimumMinor = variant.minimumMinor ?? product.minimumMinor ?? policy?.minimumMinor ?? null;
+        const decision = evaluatePriceDecision({
           baseMinor,
           actionMinor,
           tierPercent: tier.percent,
@@ -154,8 +156,10 @@ export async function reconcilePrices({
           categoryCap: categoryCaps.length ? Math.min(...categoryCaps) : null,
           capPriority: policy?.capPriority ?? 'most_restrictive',
           salePolicy: policy?.salePolicy ?? 'okfish_compatible',
-          minimumMinor: variant.minimumMinor ?? product.minimumMinor ?? policy?.minimumMinor ?? null
+          minimumMinor
         });
+
+        const expectedMinor = decision.priceMinor;
 
         // Actual price in target pricelist
         const actualEntry = variant.perPricelistPrices?.[tier.pricelistId];
@@ -174,6 +178,23 @@ export async function reconcilePrices({
         }
 
         const actualMinor = actualEntry.priceMinor;
+
+        // Safety gate check (Task 1): If manual action price breaches margin floor,
+        // it cannot be classified as MATCH. Surfacing safety conflict fails closed.
+        if (decision.status === 'BLOCKED_NO_WRITE') {
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'UNKNOWN',
+            reason: decision.reason || 'manual_action_below_margin_floor',
+            expected: expectedMinor,
+            actual: actualMinor
+          });
+          continue;
+        }
+
         if (actualMinor === expectedMinor) {
           counts.match++;
         } else {
@@ -200,7 +221,12 @@ export async function reconcilePrices({
     minExpectedCombinations
   });
 
-  if (isTruncated) {
+  if (!pagination && !fullCatalogVerified) {
+    selfCheck = {
+      passed: false,
+      reason: 'unverified_coverage_pagination_metadata_missing'
+    };
+  } else if (isTruncated) {
     selfCheck = {
       passed: false,
       reason: 'incomplete_pagination_truncated_run'
@@ -238,6 +264,7 @@ export async function reconcileCoupons({
   tiers = [],
   catalogProducts = [],
   pagination = null,
+  fullCatalogVerified = true,
   minExpectedCombinations = 1
 }) {
   const numShopId = Number(shopId);
@@ -370,8 +397,26 @@ export async function reconcileCoupons({
           minimumMinor: variant.minimumMinor ?? product.minimumMinor ?? couponPolicy.minimumMinor ?? null
         });
 
-        const actualCoupon = actualEntry.sales?.discountCoupon ?? true;
-        const actualRatio = actualEntry.sales?.minPriceRatio ?? null;
+        // Task 5: Absent sales field or discountCoupon must not silently default to true (fail closed)
+        if (!actualEntry.sales || actualEntry.sales.discountCoupon === undefined || actualEntry.sales.discountCoupon === null) {
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'UNKNOWN',
+            reason: 'missing_sales_coupon_observation',
+            expected: {
+              discountCoupon: expected.applyDiscountCoupon,
+              minPriceRatio: expected.minPriceRatio
+            },
+            actual: null
+          });
+          continue;
+        }
+
+        const actualCoupon = actualEntry.sales.discountCoupon;
+        const actualRatio = actualEntry.sales.minPriceRatio ?? null;
 
         const couponMatches = actualCoupon === expected.applyDiscountCoupon;
         const ratioMatches = actualRatio === expected.minPriceRatio;
@@ -411,7 +456,12 @@ export async function reconcileCoupons({
     minExpectedCombinations
   });
 
-  if (isTruncated) {
+  if (!pagination && !fullCatalogVerified) {
+    selfCheck = {
+      passed: false,
+      reason: 'unverified_coverage_pagination_metadata_missing'
+    };
+  } else if (isTruncated) {
     selfCheck = {
       passed: false,
       reason: 'incomplete_pagination_truncated_run'
