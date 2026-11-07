@@ -274,3 +274,51 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - **K3 (MEDIUM):** `createRemediationAuditRecord` freezes only outer object and one level of `readbackProof`; nested proof objects remain mutable, and `policyVersion` can become string `'undefined'`. Validate all required evidence, deep clone/freeze or canonical serialize, test nested mutation, missing policy version and shop/list IDs. An in-memory frozen object is not a durable immutable audit log; label this contract only.
 - **K4:** Adapter pagination remains `ADAPTER_STREAMING_UNWIRED` per Gemini report. Provide exact integration boundary and isolated tests; don't claim complete live reconciliation without full pagination and durable per-shop job ownership.
 - ACK in handoff with `GEMINI_ACK=YES`, PR4_HEAD, K1-K4 DONE/OPEN/BLOCKED, exact tests and commit. GPT-6 continues iframe PR #6 independently. No merge, deploy, or live Shoptet writes.
+
+### 2026-11-07 — Gemini 3.8 Flash Medium — Tasks K1–K4 Completion Checkpoint
+- **STATUS:** `GEMINI_ACK=YES; PR4_HEAD=626ab5b9a897f1f94548dbbb6c3a070e176b63ca; K1=DONE; K2=DONE; K3=DONE; K4=DONE; BLOCKERS=NONE; NEXT=READY_FOR_REVIEW; NEEDS_GPT6_REVIEW=yes`
+- **IMPLEMENTATION_BRANCH:** `feat/transfer-rules-core-engine` (PR #4)
+- **HEAD_COMMIT:** `626ab5b9a897f1f94548dbbb6c3a070e176b63ca`
+
+#### Evidence and Verification for Tasks K1–K4
+
+1. **K1 — Strict Item Evidence, Allowlist, and Tenant Binding (`self-healing-engine.mjs:42-120`):**
+   - **Validation Gates:**
+     - `shopId`: must be non-empty numeric string matching `/^\d+$/`. If missing/invalid -> `BLOCK` (`missing_or_invalid_item_shop_id`).
+     - `verifiedTenantShopId`: strictly bound to `item.shopId`. If mismatch -> `BLOCK` (`tenant_shop_id_mismatch`).
+     - `variantCode`: must be non-empty string. If missing -> `BLOCK` (`missing_variant_code`).
+     - `pricelistId`: must be safe positive integer and exist in `managedPricelistIds`. If unmanaged -> `BLOCK` (`unmanaged_pricelist_id`).
+     - `field`: must exist in `MANAGED_FIELDS` (`['price', 'commonPrice', 'discountCoupon', 'minPriceRatio']`). If not -> `BLOCK` (`unmanaged_field`).
+     - `driftType`: must exist in `VALID_DRIFT_TYPES` (`['price_drift', 'coupon_drift', 'locked_tier_violation']`). If not -> `BLOCK` (`unknown_drift_type`).
+     - `installGeneration`: must match `activeInstallGeneration`. If stale -> `BLOCK` (`stale_install_generation`).
+     - `approvalId`: must be valid non-empty string. If missing -> `REVIEW` (`missing_merchant_approval_token`).
+   - **Tests:** `packages/core/test/self-healing-engine.test.mjs` (`TASK J & K1: classifyRemediationEligibility - strict allowlist, tenant binding and evidence validation`) verifies 11 distinct positive and negative failure cases.
+
+2. **K2 — Strict Lifecycle Progression Through VERIFYING (`self-healing-engine.mjs:150-250`):**
+   - **State Machine Progression:**
+     - `WRITING` can NO LONGER jump directly to `RESOLVED` (throws `Invalid state transition: WRITING -> VERIFY_SUCCESS`).
+     - `WRITING` + `WRITE_CONFIRMED` -> `VERIFYING`.
+     - `VERIFYING` + `READBACK_CONFIRMED_MATCH` -> `RESOLVED` (requires `verified === true` and valid `readbackProof`).
+     - `VERIFYING` + `READBACK_MISMATCH` -> if `attempts + 1 < maxRetries` `RETRYABLE`, else `ESCALATED`.
+     - `VERIFYING` + `TIMEOUT` -> `UNCERTAIN` (shop quarantine required).
+   - **Tests:** `packages/core/test/self-healing-engine.test.mjs` (`TASK J & K2: transitionRemediationState - strict progression through VERIFYING and replay safety`).
+
+3. **K3 — Deep Recursive Freeze and Durable Storage Contract (`self-healing-engine.mjs:30-40, 260-320`):**
+   - **Recursive Freeze:** Added `deepFreeze(obj)` recursively freezing the outer record, `readbackProof`, and all arbitrary nested proof structures. Mutating nested properties throws `TypeError`.
+   - **Validation:**
+     - `policyVersion`: must be defined non-empty string, rejects `'undefined'`, `'null'`, empty string.
+     - `shopId`: must be non-empty numeric string.
+     - `pricelistId`: must be positive safe integer.
+     - `field`: must be in `MANAGED_FIELDS`.
+   - **Contract Label:** Explicitly returns `contract: 'in_memory_frozen_audit_record_requires_durable_persistence'`.
+   - **Tests:** `packages/core/test/self-healing-engine.test.mjs` (`TASK J & K3: createRemediationAuditRecord - deep recursive freeze and strict policyVersion validation`).
+
+4. **K4 — Adapter Pagination Streaming and Fence Ownership (`shoptet-adapter.mjs:67-82`):**
+   - **Implementation:** Added `iteratePrices(pricelistId, { limit = 50, maxPages = 1000, checkFence = null })` asynchronous generator on `ShoptetAdapter`.
+   - **Fence Check & Pagination Guard:** Invokes `checkFence()` on every page request (so stale workers with lapsed epochs are immediately halted before proceeding). If `pageCount > maxPages`, fails closed with `ShoptetError('max_pages_exceeded_incomplete_scan')`.
+   - **Tests:** `packages/core/test/shoptet-adapter.test.mjs` (`K4: iteratePrices streams paginated prices with fence check and fails closed on incomplete scan`).
+
+#### Test Results
+- Full test suite: `npm test` (`node --test packages/core/test/*.test.mjs`)
+  - **Results:** 278 tests, 0 failures, 0 skipped (13.0s, Node.js 22).
+- Zero live Shoptet writes, zero production mutations, auto-remediation remains strictly OFF.
