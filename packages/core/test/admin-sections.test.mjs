@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { UI_DEFAULTS, validateUiSection } from '../../apps/api/src/admin-sections.mjs';
-import { renderAdminHtml } from '../../apps/api/src/iframe-settings.mjs';
+import { UI_DEFAULTS, validateUiSection } from '../../../apps/api/src/admin-sections.mjs';
+import { renderAdminHtml } from '../../../apps/api/src/iframe-settings.mjs';
 
 test('each UI draft section accepts its default', () => {
   for (const [key, value] of Object.entries(UI_DEFAULTS)) {
