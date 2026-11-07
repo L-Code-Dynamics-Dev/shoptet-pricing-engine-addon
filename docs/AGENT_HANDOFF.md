@@ -455,3 +455,50 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - **Navigation & continuity:** wizard state persists per authenticated shop; back/forward/reload do not lose draft; show incomplete steps, validation, empty/loading/error/permission states; no dead buttons or fabricated metrics; accessible responsive embedded layout, safe iframe embedding/session handling, no secrets in URL or browser storage; respect Shoptet embedding requirements.
 - **Safety gates:** initial setup never writes live prices; protected main pricelist read-only; explicit managed pricelist allowlist; tenant/shop isolation; preview must verify complete relevant data; block on missing VAT/cost/coverage/authorization; manual merchant action prices preserved; highest applicable discount wins without stacking; final minimum price guard; no automatic remediation; no misleading “all OK” on partial sync.
 - **Implementation handoff:** GPT-6 must own an isolated UI branch and produce runnable integrated admin app (not static mock); Gemini supplies authenticated backend contracts, actual response schemas, read-only preview and durable job status endpoints. Do not invent endpoints. Record route-to-endpoint matrix, exact acceptance tests for first install through configuration and restart, and gaps separately. Never merge/deploy/live-write without approval.
+
+### 2026-11-07 14:07 UTC — Gemini — TASKS A, B, C IMPLEMENTED & INDEPENDENTLY PROVEN
+- **Implementation PR #4 Branch:** `feat/transfer-rules-core-engine`
+- **Fresh PR #4 Commit SHA:** `7cfc447` (`fix(core): close Tasks A, B, C (authenticated main pricelist & allowlist, unverified coverage default & adapter proof, absent minPriceRatio UNKNOWN)`)
+- **Full Test Suite:** `npm test` (`node --test packages/core/test/*.test.mjs`) -> **286 passed, 0 failed, 0 skipped (14.8s, Node.js 22, macOS)**
+
+#### Precise Source & Test Line Evidence
+
+1. **TASK A — Authenticated Shop-Scoped Main Pricelist ID & Managed Tier Allowlist:**
+   - **Source:** [`packages/core/src/coupon-engine.mjs:133-145, 342-370`](file:///Users/lucky/shoptet-pricing-engine-addon/packages/core/src/coupon-engine.mjs#L133-L145)
+   - **Code Changes:**
+     - Removed implicit `?? 1` fallback. `normalizeCouponPolicy` strictly throws `TypeError('Missing or invalid authenticated shop-scoped default/main pricelist ID')` if `defaultPricelistId`/`mainPricelistId` is missing or not a positive safe integer.
+     - `createPricelistCouponPatch` requires `defaultPricelistId` (or `mainPricelistId`) and optional `managedPricelistIds`. Throws `main_pricelist_coupon_write_forbidden` if `targetPricelistId === effectiveMainId`, and throws `unmanaged_tier_pricelist_coupon_write_forbidden` if target is outside `managedPricelistIds`.
+   - **Regression Test:** [`packages/core/test/coupon-engine.test.mjs:425-475`](file:///Users/lucky/shoptet-pricing-engine-addon/packages/core/test/coupon-engine.test.mjs#L425-L475) (`TASK A: authenticated shop-scoped main ID=17 and managed tier ID=1 regression`)
+     - Proves: Target ID 1 with main ID 17 succeeds and is never falsely rejected as main ID.
+     - Proves: Target ID 17 throws `main_pricelist_coupon_write_forbidden`.
+     - Proves: Target ID 99 throws `unmanaged_tier_pricelist_coupon_write_forbidden`.
+     - Proves: Omitted or 0 main ID throws `TypeError`.
+   - **Test Command & Output:** `node --test packages/core/test/coupon-engine.test.mjs` -> **14 passed, 0 failed (210ms)**.
+
+2. **TASK B — Coverage Trust Default to Unverified & Authenticated Completeness Proof:**
+   - **Source:** [`packages/core/src/reconciliation-runner.mjs:48, 227-238, 273, 470-480`](file:///Users/lucky/shoptet-pricing-engine-addon/packages/core/src/reconciliation-runner.mjs#L48)
+   - **Code Changes:**
+     - `reconcilePrices` and `reconcileCoupons` now default `fullCatalogVerified = false`.
+     - Authenticated adapter completeness proof checked via `isAdapterVerified = (adapter?.isFullCatalogVerified?.() === true || adapter?.fullCatalogVerified === true || fullCatalogVerified === true)`.
+     - If neither pagination nor adapter proof exists, `selfCheck.passed = false`, `selfCheck.reason = 'unverified_coverage_pagination_metadata_missing'`.
+   - **Regression Test:** [`packages/core/test/reconciliation-runner.test.mjs:434-485`](file:///Users/lucky/shoptet-pricing-engine-addon/packages/core/test/reconciliation-runner.test.mjs#L434-L485) (`TASK 4: Coverage trust - absent pagination metadata with default arguments fails self-check (TASK B)`)
+     - Proves: Omitted arguments in `reconcilePrices` fail self-check with `'unverified_coverage_pagination_metadata_missing'`.
+     - Proves: Omitted arguments in `reconcileCoupons` fail self-check with `'unverified_coverage_pagination_metadata_missing'`.
+     - Proves: `adapter: { isFullCatalogVerified: () => true }` passes coverage check.
+   - **Test Command & Output:** `node --test packages/core/test/reconciliation-runner.test.mjs` -> **10 passed, 0 failed (215ms)**.
+
+3. **TASK C — Distinguish Absent `minPriceRatio` vs Explicit `null`:**
+   - **Source:** [`packages/core/src/reconciliation-runner.mjs:434-455`](file:///Users/lucky/shoptet-pricing-engine-addon/packages/core/src/reconciliation-runner.mjs#L434-L455)
+   - **Code Changes:**
+     - Explicit check: `if (!('minPriceRatio' in actualEntry.sales) || actualEntry.sales.minPriceRatio === undefined)`.
+     - Absent property is classified as `status: 'UNKNOWN'`, `reason: 'missing_min_price_ratio_observation'`, increments `counts.unknown++`, and triggers self-check failure.
+     - Present property with `minPriceRatio: null` is evaluated cleanly as explicit observed null, and matched against `expected.minPriceRatio`.
+   - **Regression Test:** [`packages/core/test/reconciliation-runner.test.mjs:529-600`](file:///Users/lucky/shoptet-pricing-engine-addon/packages/core/test/reconciliation-runner.test.mjs#L529-L600) (`TASK C: reconcileCoupons - present sales with missing minPriceRatio vs explicit null`)
+     - Proves: Present sales `{ discountCoupon: true }` without `minPriceRatio` records `status: 'UNKNOWN'`, `reason: 'missing_min_price_ratio_observation'`, `selfCheckPassed: false`.
+     - Proves: Present sales `{ discountCoupon: true, minPriceRatio: null }` records `status: 'MATCH'`, `counts.unknown: 0`, `selfCheckPassed: true`.
+   - **Test Command & Output:** `node --test packages/core/test/reconciliation-runner.test.mjs` -> **10 passed, 0 failed (215ms)**.
+
+#### Status Summary
+- **Tasks A, B, C:** CLOSED with code diffs, failing-to-passing tests, and commit `7cfc447`.
+- **Full Test Suite:** 286/286 PASS.
+- **Safety Boundary:** Zero live Shoptet/OKfish mutations, auto-remediation stays OFF. Ready for GPT-6 UI integration on isolated UI branch.
