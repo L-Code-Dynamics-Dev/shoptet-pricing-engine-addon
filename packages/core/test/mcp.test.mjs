@@ -28,10 +28,22 @@ test('install tool is not listed without install scope',async()=>{
 test('install tool fails closed without trusted services',async()=>{
  const t='C'.repeat(48);records.push({digest:await hashToken(t),identity:{shop_id:'shop1',scopes_json:'["assets:install"]'}});
  const r=await handleMcp(req('tools/call',{name:'frontend_assets_install',arguments:{approvalId:'A'.repeat(32)}},t),env);
- assert.equal(r.status,403);
+ assert.equal((await r.json()).error.code,-32602);
 });
 test('install tool rejects caller supplied assets and credentials',async()=>{
  const t='C'.repeat(48);
  const r=await (await handleMcp(req('tools/call',{name:'frontend_assets_install',arguments:{approvalId:'A'.repeat(32),password:'secret'}},t),env)).json();
- assert.equal(r.error.code,-32603);
+ assert.equal(r.error.code,-32602);
+});
+
+test('MCP never advertises or invokes write-capable tools even with legacy scopes',async()=>{
+ const t='D'.repeat(48);
+ records.push({digest:await hashToken(t),identity:{shop_id:'shop-1',scopes_json:JSON.stringify(['installation:read','pricing:preview','assets:preview','assets:install','shoptet:read','shoptet:write','pricing:sync'])}});
+ const listed=await (await handleMcp(req('tools/list',{},t),env)).json();
+ const forbidden=['frontend_assets_install','shoptet_configure_tiers','shoptet_sync_tier_price'];
+ for(const name of forbidden){
+  assert.equal(listed.result.tools.some(x=>x.name===name),false,name);
+  const response=await (await handleMcp(req('tools/call',{name,arguments:{}},t),env)).json();
+  assert.equal(response.error.code,-32602,name);
+ }
 });
