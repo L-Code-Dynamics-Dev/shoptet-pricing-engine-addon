@@ -22,6 +22,10 @@ import {
   setupLoyaltyEntities,
   inspectStoreOnboardingData
 } from '../../../packages/core/src/loyalty-onboarding.mjs';
+import {
+  validateProductPromotion,
+  validateBrandPromotion
+} from '../../../packages/core/src/promotions.mjs';
 /**
  * L-Code Loyalty Pricing Engine — addon settings page embedded in Shoptet administration.
  * High-fidelity native Shoptet administration theme with Shoptet tabs, cards, and buttons.
@@ -125,6 +129,27 @@ export function validateRules(input) {
     if (!Number.isFinite(minP) || minP < 1 || minP > 100) return { error: 'Hranice slevy pro zákaz kupónů musí být 1–100 %.' };
     couponLockMinPercent = Math.round(minP * 100) / 100;
   }
+
+  const scheduledPromotions = [];
+  if (Array.isArray(input.scheduledPromotions)) {
+    if (input.scheduledPromotions.length > 500) return { error: 'Maximálně 500 položek plánovaného výprodeje.' };
+    for (const item of input.scheduledPromotions) {
+      const v = validateProductPromotion(item);
+      if (v.error) return { error: v.error };
+      scheduledPromotions.push(v.item);
+    }
+  }
+
+  const brandPromotions = [];
+  if (Array.isArray(input.brandPromotions)) {
+    if (input.brandPromotions.length > 100) return { error: 'Maximálně 100 plánovaných akcí na značky.' };
+    for (const item of input.brandPromotions) {
+      const v = validateBrandPromotion(item);
+      if (v.error) return { error: v.error };
+      brandPromotions.push(v.item);
+    }
+  }
+
   return {
     rules: {
       couponLockTopTiers: input.couponLockTopTiers !== false,
@@ -135,7 +160,9 @@ export function validateRules(input) {
       postWriteVerify: input.postWriteVerify !== false,
       brandLimits,
       categoryLimits,
-      productLimits
+      productLimits,
+      scheduledPromotions,
+      brandPromotions
     }
   };
 }
@@ -1280,6 +1307,16 @@ export function renderAdminHtml(eshopId, auth) {
       <div id="product-limits-container" style="display: flex; flex-direction: column; gap: 8px; max-width: 440px; margin-bottom: 14px;"></div>
       <button type="button" class="btn-secondary" id="btn-add-product-limit">+ Přidat produkt</button>
 
+      <div class="section-heading">Plánované akce a výprodeje produktů (časová okna od–do)</div>
+      <p style="color: #666666; font-size: 13px; margin-bottom: 14px;">Zde můžete nastavit dočasné akční slevy a výprodeje pro konkrétní produkty s přesnou dobou platnosti:</p>
+      <div id="scheduled-promotions-container" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px;"></div>
+      <button type="button" class="btn-secondary" id="btn-add-scheduled-promo">+ Přidat výprodej produktu</button>
+
+      <div class="section-heading">Plošné akce na značky (časová okna od–do)</div>
+      <p style="color: #666666; font-size: 13px; margin-bottom: 14px;">Plošná akční sleva na celý sortiment vybrané značky s možností omezení od–do:</p>
+      <div id="brand-promotions-container" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px;"></div>
+      <button type="button" class="btn-secondary" id="btn-add-brand-promo">+ Přidat akci na značku</button>
+
       <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #eeeeee; display: flex; align-items: center; gap: 8px;">
         <button type="button" class="btn-shoptet-green" id="rules-save-bottom">Uložit pravidla</button>
         <span style="color: #888888; font-size: 12px; margin-left: 8px;" id="rules-version"></span>
@@ -1709,6 +1746,48 @@ export function renderAdminHtml(eshopId, auth) {
       if(id){if(!/^[a-f0-9-]{36}$/i.test(id)){choose.textContent='Chybí platný odkaz: '+id;row.dataset.invalid='true';}else api('/catalog/product?id='+encodeURIComponent(id)).then(prod=>{if(value.value!==id)return;productNames.set(prod.guid,prod.name||prod.code);choose.textContent=(prod.name||prod.code)+(limit===0?' (0 % - vyloučeno)':'');row.dataset.invalid='false';}).catch(()=>{if(value.value!==id)return;choose.textContent='Nedostupný produkt: '+id;row.dataset.invalid='true';});}
       resize();return row;
     }
+
+    function addScheduledPromoRow(promo = {}) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;background:#f9f9f9;border:1px solid #e5e5e5;border-radius:4px;';
+      const codeInput = document.createElement('input');
+      codeInput.type = 'text'; codeInput.className = 'input-text sp-code'; codeInput.style.width = '140px'; codeInput.placeholder = 'Kód produktu'; codeInput.value = promo.code || '';
+      const pctInput = document.createElement('input');
+      pctInput.type = 'number'; pctInput.min = '0.01'; pctInput.max = '99.99'; pctInput.step = '0.01'; pctInput.className = 'input-text sp-pct w-small'; pctInput.value = promo.discountPercent !== undefined ? promo.discountPercent : 20;
+      const pctLabel = document.createElement('span'); pctLabel.textContent = '%';
+      const fromLabel = document.createElement('span'); fromLabel.style.fontSize = '12px'; fromLabel.textContent = 'Od:';
+      const fromInput = document.createElement('input'); fromInput.type = 'date'; fromInput.className = 'input-text sp-from'; fromInput.value = promo.validFrom || '';
+      const toLabel = document.createElement('span'); toLabel.style.fontSize = '12px'; toLabel.textContent = 'Do:';
+      const toInput = document.createElement('input'); toInput.type = 'date'; toInput.className = 'input-text sp-to'; toInput.value = promo.validTo || '';
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'btn-remove'; remove.textContent = '×'; remove.setAttribute('aria-label', 'Odebrat položku výprodeje');
+      remove.addEventListener('click', () => row.remove());
+      row.append(codeInput, pctInput, pctLabel, fromLabel, fromInput, toLabel, toInput, remove);
+      $('scheduled-promotions-container').append(row);
+      resize();
+      return row;
+    }
+
+    function addBrandPromoRow(promo = {}) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;background:#f9f9f9;border:1px solid #e5e5e5;border-radius:4px;';
+      const brandInput = document.createElement('input');
+      brandInput.type = 'text'; brandInput.className = 'input-text bp-brand'; brandInput.style.width = '160px'; brandInput.placeholder = 'Název značky'; brandInput.value = promo.brand || '';
+      const pctInput = document.createElement('input');
+      pctInput.type = 'number'; pctInput.min = '0.01'; pctInput.max = '99.99'; pctInput.step = '0.01'; pctInput.className = 'input-text bp-pct w-small'; pctInput.value = promo.discountPercent !== undefined ? promo.discountPercent : 15;
+      const pctLabel = document.createElement('span'); pctLabel.textContent = '%';
+      const fromLabel = document.createElement('span'); fromLabel.style.fontSize = '12px'; fromLabel.textContent = 'Od:';
+      const fromInput = document.createElement('input'); fromInput.type = 'date'; fromInput.className = 'input-text bp-from'; fromInput.value = promo.validFrom || '';
+      const toLabel = document.createElement('span'); toLabel.style.fontSize = '12px'; toLabel.textContent = 'Do:';
+      const toInput = document.createElement('input'); toInput.type = 'date'; toInput.className = 'input-text bp-to'; toInput.value = promo.validTo || '';
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'btn-remove'; remove.textContent = '×'; remove.setAttribute('aria-label', 'Odebrat akci na značku');
+      remove.addEventListener('click', () => row.remove());
+      row.append(brandInput, pctInput, pctLabel, fromLabel, fromInput, toLabel, toInput, remove);
+      $('brand-promotions-container').append(row);
+      resize();
+      return row;
+    }
     $('product-picker-search').addEventListener('input',()=>{clearTimeout(window.productSearchTimer);window.productSearchTimer=setTimeout(()=>{productPage=1;loadProductPicker();},250);});
     $('product-picker-next').addEventListener('click',()=>{productPage++;loadProductPicker();});$('product-picker-prev').addEventListener('click',()=>{productPage=Math.max(1,productPage-1);loadProductPicker();});
     $('product-picker-use').addEventListener('click',()=>{const id=$('product-picker-results').value;if(!id||!productTarget)return;if([...document.querySelectorAll('.pl-name')].some(input=>input!==productTarget.querySelector('.pl-name')&&input.value===id)){flash('Tento produkt už je vybraný.',true);return;}productTarget.querySelector('.pl-name').value=id;productTarget.querySelector('.pl-label').textContent=productNames.get(id)||id;productTarget.dataset.invalid='false';$('product-picker').hidden=true;});
@@ -1738,6 +1817,16 @@ export function renderAdminHtml(eshopId, auth) {
       const pLimits = r.productLimits || {};
       Object.entries(pLimits).forEach(([k, v]) => addProductLimitRow(k, v));
 
+      const spc = $('scheduled-promotions-container');
+      spc.textContent = '';
+      const sPromos = r.scheduledPromotions || [];
+      sPromos.forEach(p => addScheduledPromoRow(p));
+
+      const bpc = $('brand-promotions-container');
+      bpc.textContent = '';
+      const bPromos = r.brandPromotions || [];
+      bPromos.forEach(p => addBrandPromoRow(p));
+
       $('rules-version').textContent = state.version ? 'Uloženo (verze: ' + state.version + ')' : '';
     }
 
@@ -1748,6 +1837,8 @@ export function renderAdminHtml(eshopId, auth) {
     $('btn-add-brand-limit').addEventListener('click', () => showBrandPicker(addBrandLimitRow()));
     $('btn-add-category-limit').addEventListener('click', () => showCategoryPicker(addCategoryLimitRow()));
     $('btn-add-product-limit').addEventListener('click', () => showProductPicker(addProductLimitRow()));
+    $('btn-add-scheduled-promo').addEventListener('click', () => addScheduledPromoRow());
+    $('btn-add-brand-promo').addEventListener('click', () => addBrandPromoRow());
 
     async function saveRules() {
       if(document.querySelector('#brand-limits-container [data-invalid="true"]')){flash('Nejdřív opravte nedostupné odkazy značek.',true);return;}
@@ -1772,6 +1863,34 @@ export function renderAdminHtml(eshopId, auth) {
         if (name && Number.isFinite(val)) productLimits[name] = val;
       });
 
+      const scheduledPromotions = [];
+      document.querySelectorAll('#scheduled-promotions-container > div').forEach(row => {
+        const code = row.querySelector('.sp-code').value.trim();
+        const pct = Number(row.querySelector('.sp-pct').value);
+        const validFrom = row.querySelector('.sp-from').value.trim() || undefined;
+        const validTo = row.querySelector('.sp-to').value.trim() || undefined;
+        if (code && Number.isFinite(pct)) {
+          const item = { code, discountPercent: pct };
+          if (validFrom) item.validFrom = validFrom;
+          if (validTo) item.validTo = validTo;
+          scheduledPromotions.push(item);
+        }
+      });
+
+      const brandPromotions = [];
+      document.querySelectorAll('#brand-promotions-container > div').forEach(row => {
+        const brand = row.querySelector('.bp-brand').value.trim();
+        const pct = Number(row.querySelector('.bp-pct').value);
+        const validFrom = row.querySelector('.bp-from').value.trim() || undefined;
+        const validTo = row.querySelector('.bp-to').value.trim() || undefined;
+        if (brand && Number.isFinite(pct)) {
+          const item = { brand, discountPercent: pct };
+          if (validFrom) item.validFrom = validFrom;
+          if (validTo) item.validTo = validTo;
+          brandPromotions.push(item);
+        }
+      });
+
       const minP = $('rule-coupon-min-percent').value.trim();
       const rules = {
         highestDiscountWins: $('rule-highest-discount').checked,
@@ -1781,7 +1900,9 @@ export function renderAdminHtml(eshopId, auth) {
         postWriteVerify: $('rule-post-write-verify').checked,
         brandLimits,
         categoryLimits,
-        productLimits
+        productLimits,
+        scheduledPromotions,
+        brandPromotions
       };
       const btn = $('btn-top-save');
       btn.disabled = true;

@@ -7,6 +7,7 @@
 
 import { calculateTierPrice, evaluatePriceDecision } from './pricing.mjs';
 import { evaluateCouponSettings, normalizeCouponPolicy } from './coupon-engine.mjs';
+import { resolveScheduledPromotionActionMinor } from './promotions.mjs';
 
 /**
  * Validates self-check coverage against minimum expected cardinality.
@@ -145,7 +146,21 @@ export async function reconcilePrices({
         continue;
       }
 
-      const actionMinor = variant.actionPriceMinor ?? null;
+      const explicitActionMinor = variant.actionPriceMinor ?? null;
+      const scheduledActionMinor = resolveScheduledPromotionActionMinor({
+        baseMinor,
+        code,
+        brand: product.brand || product.brandName || product.brandId || null,
+        productPromotions: policy?.scheduledPromotions,
+        brandPromotions: policy?.brandPromotions,
+        now: policy?.now
+      });
+      let actionMinor = null;
+      if (explicitActionMinor !== null && scheduledActionMinor !== null) {
+        actionMinor = Math.min(explicitActionMinor, scheduledActionMinor);
+      } else {
+        actionMinor = explicitActionMinor ?? scheduledActionMinor;
+      }
 
       for (const tier of tiers) {
         counts.total++;
