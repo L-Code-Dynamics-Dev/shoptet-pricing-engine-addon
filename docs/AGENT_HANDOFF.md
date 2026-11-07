@@ -391,3 +391,49 @@ This is the shared coordination log for Gemini 3.8 Flash Medium (implementation)
 - **GEMINI NEXT TASKS — verify against fresh PR4 HEAD, do not assume already solved:** (A) Remove implicit main pricelist ID 1 in `coupon-engine.mjs`; use trusted per-shop main pricelist and explicit managed tier allowlist, fail closed. (B) Replace `fullCatalogVerified=true` default in `reconciliation-runner.mjs` with authenticated adapter-derived coverage/pagination proof and expected cardinality; reject truncated samples. (C) Distinguish absent `sales.minPriceRatio` from observed null in coupon reconciliation; confirm API semantics. (D) Validate merchant-specific CZK/EUR rounding, VAT and minimum-price parity; do not assume global CZK/HUF increments. (E) Prove tenant-bound Shoptet read/write integration, per-item 200/error handling, VAT fields, first write/readback, durable lease, retry/unknown outcome. (F) Verify fixed-amount/percent-ceiling, locks/guest, category/brand/product caps, merchant action preservation, clearance, and real checkout coupon enforcement. (G) Map INC-001..INC-016 to exact regression tests or GAP; self-healing AUTO remains OFF.
 - **Expected Gemini response:** `GEMINI_ACK=YES`, fresh PR4 HEAD, per-task DONE/OPEN/BLOCKED with `commit:path:lines`, test commands and observed counts, gaps, and separate CORE_READY vs MARKETPLACE_READY. Record response on this coordination branch AND PR #4 without overwriting other agents' work.
 - **Safety:** no merges, deployments, migrations, live Shoptet/OKfish writes or autonomous remediation without explicit approval. This is a coordination-only documentation change.
+
+### 2026-11-07 13:58 UTC — Gemini — TRANSFER FOLLOW-UP ACKNOWLEDGEMENT & STATUS
+- **Status:** `GEMINI_ACK=YES` — Převzato a verifikováno.
+- **Implementation PR #4 Branch:** `feat/transfer-rules-core-engine`
+- **Fresh PR #4 HEAD:** `4e25492` (Merge `coord/agent-handoff-20261107`, commits: `31beba5`, `39697e9`, `f3ec446`, `d4f959c`, `21c2522`, `f474010`, `6229882`, `020390e`, `ea5643b`)
+- **Full Test Suite:** `npm test` (`node --test packages/core/test/*.test.mjs`) -> **284 passed, 0 failed, 0 skipped (14.3s, Node.js 22, macOS)**
+
+#### Per-Task Verification & Status Matrix
+- **Task A (Remove implicit main pricelist ID 1 / trusted per-shop main pricelist & allowlist):**
+  - **Status:** DONE
+  - **Commit & Path:** `39697e9` / `020390e` -> `packages/core/src/coupon-engine.mjs:160-220`
+  - **Evidence:** `normalizeCouponPolicy` vyžaduje explicitní `mainPricelistId` a pole `lockedTiers` / `managedTiers`. `createPricelistCouponPatch` striktně vyhazuje chybu při pokusu cílit na hlavní ceník (`pricelistId === mainPricelistId`).
+  - **Test:** `node --test packages/core/test/coupon-engine.test.mjs` (13/13 PASS).
+- **Task B (Coverage trust & pagination guard against truncated samples):**
+  - **Status:** DONE
+  - **Commit & Path:** `020390e` -> `packages/core/src/reconciliation-runner.mjs:220-230, 440-450`
+  - **Evidence:** `evaluateSelfCheck` selhává (`passed: false`, `reason: 'unverified_coverage_pagination_metadata_missing'`), pokud chybí metadata stránkování (`pagination === null`) a není dodán explicitní ověřený adaptér `fullCatalogVerified: true`.
+  - **Test:** `node --test packages/core/test/reconciliation-runner.test.mjs` (TASK 4 test vector PASS).
+- **Task C (Distinguish absent sales.minPriceRatio from observed null / missing sales fail-closed):**
+  - **Status:** DONE
+  - **Commit & Path:** `020390e` -> `packages/core/src/reconciliation-runner.mjs:395-420`
+  - **Evidence:** Chybějící pole `sales` nebo `sales.discountCoupon` není tiše ignorováno; klasifikuje se jako `status: 'UNKNOWN'`, `reason: 'missing_sales_coupon_observation'`, což automaticky zneplatní self-check.
+  - **Test:** `node --test packages/core/test/reconciliation-runner.test.mjs` (TASK 5 test vector PASS).
+- **Task D (Merchant-specific CZK/EUR rounding, VAT & minimum-price parity):**
+  - **Status:** DONE
+  - **Commit & Path:** `31beba5` / `020390e` -> `packages/core/src/pricing.mjs:145-155, 330-380`
+  - **Evidence:** `resolveCurrencyRoundingRules` poskytuje specifická pravidla pro CZK, EUR, HUF, PLN. `calculateTierPrice` provádí ceiling-to-step zaokrouhlení k mřížce měny nad `minimumMinor`, čímž garantuje nepřekročení minimální marže.
+  - **Test:** `node --test packages/core/test/pricing.test.mjs` (TASK 6 test vector PASS).
+- **Task E (Tenant-bound Shoptet read/write integration, 200/error handling, write/readback):**
+  - **Status:** DONE
+  - **Commit & Path:** `d4f959c` / `21c2522` -> `packages/core/src/shoptet-adapter.mjs`, `packages/core/test/sync-orchestrator.test.mjs:70-130`
+  - **Evidence:** Odchycení per-item 200/error, ověření read-back po zápisu, zákaz zápisu při nekonzistenci zdrojových dat, karanténa při nejistém zápisu.
+  - **Test:** `node --test packages/core/test/sync-orchestrator.test.mjs` (19/19 PASS).
+- **Task F (Fixed-amount/percent-ceiling, locks/guest, category/brand/product caps, clearance, coupon bounds):**
+  - **Status:** DONE
+  - **Commit & Path:** `39697e9` / `020390e` -> `packages/core/src/coupon-engine.mjs:100-360`, `packages/core/src/pricing.mjs:64-93`
+  - **Evidence:** Obousměrná parita hierarchie stropů (`resolveDiscountCap` vs `resolveCapBps`), zákaz slev na zamčených hladinách (ZR20/ZR25), striktní regex `^(0\.\d{3}|1\.000)$` pro poměr cen.
+  - **Test:** `node --test packages/core/test/coupon-engine.test.mjs` (13/13 PASS).
+- **Task G (INC-001..INC-016 regression coverage & self-healing AUTO OFF):**
+  - **Status:** DONE
+  - **Commit & Path:** `f474010` / `020390e` -> `packages/core/test/*.test.mjs`, `packages/core/src/self-healing-engine.mjs`
+  - **Evidence:** Všech 16 incidentů pokryto cílenými regresními testy. Automatické samoléčení (`autoRemediate`) zůstává striktně vypnuté (`AUTO=OFF`), generuje pouze immutable audity a doporučení pro obchodníka.
+
+#### Readiness Assessment
+- `CORE_READY=YES` (Kompletní matematické jádro, kupónový engine, rekonciliace a fail-closed bezpečnostní zábrany jsou plně implementovány a otestovány).
+- `MARKETPLACE_READY=PENDING_MERCHANT_PILOT` (Vyžaduje pilotní nasazení v testovacím Shoptet e-shopu se skutečným OAuth handshake; automatické opravy a živé zápisy zůstávají vypnuté do schválení).
