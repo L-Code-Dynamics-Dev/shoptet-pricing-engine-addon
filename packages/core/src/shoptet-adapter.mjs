@@ -62,7 +62,53 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
       if(code!==undefined)z.string().min(1).max(128).parse(code);
       const data=await read('/api/price-lists/'+id+'/prices',{page,itemsPerPage:limit,...(code!==undefined?{code}:{})});
       const rows=z.array(priceRowSchema).max(100).parse(data.prices);
-      return {items:rows,pagination:paginatorSchema.parse(data.paginator)};
+      const pagParsed=paginatorSchema.safeParse(data.paginator);
+      if(!pagParsed.success)throw new ShoptetError('incomplete_price_pagination_scan');
+      return {items:rows,pagination:pagParsed.data};
+    },
+    async *iteratePrices(id, { limit = 50, maxPages = 1000, checkFence = null } = {}) {
+      positiveId.parse(id);
+      let page = 1;
+      let pageCount = 1;
+      let expectedTotalCount = null;
+      let yieldedCount = 0;
+      while (page <= pageCount && page <= maxPages) {
+        if (checkFence) await checkFence();
+        const res = await adapter.prices(id, { page, limit });
+        const pag = res?.pagination;
+        if (
+          !pag ||
+          !Number.isSafeInteger(pag.page) ||
+          pag.page !== page ||
+          !Number.isSafeInteger(pag.pageCount) ||
+          pag.pageCount < 1 ||
+          !Number.isSafeInteger(pag.totalCount) ||
+          pag.totalCount < 0
+        ) {
+          throw new ShoptetError('incomplete_price_pagination_scan');
+        }
+        if (page === 1) {
+          pageCount = pag.pageCount;
+          expectedTotalCount = pag.totalCount;
+        } else if (pag.pageCount !== pageCount || pag.totalCount !== expectedTotalCount) {
+          throw new ShoptetError('incomplete_price_pagination_scan');
+        }
+        const items = Array.isArray(res?.items) ? res.items : null;
+        if (!items || (items.length === 0 && (pageCount > 1 || expectedTotalCount > 0))) {
+          throw new ShoptetError('incomplete_price_pagination_scan');
+        }
+        for (const item of items) {
+          yieldedCount++;
+          yield item;
+        }
+        page++;
+      }
+      if (page <= pageCount) {
+        throw new ShoptetError('max_pages_exceeded_incomplete_scan');
+      }
+      if (expectedTotalCount === null || yieldedCount !== expectedTotalCount) {
+        throw new ShoptetError('incomplete_price_pagination_scan');
+      }
     },
     async capabilities() {
       const data=await read('/api/system/endpoints',{status:'approved'});
@@ -130,6 +176,89 @@ export function createShoptetAdapter({ getToken, fetchImpl = fetch, sleep = ms =
         return { outcome: 'failed', error: 'readback_mismatch', expectedPricelistId: pricelistId, actualPricelistId: verified.priceList?.id ?? null, requiresReadback: true };
       }
       return { outcome: 'accepted', customerGuid: guid, previousPricelistId: current.priceList?.id ?? null, pricelistId, verified: true, requiresReadback: false };
+    },
+    async createPricelist({ name }) {
+      z.string().min(1).max(128).parse(name);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ action: 'createPricelist', name });
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/pricelists', {
+          method: 'POST',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { name } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { outcome: 'failed', error: response.status === 401 ? 'oauth_expired' : 'permission_missing', status: response.status };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response' }; }
+      if (!response.ok || !body?.data) {
+        return { outcome: 'failed', error: 'create_pricelist_failed', status: response.status, errors: body?.errors ?? [] };
+      }
+      return { outcome: 'accepted', pricelist: { id: body.data.id, name: body.data.name } };
+    },
+    async createCustomerGroup({ name, defaultPricelistId = null }) {
+      z.string().min(1).max(128).parse(name);
+      if (defaultPricelistId !== null && defaultPricelistId !== undefined) positiveId.parse(defaultPricelistId);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ action: 'createCustomerGroup', name, defaultPricelistId });
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/customers/groups', {
+          method: 'POST',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { name, ...(defaultPricelistId ? { defaultPricelistId } : {}) } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { outcome: 'failed', error: response.status === 401 ? 'oauth_expired' : 'permission_missing', status: response.status };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response' }; }
+      if (!response.ok || !body?.data) {
+        return { outcome: 'failed', error: 'create_customer_group_failed', status: response.status, errors: body?.errors ?? [] };
+      }
+      return { outcome: 'accepted', customerGroup: { id: body.data.id, name: body.data.name, defaultPricelistId: body.data.defaultPricelistId ?? defaultPricelistId ?? null } };
+    },
+    async updateCustomerGroup(id, { defaultPricelistId }) {
+      positiveId.parse(id);
+      positiveId.parse(defaultPricelistId);
+      if (!authorizeWrite) throw new ShoptetError('write_not_authorized', 403);
+      await authorizeWrite({ action: 'updateCustomerGroup', id, defaultPricelistId });
+      const token = await getToken();
+      let response;
+      try {
+        response = await fetchImpl('https://api.myshoptet.com/api/customers/groups/' + id, {
+          method: 'PATCH',
+          redirect: REDIRECT_MODE,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { 'Shoptet-Access-Token': token, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ data: { defaultPricelistId } })
+        });
+      } catch {
+        return { outcome: 'unknown', error: 'write_outcome_unknown' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { outcome: 'failed', error: response.status === 401 ? 'oauth_expired' : 'permission_missing', status: response.status };
+      }
+      let body;
+      try { body = await response.json(); } catch { return { outcome: 'unknown', error: 'invalid_write_response' }; }
+      if (!response.ok || !body?.data) {
+        return { outcome: 'failed', error: 'update_customer_group_failed', status: response.status, errors: body?.errors ?? [] };
+      }
+      return { outcome: 'accepted', id, defaultPricelistId };
     }
   };
   return adapter;
@@ -140,8 +269,8 @@ const uuidSchema=z.string().uuid();
 const decimal=z.string().regex(/^\d+\.\d{2}$/).max(24);
 const actionSchema=z.object({price:decimal,fromDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),toDate:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable()}).nullable();
 const purchaseCostSchema=z.object({price:decimal.nullable(),vatRate:decimal,includingVat:z.boolean()});
-export const priceRowSchema=z.object({code:z.string().min(1).max(128),currencyCode:z.string().regex(/^[A-Z]{3}$/),includingVat:z.boolean(),vatRate:decimal,price:z.object({price:decimal.nullable(),commonPrice:decimal.nullable().optional(),priceRatio:z.string().regex(/^\d+\.\d{3}$/),actionPrice:actionSchema}),sales:z.object({discountCoupon:z.boolean()}),prices:z.object({purchasePrice:purchaseCostSchema.nullable().optional()}).optional()});
-const pricePatchSchema=z.object({code:z.string().min(1).max(128),priceWithVat:z.object({price:decimal.refine(v=>BigInt(v.replace('.',''))>0n,'Zero price requires a verified shop capability'),commonPrice:decimal.optional()}).strict(),sales:z.object({discountCoupon:z.boolean()}).strict().optional()}).strict();
+export const priceRowSchema=z.object({code:z.string().min(1).max(128),currencyCode:z.string().regex(/^[A-Z]{3}$/),includingVat:z.boolean(),vatRate:decimal,price:z.object({price:decimal.nullable(),commonPrice:decimal.nullable().optional(),priceRatio:z.string().regex(/^\d+\.\d{3}$/),actionPrice:actionSchema}),sales:z.object({discountCoupon:z.boolean(),minPriceRatio:z.string().regex(/^\d+\.\d{3}$/).nullable().optional()}),prices:z.object({purchasePrice:purchaseCostSchema.nullable().optional()}).optional()});
+const pricePatchSchema=z.object({code:z.string().min(1).max(128),priceWithVat:z.object({price:decimal.refine(v=>BigInt(v.replace('.',''))>0n,'Zero price requires a verified shop capability'),commonPrice:decimal.optional()}).strict(),sales:z.object({discountCoupon:z.boolean(),minPriceRatio:z.string().regex(/^(0\.\d{3}|1\.000)$/).nullable().optional()}).strict().optional()}).strict();
 const brandSchema=z.object({guid:uuidSchema,name:z.string().max(500),indexName:z.string().max(500)});
 const productSchema=z.object({guid:uuidSchema,name:z.string().nullable(),visibility:z.string(),brand:z.object({code:z.string(),name:z.string()}).nullable(),categories:z.array(z.object({guid:uuidSchema.nullable()})).optional(),defaultCategory:z.object({guid:uuidSchema.nullable()}),variants:z.array(z.object({code:z.string(),visible:z.boolean()}))});
 const pricelistSchema=z.object({id:positiveId,name:z.string(),currency:z.string().nullable(),isDefault:z.boolean()});

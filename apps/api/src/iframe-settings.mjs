@@ -15,11 +15,36 @@ import {
   generateCustomerRecalculationPlan,
   executeCustomerRecalculationBatch
 } from '../../../packages/core/src/loyalty-batch-runner.mjs';
+import {
+  SUPPORTED_PERIODS,
+  RETENTION_POLICIES,
+  validateOnboardingConfig,
+  setupLoyaltyEntities,
+  inspectStoreOnboardingData
+} from '../../../packages/core/src/loyalty-onboarding.mjs';
+import {
+  validateProductPromotion,
+  validateBrandPromotion
+} from '../../../packages/core/src/promotions.mjs';
+import {
+  reconcilePrices,
+  reconcileCoupons
+} from '../../../packages/core/src/reconciliation-runner.mjs';
+import {
+  classifyRemediationEligibility
+} from '../../../packages/core/src/self-healing-engine.mjs';
+import {
+  grossApiPrice,
+  activeActionMinor,
+  parseApiPrice,
+  shopDate
+} from '../../../packages/core/src/pricing-policy.mjs';
 /**
  * L-Code Loyalty Pricing Engine — addon settings page embedded in Shoptet administration.
  * High-fidelity native Shoptet administration theme with Shoptet tabs, cards, and buttons.
  */
 import { authorizeSettingsPage, verifySession, bearerFrom } from './admin-session.mjs';
+import { UI_DEFAULTS, validateUiSection } from './admin-sections.mjs';
 
 const FRAME_ANCESTORS = "'self' https://*.myshoptet.com https://*.shoptet.cz https://*.shoptet.sk https://admin.shoptet.cz";
 const MCP_UI_SCOPES = ['shop:read', 'catalog:read', 'pricing:read','sync:read'];
@@ -53,7 +78,7 @@ export function validateTiers(input) {
     const t = input[i];
     const row = `Řádek ${i + 1}: `;
     if (!t || typeof t !== 'object' || Array.isArray(t)) return { error: row + 'neplatná data.' };
-    const extra = Object.keys(t).filter(k => !['name', 'percent', 'minTurnover', 'pricelistId'].includes(k));
+    const extra = Object.keys(t).filter(k => !['name', 'percent', 'minTurnover', 'pricelistId', 'customerGroupId'].includes(k));
     if (extra.length) return { error: row + 'neznámá pole.' };
     const name = typeof t.name === 'string' ? t.name.trim() : '';
     if (name.length < 1 || name.length > 60) return { error: row + 'název musí mít 1–60 znaků.' };
@@ -73,7 +98,18 @@ export function validateTiers(input) {
       pricelistId = Number(t.pricelistId);
       if (!Number.isSafeInteger(pricelistId) || pricelistId <= 0) return { error: row + 'ceník musí být kladné číslo.' };
     }
-    tiers.push({ name, percent, minTurnover, ...(pricelistId !== null ? { pricelistId } : {}) });
+    let customerGroupId = null;
+    if (t.customerGroupId !== undefined && t.customerGroupId !== null && t.customerGroupId !== '') {
+      customerGroupId = Number(t.customerGroupId);
+      if (!Number.isSafeInteger(customerGroupId) || customerGroupId <= 0) return { error: row + 'skupina zákazníků musí být kladné číslo.' };
+    }
+    tiers.push({
+      name,
+      percent,
+      minTurnover,
+      ...(pricelistId !== null ? { pricelistId } : {}),
+      ...(customerGroupId !== null ? { customerGroupId } : {})
+    });
   }
   return { tiers };
 }
@@ -107,17 +143,81 @@ export function validateRules(input) {
     if (!Number.isFinite(minP) || minP < 1 || minP > 100) return { error: 'Hranice slevy pro zákaz kupónů musí být 1–100 %.' };
     couponLockMinPercent = Math.round(minP * 100) / 100;
   }
+
+  let couponMode = 'fixed-amount';
+  if (input.couponMode !== undefined && input.couponMode !== null && input.couponMode !== '') {
+    if (!['fixed-amount', 'percent-ceiling'].includes(input.couponMode)) {
+      return { error: 'Neznámý režim kupónů. Povolené hodnoty jsou pevná částka nebo procentní strop.' };
+    }
+    couponMode = input.couponMode;
+  }
+
+  let couponCeilingPercent = null;
+  if (input.couponCeilingPercent !== undefined && input.couponCeilingPercent !== null && input.couponCeilingPercent !== '') {
+    const cp = Number(input.couponCeilingPercent);
+    if (!Number.isFinite(cp) || cp < 1 || cp > 100 || Math.abs(Math.round(cp * 100) - cp * 100) > 1e-9) {
+      return { error: 'Celkový strop slevy s kupónem musí být 1–100 %.' };
+    }
+    couponCeilingPercent = Math.round(cp * 100) / 100;
+  }
+  if (couponMode === 'percent-ceiling' && couponCeilingPercent === null) {
+    return { error: 'Při režimu procentního kupónu musíte zadat celkový strop slevy s kupónem (1–100 %).' };
+  }
+
+  let capPriority = 'hierarchy';
+  if (input.capPriority !== undefined && input.capPriority !== null && input.capPriority !== '') {
+    if (!['hierarchy', 'most_restrictive'].includes(input.capPriority)) {
+      return { error: 'Neznámá priorita stropů slev.' };
+    }
+    capPriority = input.capPriority;
+  }
+
+  let minMarginPercent = null;
+  if (input.minMarginPercent !== undefined && input.minMarginPercent !== null && input.minMarginPercent !== '') {
+    const mm = Number(input.minMarginPercent);
+    if (!Number.isFinite(mm) || mm < 0 || mm > 99.99 || Math.abs(Math.round(mm * 100) - mm * 100) > 1e-9) {
+      return { error: 'Minimální marže musí být 0–99,99 %.' };
+    }
+    minMarginPercent = Math.round(mm * 100) / 100;
+  }
+
+  const scheduledPromotions = [];
+  if (Array.isArray(input.scheduledPromotions)) {
+    if (input.scheduledPromotions.length > 500) return { error: 'Maximálně 500 položek plánovaného výprodeje.' };
+    for (const item of input.scheduledPromotions) {
+      const v = validateProductPromotion(item);
+      if (v.error) return { error: v.error };
+      scheduledPromotions.push(v.item);
+    }
+  }
+
+  const brandPromotions = [];
+  if (Array.isArray(input.brandPromotions)) {
+    if (input.brandPromotions.length > 100) return { error: 'Maximálně 100 plánovaných akcí na značky.' };
+    for (const item of input.brandPromotions) {
+      const v = validateBrandPromotion(item);
+      if (v.error) return { error: v.error };
+      brandPromotions.push(v.item);
+    }
+  }
+
   return {
     rules: {
       couponLockTopTiers: input.couponLockTopTiers !== false,
       couponLockMinPercent,
       couponLockMaxRemaining: input.couponLockMaxRemaining !== false,
+      couponMode,
+      couponCeilingPercent,
+      capPriority,
+      minMarginPercent,
       highestDiscountWins: input.highestDiscountWins !== false,
       vatIntegrity: true,
       postWriteVerify: input.postWriteVerify !== false,
       brandLimits,
       categoryLimits,
-      productLimits
+      productLimits,
+      scheduledPromotions,
+      brandPromotions
     }
   };
 }
@@ -143,6 +243,166 @@ function parseConfig(row) {
 async function sha256Hex(text) {
   const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function fetchVerifiedStoreCatalogForReconciliation({ adapter, profile, defaultPricelistId, tiers, minMarginPercent }) {
+  const vatPayer = typeof profile?.vatPayer === 'boolean'
+    ? profile.vatPayer
+    : (profile?.priceType === 'including_vat' ? true : (profile?.priceType === 'excluding_vat' ? false : null));
+  if (typeof vatPayer !== 'boolean') {
+    throw new Error('missing_verified_vat_payer_status');
+  }
+  const date = shopDate(profile?.timezone || 'Europe/Prague');
+  const minMarginBps = typeof minMarginPercent === 'number' && Number.isFinite(minMarginPercent) && minMarginPercent > 0
+    ? Math.round(minMarginPercent * 100)
+    : null;
+
+  let hasVerifiedPricePagination = true;
+  const basePriceByCode = new Map();
+  try {
+    for await (const row of adapter.iteratePrices(defaultPricelistId)) {
+      const basePriceMinor = grossApiPrice(row, vatPayer);
+      const actionPriceMinor = activeActionMinor(row, vatPayer, date);
+      let minimumMinor = null;
+      let missingMarginCost = false;
+      if (minMarginBps !== null) {
+        const purchase = row.prices?.purchasePrice;
+        if (purchase?.price && purchase.vatRate === row.vatRate) {
+          const vat = BigInt(parseApiPrice(row.vatRate));
+          const cost = BigInt(parseApiPrice(purchase.price));
+          if (cost > 0n) {
+            const grossCost = purchase.includingVat ? cost : (cost * (10000n + vat) + 9999n) / 10000n;
+            const denom = 10000n - BigInt(minMarginBps);
+            const floor = (grossCost * 10000n + denom - 1n) / denom;
+            if (floor <= BigInt(Number.MAX_SAFE_INTEGER)) minimumMinor = Number(floor);
+          }
+        }
+        if (minimumMinor === null) {
+          missingMarginCost = true;
+        }
+      }
+      basePriceByCode.set(row.code, { basePriceMinor, actionPriceMinor, minimumMinor, missingMarginCost });
+    }
+  } catch (err) {
+    if (err?.code === 'incomplete_price_pagination_scan' || err?.code === 'max_pages_exceeded_incomplete_scan') {
+      hasVerifiedPricePagination = false;
+    } else {
+      throw err;
+    }
+  }
+
+  const tierPricesByPricelist = new Map();
+  for (const tier of tiers) {
+    const byCode = new Map();
+    try {
+      for await (const row of adapter.iteratePrices(tier.pricelistId)) {
+        byCode.set(row.code, {
+          priceMinor: grossApiPrice(row, vatPayer),
+          sales: row.sales
+        });
+      }
+    } catch (err) {
+      if (err?.code === 'incomplete_price_pagination_scan' || err?.code === 'max_pages_exceeded_incomplete_scan') {
+        hasVerifiedPricePagination = false;
+      } else {
+        throw err;
+      }
+    }
+    tierPricesByPricelist.set(tier.pricelistId, byCode);
+  }
+
+  const catalogProducts = [];
+  const brandCache = new Map();
+  let page = 1;
+  let pageCount = 1;
+  let hasVerifiedPagination = true;
+  let expectedTotalCount = null;
+
+  while (page <= pageCount) {
+    const res = await adapter.list('products', { page, limit: 50 });
+    if (!res?.pagination || !Number.isSafeInteger(res.pagination.pageCount) || res.pagination.pageCount < 1) {
+      hasVerifiedPagination = false;
+      pageCount = 1;
+    } else {
+      pageCount = res.pagination.pageCount;
+      if (Number.isSafeInteger(res.pagination.totalCount) && res.pagination.totalCount >= 0) {
+        expectedTotalCount = res.pagination.totalCount;
+      }
+    }
+
+    const pageItems = Array.isArray(res?.items) ? res.items : null;
+    if (!pageItems || pageItems.length === 0) {
+      hasVerifiedPagination = false;
+    }
+
+    for (const item of (pageItems || [])) {
+      const detail = typeof adapter.product === 'function' ? await adapter.product(item.guid) : item;
+      let brandId = null;
+      if (detail.brand?.code && typeof adapter.brand === 'function') {
+        if (!brandCache.has(detail.brand.code)) {
+          const b = await adapter.brand(detail.brand.code);
+          brandCache.set(detail.brand.code, b.guid);
+        }
+        brandId = brandCache.get(detail.brand.code);
+      } else if (detail.brand?.guid) {
+        brandId = detail.brand.guid;
+      }
+      const categoryIds = Array.from(new Set([
+        detail.defaultCategory?.guid,
+        ...(Array.isArray(detail.categories) ? detail.categories.map(c => c.guid) : [])
+      ].filter(Boolean)));
+
+      const rawVariants = Array.isArray(detail.variants) ? detail.variants : (Array.isArray(item.variants) ? item.variants : []);
+      const variants = rawVariants.map(v => {
+        const baseEntry = basePriceByCode.get(v.code);
+        const perPricelistPrices = {};
+        for (const tier of tiers) {
+          const tEntry = tierPricesByPricelist.get(tier.pricelistId)?.get(v.code);
+          if (tEntry !== undefined) {
+            perPricelistPrices[tier.pricelistId] = tEntry;
+          }
+        }
+        return {
+          code: v.code,
+          visible: v.visible ?? v.active ?? true,
+          basePriceMinor: baseEntry?.basePriceMinor ?? null,
+          actionPriceMinor: baseEntry?.actionPriceMinor ?? null,
+          minimumMinor: baseEntry?.minimumMinor ?? null,
+          missingMarginCost: Boolean(baseEntry?.missingMarginCost),
+          perPricelistPrices
+        };
+      });
+
+      catalogProducts.push({
+        guid: detail.guid || item.guid,
+        visibility: detail.visibility ?? (item.active === false ? 'hidden' : 'normal'),
+        brand: detail.brand?.name || detail.brand?.code || null,
+        brandId,
+        categoryIds,
+        variants
+      });
+    }
+    page++;
+  }
+
+  if (catalogProducts.length === 0) {
+    hasVerifiedPagination = false;
+  }
+  if (expectedTotalCount !== null && catalogProducts.length !== expectedTotalCount) {
+    hasVerifiedPagination = false;
+  }
+
+  const fullCatalogVerified = hasVerifiedPagination && hasVerifiedPricePagination && page > pageCount;
+  const pagination = {
+    page: Math.max(1, page - 1),
+    pageCount,
+    isComplete: fullCatalogVerified
+  };
+  const minExpectedCombinations = Math.max(
+    1,
+    (expectedTotalCount !== null ? Math.max(expectedTotalCount, catalogProducts.length) : catalogProducts.length) * tiers.length
+  );
+  return { catalogProducts, pagination, fullCatalogVerified, minExpectedCombinations };
 }
 
 export async function handleAdminSettingsApi(request, env, ctx=null) {
@@ -222,6 +482,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
     const service=createConfigurationService(env.DB);
     try {
       if(route==='/configuration/pending' && request.method==='GET') return jsonRes({approvals:await service.pending(shopId)});
+      if(route==='/configuration/history' && request.method==='GET') return jsonRes(await service.history(shopId));
       if(route==='/configuration/preview' && request.method==='POST') {
         const body=await request.json();
         if(Object.keys(body).length!==1 || typeof body.revisionId!=='string') return jsonRes({error:'invalid_request'},400);
@@ -234,6 +495,255 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       }
     } catch {return jsonRes({error:'configuration_action_failed'},409);}
     return jsonRes({error:'not_found'},404);
+  }
+
+  if (route.startsWith('/reconciliation/')) {
+    const installed = await env.DB.prepare('SELECT i.state FROM installations i LEFT JOIN shoptet_oauth o ON o.shop_id=i.shop_id WHERE i.shop_id=?').bind(shopId).first();
+    if (installed?.state !== 'active') return jsonRes({ error: 'inactive_installation' }, 403);
+
+    if (route === '/reconciliation/status' && request.method === 'GET') {
+      const row = await env.DB.prepare('SELECT config_json FROM tenant_settings WHERE shop_id=?').bind(shopId).first();
+      const { config } = parseConfig(row);
+      return jsonRes({
+        status: config.lastReconciliation ? 'completed' : 'idle',
+        lastReconciliation: config.lastReconciliation || null,
+        remediationMode: 'OFF',
+        autoRemediationEnabled: false
+      });
+    }
+
+    if (route === '/reconciliation/run' && request.method === 'POST') {
+      let body = {};
+      try {
+        const rawText = await request.text();
+        if (rawText && rawText.trim() !== '') {
+          body = JSON.parse(rawText);
+        }
+      } catch {
+        return jsonRes({ error: 'invalid_json', message: 'Neplatný formát požadavku.' }, 400);
+      }
+
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length > 0) {
+        return jsonRes({
+          error: 'caller_supplied_reconciliation_data_forbidden',
+          message: 'Kontrola souladu smí číst pouze serverově ověřená data přímo ze Shoptet API.'
+        }, 400);
+      }
+
+      const row = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id=?').bind(shopId).first();
+      const { config, version } = parseConfig(row);
+      const rawTiers = Array.isArray(config.tiers) ? config.tiers : [];
+      const tiers = rawTiers.filter(t => Number.isSafeInteger(Number(t.pricelistId)) && Number(t.pricelistId) > 0).map(t => ({
+        name: t.name,
+        percent: Number(t.percent),
+        pricelistId: Number(t.pricelistId)
+      }));
+      if (!tiers.length) {
+        return jsonRes({ error: 'no_configured_tier_pricelists', message: 'Pro spuštění kontroly nejprve nastavte a namapujte věrnostní ceníky.' }, 422);
+      }
+
+      const rules = config.rules || {};
+      const couponMode = rules.couponMode || 'fixed-amount';
+      const couponCeilingPercent = rules.couponCeilingPercent !== undefined && rules.couponCeilingPercent !== null
+        ? Number(rules.couponCeilingPercent)
+        : null;
+      if (couponMode === 'percent-ceiling' && (!Number.isFinite(couponCeilingPercent) || couponCeilingPercent <= 0 || couponCeilingPercent > 100)) {
+        return jsonRes({
+          error: 'missing_coupon_ceiling_percent',
+          message: 'Pro procentní režim kupónů musí být v pravidlech slev nastaven platný maximální strop kupónu v procentech.'
+        }, 422);
+      }
+
+      const adapter = typeof env.createShoptetAdapter === 'function'
+        ? await env.createShoptetAdapter(shopId)
+        : createShoptetAdapter({
+            getToken: async () => (await getShoptetApiAccessToken({ db: env.DB, shopId, tokenKeys: env.SHOPTET_TOKEN_KEYS })).apiAccessToken
+          });
+
+      const policyRow = await getPricelistPolicy(env.DB, shopId);
+      let profile = null;
+      try {
+        profile = typeof adapter.profile === 'function' ? await adapter.profile() : null;
+      } catch (err) {
+        if (!policyRow?.defaultPricelistId) {
+          return jsonRes({ error: 'reconciliation_failed', message: err.message || 'Nepodařilo se ověřit profil obchodu a výchozí ceník ze Shoptetu.' }, 422);
+        }
+      }
+
+      const resolvedDefaultPricelistId = policyRow?.defaultPricelistId ?? profile?.defaultPricelistId;
+      const defaultPricelistId = Number(resolvedDefaultPricelistId);
+      if (!Number.isSafeInteger(defaultPricelistId) || defaultPricelistId <= 0) {
+        return jsonRes({
+          error: 'missing_default_pricelist_id',
+          message: 'Výchozí (hlavní) ceník obchodu není serverově ověřen. Zkontrolujte nastavení ceníků.'
+        }, 422);
+      }
+      if (tiers.some(t => t.pricelistId === defaultPricelistId)) {
+        return jsonRes({
+          error: 'default_pricelist_protected',
+          message: 'Výchozí (hlavní) ceník obchodu nesmí být použit jako věrnostní ceník.'
+        }, 422);
+      }
+
+      const managedPricelistIds = tiers.map(t => t.pricelistId);
+
+      const brandCaps = Object.entries(rules.brandLimits || {}).map(([id, percent]) => ({ id, percent: Number(percent) }));
+      const categoryCaps = Object.entries(rules.categoryLimits || {}).map(([id, percent]) => ({ id, percent: Number(percent) }));
+      const productCaps = Object.entries(rules.productLimits || {}).map(([id, percent]) => ({ id, percent: Number(percent) }));
+
+      const lockedTierNames = [];
+      if (rules.couponLockTopTiers !== false && tiers.length > 0) {
+        const sorted = tiers.slice().sort((a, b) => b.percent - a.percent);
+        const topCount = Math.max(1, Math.ceil(sorted.length * 0.25));
+        for (let i = 0; i < topCount; i++) {
+          if (sorted[i]?.name) lockedTierNames.push(sorted[i].name);
+        }
+      }
+      if (rules.couponLockMinPercent != null && Number(rules.couponLockMinPercent) > 0) {
+        for (const t of tiers) {
+          if (t.percent >= Number(rules.couponLockMinPercent) && !lockedTierNames.includes(t.name)) {
+            lockedTierNames.push(t.name);
+          }
+        }
+      }
+
+      const policy = {
+        version,
+        capPriority: rules.capPriority || 'hierarchy',
+        salePolicy: rules.highestDiscountWins !== false ? 'okfish_compatible' : 'lowest_price',
+        brandCaps,
+        categoryCaps,
+        productCaps,
+        scheduledPromotions: Array.isArray(rules.scheduledPromotions) ? rules.scheduledPromotions : [],
+        brandPromotions: Array.isArray(rules.brandPromotions) ? rules.brandPromotions : []
+      };
+
+      const couponConfig = {
+        mode: couponMode,
+        ceilingPercent: couponMode === 'percent-ceiling' ? couponCeilingPercent : null,
+        capPriority: rules.capPriority || 'hierarchy',
+        defaultPricelistId,
+        managedPricelistIds,
+        lockedTierNames,
+        brandCaps,
+        categoryCaps,
+        productCaps,
+        scheduledPromotions: Array.isArray(rules.scheduledPromotions) ? rules.scheduledPromotions : [],
+        brandPromotions: Array.isArray(rules.brandPromotions) ? rules.brandPromotions : []
+      };
+
+      try {
+        const verified = await fetchVerifiedStoreCatalogForReconciliation({
+          adapter,
+          profile,
+          defaultPricelistId,
+          tiers,
+          minMarginPercent: rules.minMarginPercent
+        });
+
+        const reconciliationAdapter = {
+          ...adapter,
+          isFullCatalogVerified: () => verified.fullCatalogVerified
+        };
+
+        const [priceReport, couponReport] = await Promise.all([
+          reconcilePrices({
+            adapter: reconciliationAdapter,
+            shopId,
+            policy,
+            tiers,
+            catalogProducts: verified.catalogProducts,
+            pagination: verified.pagination,
+            fullCatalogVerified: verified.fullCatalogVerified,
+            minExpectedCombinations: verified.minExpectedCombinations
+          }),
+          reconcileCoupons({
+            adapter: reconciliationAdapter,
+            shopId,
+            couponConfig,
+            tiers,
+            catalogProducts: verified.catalogProducts,
+            pagination: verified.pagination,
+            fullCatalogVerified: verified.fullCatalogVerified,
+            minExpectedCombinations: verified.minExpectedCombinations
+          })
+        ]);
+
+        const classifiedDrifts = [
+          ...priceReport.drifts.map(d => ({
+            ...d,
+            domain: 'price',
+            remediation: classifyRemediationEligibility({
+              item: {
+                shopId,
+                variantCode: d.code,
+                pricelistId: d.targetPricelistId,
+                driftType: 'price_drift',
+                field: 'price',
+                expected: d.expected,
+                actual: d.actual
+              },
+              selfCheckPassed: priceReport.selfCheckPassed,
+              autoEnabled: false,
+              verifiedTenantShopId: shopId,
+              managedPricelistIds,
+              isProtectedPricelist: d.targetPricelistId === defaultPricelistId,
+              hasManualSaleConflict: d.reason === 'manual_action_below_margin_floor'
+            })
+          })),
+          ...couponReport.drifts.map(d => ({
+            ...d,
+            domain: 'coupon',
+            remediation: classifyRemediationEligibility({
+              item: {
+                shopId,
+                variantCode: d.code,
+                pricelistId: d.targetPricelistId,
+                driftType: d.reason === 'locked_tier_coupon_enabled' ? 'locked_tier_violation' : 'coupon_drift',
+                field: 'discountCoupon',
+                expected: d.expected,
+                actual: d.actual
+              },
+              selfCheckPassed: couponReport.selfCheckPassed,
+              autoEnabled: false,
+              verifiedTenantShopId: shopId,
+              managedPricelistIds,
+              isProtectedPricelist: d.targetPricelistId === defaultPricelistId
+            })
+          }))
+        ];
+
+        const lastReconciliation = {
+          checkedAt: new Date().toISOString(),
+          policyVersion: version,
+          remediationMode: 'OFF',
+          autoRemediationEnabled: false,
+          priceReport,
+          couponReport,
+          classifiedDrifts
+        };
+
+        const nextConfig = { ...config, lastReconciliation };
+        if (row) {
+          await env.DB.prepare('UPDATE tenant_settings SET config_json = ? WHERE shop_id = ?')
+            .bind(JSON.stringify(nextConfig), shopId).run();
+        } else {
+          await env.DB.prepare('INSERT INTO tenant_settings (shop_id, config_json, version) VALUES (?, ?, 1) ON CONFLICT(shop_id) DO UPDATE SET config_json = excluded.config_json')
+            .bind(shopId, JSON.stringify(nextConfig)).run();
+        }
+
+        return jsonRes({
+          status: 'completed',
+          lastReconciliation,
+          remediationMode: 'OFF',
+          autoRemediationEnabled: false
+        });
+      } catch (err) {
+        return jsonRes({ error: 'reconciliation_failed', message: err.message || 'Kontrolu souladu cen a kupónů se nepodařilo dokončit.' }, 422);
+      }
+    }
+
+    return jsonRes({ error: 'not_found' }, 404);
   }
 
   if (route.startsWith('/loyalty/')) {
@@ -337,6 +847,92 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
     return jsonRes({ error: 'not_found' }, 404);
   }
 
+  if (route.startsWith('/onboarding/')) {
+    const installed = await env.DB.prepare('SELECT state FROM installations WHERE shop_id=?').bind(shopId).first();
+    if (installed?.state !== 'active') return jsonRes({ error: 'inactive_installation' }, 403);
+
+    const adapter = createShoptetAdapter({
+      getToken: async () => (await getShoptetApiAccessToken({ db: env.DB, shopId, tokenKeys: env.SHOPTET_TOKEN_KEYS })).apiAccessToken,
+      authorizeWrite: async (action) => true
+    });
+
+    if (route === '/onboarding/periods' && request.method === 'GET') {
+      return jsonRes({ periods: Object.values(SUPPORTED_PERIODS) });
+    }
+
+    if (route === '/onboarding/retention-policies' && request.method === 'GET') {
+      return jsonRes({ policies: Object.values(RETENTION_POLICIES) });
+    }
+
+    if (route === '/onboarding/overview' && request.method === 'GET') {
+      try {
+        const storeData = await inspectStoreOnboardingData({ adapter });
+        return jsonRes(storeData);
+      } catch (e) {
+        return jsonRes({ error: 'store_inspection_failed', message: 'Nepodařilo se načíst data z vašeho e-shopu. Zkontrolujte oprávnění v Shoptet Partner portálu.' }, 502);
+      }
+    }
+
+    if (route === '/onboarding/validate' && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch { return jsonRes({ error: 'invalid_json' }, 400); }
+      const validation = validateOnboardingConfig(body);
+      if (!validation.valid) {
+        return jsonRes({ error: 'validation_failed', message: validation.error }, 400);
+      }
+      return jsonRes({ valid: true, config: validation.config });
+    }
+
+    if (route === '/onboarding/setup-entities' && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch { return jsonRes({ error: 'invalid_json' }, 400); }
+      const validation = validateOnboardingConfig(body);
+      if (!validation.valid) {
+        return jsonRes({ error: 'validation_failed', message: validation.error }, 400);
+      }
+
+      try {
+        const [existingPricelistsRes, existingGroups] = await Promise.all([
+          adapter.list('pricelists'),
+          adapter.customerGroups()
+        ]);
+
+        const result = await setupLoyaltyEntities({
+          adapter,
+          shopId,
+          tiers: validation.config.tiers,
+          autoCreate: body.autoCreate === true,
+          existingPricelists: existingPricelistsRes.items || [],
+          existingGroups: existingGroups || []
+        });
+
+        if (result.status === 'READY') {
+          const row = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
+          const { config } = parseConfig(row);
+          config.onboarding = {
+            completedAt: new Date().toISOString(),
+            period: validation.config.period,
+            retentionPolicy: validation.config.retentionPolicy,
+            inactivityDays: validation.config.inactivityDays ?? null,
+            warningDays: validation.config.warningDays ?? null
+          };
+          config.tiers = result.entities;
+          await env.DB.prepare(`
+            INSERT INTO tenant_settings (shop_id, config_json, version)
+            VALUES (?, ?, 1)
+            ON CONFLICT(shop_id) DO UPDATE SET config_json = excluded.config_json, version = version + 1
+          `).bind(shopId, JSON.stringify(config)).run();
+        }
+
+        return jsonRes(result);
+      } catch (err) {
+        return jsonRes({ error: 'entity_setup_failed', message: 'Při přípravě ceníků a skupin došlo k chybě. Zkontrolujte oprávnění aplikace.' }, 500);
+      }
+    }
+
+    return jsonRes({ error: 'not_found' }, 404);
+  }
+
   if (route === '/state' && request.method === 'GET') {
     const inst = await env.DB.prepare(`
       SELECT i.state, i.created_at, i.updated_at, o.eshop_url, o.contact_email
@@ -355,12 +951,18 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       couponLockTopTiers: true,
       couponLockMinPercent: null,
       couponLockMaxRemaining: true,
+      couponMode: 'fixed-amount',
+      couponCeilingPercent: null,
+      capPriority: 'hierarchy',
+      minMarginPercent: null,
       highestDiscountWins: true,
       vatIntegrity: true,
       postWriteVerify: true,
       brandLimits: {},
       categoryLimits: {},
-      productLimits: {}
+      productLimits: {},
+      scheduledPromotions: [],
+      brandPromotions: []
     };
     const rules = { ...defaultRules, ...(config.rules || {}) };
 
@@ -372,8 +974,12 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
       installation: inst || null,
       tiers,
       rules,
+      ui: Object.fromEntries(Object.entries(UI_DEFAULTS).map(([k, v]) => [k, config.ui?.[k] ?? v])),
       version,
       currency:config.loyaltyProposal?.currency??null,
+      onboarding: config.onboarding || null,
+      periods: Object.values(SUPPORTED_PERIODS),
+      retentionPolicies: Object.values(RETENTION_POLICIES),
       mcpTokens: (tokens.results || []).map(t => ({
         fingerprint: t.fp,
         createdAt: t.created_at,
@@ -412,7 +1018,7 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
     const current = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
     const { config, version } = parseConfig(current);
     if (version !== body.version) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.', version }, 409);
-    const next = { ...config, tiers: v.tiers };
+    const next = { ...config, tiers: v.tiers, ...(body.onboarding ? { onboarding: body.onboarding } : {}) };
 
     let result;
     if (current) {
@@ -456,6 +1062,31 @@ export async function handleAdminSettingsApi(request, env, ctx=null) {
     }
     if (!result?.meta?.changes) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.' }, 409);
     return jsonRes({ status: 'saved', rules: v.rules, version: version + 1 });
+  }
+
+  if (route === '/section' && request.method === 'PUT') {
+    let body;
+    try { body = await request.json(); } catch { return jsonRes({ error: 'Neplatný JSON.' }, 400); }
+    if (!body || !Number.isSafeInteger(body.version) || body.version < 0) return jsonRes({ error: 'Chybí verze nastavení.' }, 400);
+    const checked = validateUiSection(body.section, body.value);
+    if (checked.error) return jsonRes({ error: checked.error }, 422);
+
+    const current = await env.DB.prepare('SELECT config_json, version FROM tenant_settings WHERE shop_id = ?').bind(shopId).first();
+    const { config, version } = parseConfig(current);
+    if (version !== body.version) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.', version }, 409);
+
+    const next = { ...config, ui: { ...(config.ui || {}), [body.section]: checked.value } };
+
+    let result;
+    if (current) {
+      result = await env.DB.prepare('UPDATE tenant_settings SET config_json = ?, version = version + 1 WHERE shop_id = ? AND version = ?')
+        .bind(JSON.stringify(next), shopId, version).run();
+    } else {
+      result = await env.DB.prepare('INSERT INTO tenant_settings (shop_id, config_json, version) VALUES (?, ?, 1) ON CONFLICT(shop_id) DO NOTHING')
+        .bind(shopId, JSON.stringify(next)).run();
+    }
+    if (!result?.meta?.changes) return jsonRes({ error: 'Nastavení mezitím změnil někdo jiný. Obnovte stránku.' }, 409);
+    return jsonRes({ status: 'saved', section: body.section, value: checked.value, version: version + 1 });
   }
 
   if (route === '/mcp-token' && request.method === 'DELETE') {
@@ -947,31 +1578,99 @@ export function renderAdminHtml(eshopId, auth) {
     <div class="shoptet-tabs" role="tablist">
       <button type="button" class="shoptet-tab active" data-tab="tiers" role="tab">Nastavení</button>
       <button type="button" class="shoptet-tab" data-tab="rules" role="tab">Pravidla slev</button>
+      <button type="button" class="shoptet-tab" data-tab="settings" role="tab">Obecné</button>
+      <button type="button" class="shoptet-tab" data-tab="pricelists" role="tab">Ceníky</button>
+      <button type="button" class="shoptet-tab" data-tab="categories" role="tab">Kategorie</button>
+      <button type="button" class="shoptet-tab" data-tab="products" role="tab">Produkty</button>
+      <button type="button" class="shoptet-tab" data-tab="brandSales" role="tab">Akce značek</button>
+      <button type="button" class="shoptet-tab" data-tab="coupons" role="tab">Kupóny</button>
+      <button type="button" class="shoptet-tab" data-tab="sync" role="tab">Synchronizace</button>
       <button type="button" class="shoptet-tab" data-tab="mcp" role="tab">AI asistent</button>
       <button type="button" class="shoptet-tab" data-tab="overview" role="tab">Přehled</button>
     </div>
 
     <div id="loading" style="padding: 24px 0; color: #777777;">Načítám nastavení…</div>
 
-    <!-- Tab 1: Nastavení (Věrnostní ceníky) -->
+    <!-- Tab 1: Nastavení (Věrnostní úrovně a průvodce) -->
     <section class="panel active" id="panel-tiers">
       <p class="tab-intro">Vypište pečlivě níže uvedené údaje. Nastavení určuje procentuální věrnostní slevy a nákupní obrat pro automatické zařazení vašich zákazníků do ceníků.</p>
 
       <div class="shoptet-notice">
         <span class="notice-icon">💡</span>
-        <span>Pokud má produkt v e-shopu akční cenu výhodnější než zákazníkova věrnostní sleva, zákazník nakupuje za výhodnější akční cenu. Všechny ceny se do e-shopu ukládají včetně platné sazby DPH.</span>
+        <span>Pokud má produkt v e-shopu akční cenu výhodnější než zákazníkova věrnostní sleva, zákazník nakupuje za výhodnější akční cenu. Všechny ceny se do e-shopu ukládají včetně platné sazby DPH. První načtení nemění žádné ceny v e-shopu.</span>
       </div>
 
-      <div class="section-heading">Věrnostní ceníky a obraty</div>
+      <!-- Stav obchodu -->
+      <div id="onboarding-store-card" class="shoptet-notice" style="background:#fafafa;border:1px solid #dcdcdc;border-left:4px solid #4a90e2;margin-bottom:16px;">
+        <span class="notice-icon">📊</span>
+        <div>
+          <strong style="color:#333;font-size:13px;">Aktuální stav vašeho e-shopu</strong>
+          <div id="onboarding-store-summary" style="margin-top:4px;font-size:12px;color:#555;">
+            Načítám data z e-shopu…
+          </div>
+        </div>
+      </div>
+
+      <!-- Pravidla obratu a udržení úrovně -->
+      <div class="section-heading">Výpočet obratu a udržení úrovně</div>
+
+      <div class="form-row">
+        <label class="form-label">Období pro výpočet obratu</label>
+        <div class="form-field">
+          <select id="onboarding-period" class="input-text" style="max-width:340px;">
+            <option value="7_days">Posledních 7 dní</option>
+            <option value="1_month">Poslední měsíc (30 dní)</option>
+            <option value="3_months" selected>Poslední 3 měsíce (90 dní)</option>
+            <option value="6_months">Posledních 6 měsíců (180 dní)</option>
+            <option value="12_months">Posledních 12 měsíců (365 dní)</option>
+            <option value="all_time">Za celou dobu (kompletní historie)</option>
+          </select>
+          <span class="info-icon" title="Klouzavé období nákupů zákazníka. Vratky a stornované objednávky se automaticky odečítají.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">Udržení věrnostní úrovně</label>
+        <div class="form-field">
+          <select id="onboarding-retention" class="input-text" style="max-width:340px;">
+            <option value="permanent" selected>Úroveň zůstává natrvalo</option>
+            <option value="rolling_turnover">Průběžně přepočítávat podle obratu ve zvoleném období</option>
+            <option value="inactivity_drop_one">Po zvolené době bez nákupu pokles o jednu úroveň</option>
+            <option value="inactivity_drop_base">Po zvolené době bez nákupu návrat na základní úroveň</option>
+          </select>
+          <span class="info-icon" title="Určuje, jak se úroveň chová při poklesu nákupní aktivity.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row" id="row-inactivity-days" style="display:none;">
+        <label class="form-label">Doba neaktivity</label>
+        <div class="form-field">
+          <span>Při neaktivitě</span>
+          <input type="number" id="onboarding-inactivity-days" class="input-text w-small" min="1" max="999" value="90" style="margin:0 6px;">
+          <span>dní bez nákupu dojde ke snížení úrovně.</span>
+        </div>
+      </div>
+
+      <div class="form-row" id="row-warning-days" style="display:none;">
+        <label class="form-label">Upozornění před poklesem</label>
+        <div class="form-field">
+          <span>Upozornit</span>
+          <input type="number" id="onboarding-warning-days" class="input-text w-small" min="1" max="90" value="14" style="margin:0 6px;">
+          <span>dní předem, že zákazníkovi hrozí pokles úrovně.</span>
+        </div>
+      </div>
+
+      <div class="section-heading">Věrnostní ceníky, slevy a zákaznické skupiny</div>
 
       <div class="shoptet-table-responsive">
         <table class="shoptet-table">
           <thead>
             <tr>
-              <th style="width: 36%;">Název věrnostního ceníku</th>
-              <th style="width: 18%;">Věrnostní sleva</th>
-              <th style="width: 20%;">Požadovaný obrat</th>
-              <th style="width: 22%;">Ceník v Shoptetu</th>
+              <th style="width: 26%;">Název věrnostní úrovně</th>
+              <th style="width: 14%;">Věrnostní sleva</th>
+              <th style="width: 18%;">Požadovaný obrat</th>
+              <th style="width: 19%;">Ceník v Shoptetu</th>
+              <th style="width: 19%;">Zákaznická skupina</th>
               <th style="width: 4%;"></th>
             </tr>
           </thead>
@@ -979,10 +1678,20 @@ export function renderAdminHtml(eshopId, auth) {
         </table>
       </div>
 
-      <div style="display: flex; gap: 8px; align-items: center; margin-top: 16px;">
-        <button type="button" class="btn-secondary" id="tiers-add">+ Přidat další ceník</button>
+      <div style="display: flex; gap: 8px; align-items: center; margin-top: 16px; flex-wrap: wrap;">
+        <button type="button" class="btn-secondary" id="tiers-add">+ Přidat další úroveň</button>
+        <button type="button" class="btn-secondary" id="btn-setup-entities" style="border-color:#4a90e2;color:#2060a0;">⚡ Připravit ceníky a skupiny v Shoptetu</button>
         <button type="button" class="btn-shoptet-green" id="tiers-save-bottom">Uložit</button>
         <span style="color: #888888; font-size: 12px; margin-left: 8px;" id="tiers-version"></span>
+      </div>
+
+      <!-- Manuální návod (pokud chybí API práva na vytváření) -->
+      <div id="onboarding-manual-guide-box" style="display:none;margin-top:20px;padding:16px;background:#fff8e7;border:1px solid #ffd175;border-radius:4px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <strong style="color:#8a6d3b;">💡 Postup pro ruční vytvoření ceníků a skupin v Shoptetu</strong>
+          <button type="button" class="btn-secondary" id="btn-close-manual-guide" style="padding:2px 8px;">Zavřít</button>
+        </div>
+        <div id="onboarding-manual-guide-text" style="margin-top:10px;font-size:13px;line-height:1.5;white-space:pre-wrap;color:#555;"></div>
       </div>
     </section>
 
@@ -1018,6 +1727,46 @@ export function renderAdminHtml(eshopId, auth) {
           <input type="checkbox" id="rule-coupon-min-price-ratio" checked style="width: 16px; height: 16px; cursor: pointer;">
           <label for="rule-coupon-min-price-ratio" style="cursor: pointer;">U ostatních slev omezit výši kupónu tak, aby výsledná částka neklesla pod nákupní marži zboží.</label>
           <span class="info-icon" title="Hlídá minimální prodejní cenu při zadání kupónu.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label" for="rule-coupon-mode">Režim slevových kupónů</label>
+        <div class="form-field">
+          <select id="rule-coupon-mode" class="input-select" style="width: 320px;">
+            <option value="fixed-amount">Pevná částka kupónu (dárkové a ambasadorské šeky)</option>
+            <option value="percent-ceiling">Procentní kupón s celkovým stropem slevy</option>
+          </select>
+          <span class="info-icon" title="Určuje, jak se slevové kupóny kombinují se stropy slev a akčními cenami.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label" for="rule-coupon-ceiling-percent">Celkový strop pro procentní kupóny</label>
+        <div class="form-field">
+          <input type="number" id="rule-coupon-ceiling-percent" class="input-text w-small" min="1" max="100" step="0.01" placeholder="např. 20">
+          <span class="unit">%</span>
+          <span class="info-icon" title="Povinné při volbě procentního režimu kupónů: maximální celková kombinovaná sleva (věrnost + kupón).">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label" for="rule-cap-priority">Priorita stropů slev</label>
+        <div class="form-field">
+          <select id="rule-cap-priority" class="input-select" style="width: 320px;">
+            <option value="hierarchy">Podle hierarchie (Produkt → Značka → Kategorie)</option>
+            <option value="most_restrictive">Nejpřísnější platný strop</option>
+          </select>
+          <span class="info-icon" title="Stejné pořadí stropů slev se použije pro věrnostní ceny i slevové kupóny.">i</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label" for="rule-min-margin">Ochrana minimální marže</label>
+        <div class="form-field">
+          <input type="number" id="rule-min-margin" class="input-text w-small" min="0" max="99.99" step="0.01" placeholder="např. 20">
+          <span>% z prodejní ceny (dle nákupní ceny v Shoptetu)</span>
+          <span class="info-icon" title="Věrnostní sleva ani kupón nesníží prodejní cenu pod požadovanou obchodní marži.">i</span>
         </div>
       </div>
 
@@ -1102,11 +1851,30 @@ export function renderAdminHtml(eshopId, auth) {
       <div id="product-limits-container" style="display: flex; flex-direction: column; gap: 8px; max-width: 440px; margin-bottom: 14px;"></div>
       <button type="button" class="btn-secondary" id="btn-add-product-limit">+ Přidat produkt</button>
 
+      <div class="section-heading">Plánované akce a výprodeje produktů (časová okna od–do)</div>
+      <p style="color: #666666; font-size: 13px; margin-bottom: 14px;">Zde můžete nastavit dočasné akční slevy a výprodeje pro konkrétní produkty s přesnou dobou platnosti:</p>
+      <div id="scheduled-promotions-container" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px;"></div>
+      <button type="button" class="btn-secondary" id="btn-add-scheduled-promo">+ Přidat výprodej produktu</button>
+
+      <div class="section-heading">Plošné akce na značky (časová okna od–do)</div>
+      <p style="color: #666666; font-size: 13px; margin-bottom: 14px;">Plošná akční sleva na celý sortiment vybrané značky s možností omezení od–do:</p>
+      <div id="brand-promotions-container" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px;"></div>
+      <button type="button" class="btn-secondary" id="btn-add-brand-promo">+ Přidat akci na značku</button>
+
       <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #eeeeee; display: flex; align-items: center; gap: 8px;">
         <button type="button" class="btn-shoptet-green" id="rules-save-bottom">Uložit pravidla</button>
         <span style="color: #888888; font-size: 12px; margin-left: 8px;" id="rules-version"></span>
       </div>
     </section>
+
+    <!-- Konfigurační sekce doplňku -->
+    <section class="panel" id="panel-settings"><p class="tab-intro">Obecné nastavení doplňku.</p><div id="section-settings"></div></section>
+    <section class="panel" id="panel-pricelists"><p class="tab-intro">Přiřazení ceníků k věrnostním úrovním. ID zadejte podle Shoptetu.</p><div id="section-pricelists"></div></section>
+    <section class="panel" id="panel-categories"><p class="tab-intro">Maximální sleva pro jednotlivé kategorie.</p><div id="section-categories"></div></section>
+    <section class="panel" id="panel-products"><p class="tab-intro">Výjimky a maximální slevy jednotlivých produktů.</p><div id="section-products"></div></section>
+    <section class="panel" id="panel-brandSales"><p class="tab-intro">Samostatné akční limity značek.</p><div id="section-brandSales"></div></section>
+    <section class="panel" id="panel-coupons"><p class="tab-intro">Omezení kupónů a věrnostních úrovní.</p><div id="section-coupons"></div></section>
+    <section class="panel" id="panel-sync"><p class="tab-intro">Konfigurace synchronizace. Tato stránka synchronizaci nespouští.</p><div id="section-sync"></div></section>
 
     <!-- Tab 3: Přístup k MCP -->
     <section class="panel" id="panel-mcp">
@@ -1243,8 +2011,10 @@ export function renderAdminHtml(eshopId, auth) {
       </div>
 
       <div id="loyalty-onboarding-container"></div>
+      <div id="reconciliation-container"></div>
       <div id="approvals-container"></div>
       <div id="sync-approvals-container"></div>
+      <div id="history-container"></div>
     </section>
   </div>
 
@@ -1309,12 +2079,13 @@ export function renderAdminHtml(eshopId, auth) {
     }
 
     /* Tiers table */
-    function tierRow(t = { name: '', percent: '', minTurnover: '', pricelistId: null }) {
+    function tierRow(t = { name: '', percent: '', minTurnover: '', pricelistId: null, customerGroupId: null }) {
       const tr = document.createElement('tr');
       tr.innerHTML = '<td><input type="text" class="input-text w-full tier-name" placeholder="Název úrovně"></td>' +
         '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-small tier-percent" min="0.01" max="100" step="0.01"><span class="unit">%</span></div></td>' +
         '<td><div style="display:flex;align-items:center;"><input type="number" class="input-text w-med tier-turnover" min="0" step="1"><span class="unit tier-currency"></span></div></td>' +
-        '<td><select class="input-select tier-pricelist" style="width: 100%;"><option value="">— Bez přiřazení —</option></select></td>' +
+        '<td><select class="input-select tier-pricelist" style="width: 100%;"><option value="">— Bez ceníku —</option></select></td>' +
+        '<td><select class="input-select tier-group" style="width: 100%;"><option value="">— Bez skupiny —</option></select></td>' +
         '<td><button type="button" class="btn-remove tier-remove" title="Smazat úroveň">×</button></td>';
       tr.querySelector('.tier-name').value = t.name || '';
       tr.querySelector('.tier-percent').value = t.percent ?? '';
@@ -1328,8 +2099,27 @@ export function renderAdminHtml(eshopId, auth) {
         if (t.pricelistId && String(p.id) === String(t.pricelistId)) opt.selected = true;
         plSelect.append(opt);
       });
+      const grpSelect = tr.querySelector('.tier-group');
+      (state.customerGroups || []).forEach(g => {
+        const opt = document.createElement('option');
+        opt.value = g.id;
+        opt.textContent = g.name;
+        if (t.customerGroupId && String(g.id) === String(t.customerGroupId)) opt.selected = true;
+        grpSelect.append(opt);
+      });
       tr.querySelector('.tier-remove').addEventListener('click', () => { tr.remove(); resize(); });
       return tr;
+    }
+
+    function updateRetentionFormVisibility() {
+      const pol = $('onboarding-retention')?.value;
+      const showInactivity = pol === 'inactivity_drop_one' || pol === 'inactivity_drop_base';
+      if ($('row-inactivity-days')) $('row-inactivity-days').style.display = showInactivity ? 'flex' : 'none';
+      if ($('row-warning-days')) $('row-warning-days').style.display = showInactivity ? 'flex' : 'none';
+      resize();
+    }
+    if ($('onboarding-retention')) {
+      $('onboarding-retention').addEventListener('change', updateRetentionFormVisibility);
     }
 
     function renderTiers() {
@@ -1337,37 +2127,105 @@ export function renderAdminHtml(eshopId, auth) {
       b.textContent = '';
       state.tiers.forEach(t => b.append(tierRow(t)));
       $('tiers-version').textContent = state.version ? 'Uloženo (verze: ' + state.version + ')' : '';
+
+      if (state.onboarding) {
+        if ($('onboarding-period') && state.onboarding.period) $('onboarding-period').value = state.onboarding.period;
+        if ($('onboarding-retention') && state.onboarding.retentionPolicy) $('onboarding-retention').value = state.onboarding.retentionPolicy;
+        if ($('onboarding-inactivity-days') && state.onboarding.inactivityDays) $('onboarding-inactivity-days').value = state.onboarding.inactivityDays;
+        if ($('onboarding-warning-days') && state.onboarding.warningDays) $('onboarding-warning-days').value = state.onboarding.warningDays;
+      }
+      updateRetentionFormVisibility();
     }
 
-    $('tiers-add').addEventListener('click', () => {
-      const b = $('tiers-body');
-      if (b.children.length >= 10) return flash('Můžete nastavit maximálně 10 věrnostních ceníků.', true);
-      const r = tierRow();
-      b.append(r);
-      r.querySelector('input').focus();
-      resize();
-    });
-
-    async function saveTiers() {
+    function getTiersFormData() {
       const rows = [...$('tiers-body').querySelectorAll('tr')];
-      const tiers = rows.map(r => {
+      return rows.map(r => {
         const pl = r.querySelector('.tier-pricelist').value;
+        const grp = r.querySelector('.tier-group').value;
         return {
           name: r.querySelector('.tier-name').value,
           percent: r.querySelector('.tier-percent').value === '' ? NaN : Number(r.querySelector('.tier-percent').value),
           minTurnover: r.querySelector('.tier-turnover').value === '' ? NaN : Number(r.querySelector('.tier-turnover').value),
-          ...(pl ? { pricelistId: Number(pl) } : {})
+          ...(pl ? { pricelistId: Number(pl) } : {}),
+          ...(grp ? { customerGroupId: Number(grp) } : {})
         };
       });
+    }
+
+    async function saveTiers() {
+      const tiers = getTiersFormData();
+      const period = $('onboarding-period')?.value || '3_months';
+      const retentionPolicy = $('onboarding-retention')?.value || 'permanent';
+      const inactivityDays = Number($('onboarding-inactivity-days')?.value || 90);
+      const warningDays = Number($('onboarding-warning-days')?.value || 14);
+      const onboarding = { period, retentionPolicy, inactivityDays, warningDays };
+
       const btn = $('btn-top-save');
       btn.disabled = true;
       try {
-        const res = await api('/tiers', { method: 'PUT', body: JSON.stringify({ tiers, version: state.version }) });
+        const res = await api('/tiers', { method: 'PUT', body: JSON.stringify({ tiers, onboarding, version: state.version }) });
         state.tiers = res.tiers; state.version = res.version;
+        state.onboarding = onboarding;
         renderTiers(); renderOverview();
-        flash('Věrnostní ceníky byly úspěšně uloženy.');
+        flash('Věrnostní úrovně byly úspěšně uloženy.');
       } catch (e) { flash(e.message, true); }
       finally { btn.disabled = false; resize(); }
+    }
+
+    if ($('btn-setup-entities')) {
+      $('btn-setup-entities').addEventListener('click', async () => {
+        const tiers = getTiersFormData();
+        if (!tiers.length) return flash('Nejdříve přidejte alespoň jednu věrnostní úroveň.', true);
+        const period = $('onboarding-period')?.value || '3_months';
+        const retentionPolicy = $('onboarding-retention')?.value || 'permanent';
+        const inactivityDays = Number($('onboarding-inactivity-days')?.value || 90);
+        const warningDays = Number($('onboarding-warning-days')?.value || 14);
+
+        const btn = $('btn-setup-entities');
+        btn.disabled = true;
+        btn.textContent = 'Připravuji ceníky a skupiny…';
+        try {
+          const res = await api('/onboarding/setup-entities', {
+            method: 'POST',
+            body: JSON.stringify({ period, retentionPolicy, inactivityDays, warningDays, tiers, autoCreate: true })
+          });
+
+          if (res.status === 'READY') {
+            state.tiers = res.entities;
+            state.onboarding = { period, retentionPolicy, inactivityDays, warningDays };
+            renderTiers();
+            flash('Ceníky a skupiny pro všechny úrovně jsou v Shoptetu připraveny a propojeny.');
+            if ($('onboarding-manual-guide-box')) $('onboarding-manual-guide-box').style.display = 'none';
+          } else if (res.status === 'MANUAL_SETUP_REQUIRED') {
+            if ($('onboarding-manual-guide-box')) {
+              $('onboarding-manual-guide-box').style.display = 'block';
+              $('onboarding-manual-guide-text').textContent = res.manualInstructions || '';
+            }
+            flash('Aplikace nemá v Shoptetu oprávnění pro automatické zakládání. Níže naleznete jednoduchý návod.', true);
+          }
+        } catch (e) {
+          flash(e.message || 'Nepodařilo se připravit ceníky.', true);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = '⚡ Připravit ceníky a skupiny v Shoptetu';
+          resize();
+        }
+      });
+    }
+
+    if ($('btn-close-manual-guide')) {
+      $('btn-close-manual-guide').addEventListener('click', () => {
+        if ($('onboarding-manual-guide-box')) $('onboarding-manual-guide-box').style.display = 'none';
+        resize();
+      });
+    }
+
+    function renderStoreSummary(ov) {
+      if (!ov || !$('onboarding-store-summary')) return;
+      $('onboarding-store-summary').innerHTML =
+        'V e-shopu nalezeno <strong>' + (ov.productsCount || 0) + ' produktů</strong>, <strong>' +
+        (ov.categoriesCount || 0) + ' kategorií</strong>, <strong>' + (ov.customersCount || 0) + ' zákazníků</strong>, <strong>' +
+        (ov.pricelists ? ov.pricelists.length : 0) + ' ceníků</strong> a <strong>' + (ov.customerGroups ? ov.customerGroups.length : 0) + ' zákaznických skupin</strong>. Měna: ' + (ov.currency || 'CZK') + '.';
     }
 
     $('tiers-save-bottom').addEventListener('click', saveTiers);
@@ -1443,6 +2301,48 @@ export function renderAdminHtml(eshopId, auth) {
       if(id){if(!/^[a-f0-9-]{36}$/i.test(id)){choose.textContent='Chybí platný odkaz: '+id;row.dataset.invalid='true';}else api('/catalog/product?id='+encodeURIComponent(id)).then(prod=>{if(value.value!==id)return;productNames.set(prod.guid,prod.name||prod.code);choose.textContent=(prod.name||prod.code)+(limit===0?' (0 % - vyloučeno)':'');row.dataset.invalid='false';}).catch(()=>{if(value.value!==id)return;choose.textContent='Nedostupný produkt: '+id;row.dataset.invalid='true';});}
       resize();return row;
     }
+
+    function addScheduledPromoRow(promo = {}) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;background:#f9f9f9;border:1px solid #e5e5e5;border-radius:4px;';
+      const codeInput = document.createElement('input');
+      codeInput.type = 'text'; codeInput.className = 'input-text sp-code'; codeInput.style.width = '140px'; codeInput.placeholder = 'Kód produktu'; codeInput.value = promo.code || '';
+      const pctInput = document.createElement('input');
+      pctInput.type = 'number'; pctInput.min = '0.01'; pctInput.max = '99.99'; pctInput.step = '0.01'; pctInput.className = 'input-text sp-pct w-small'; pctInput.value = promo.discountPercent !== undefined ? promo.discountPercent : 20;
+      const pctLabel = document.createElement('span'); pctLabel.textContent = '%';
+      const fromLabel = document.createElement('span'); fromLabel.style.fontSize = '12px'; fromLabel.textContent = 'Od:';
+      const fromInput = document.createElement('input'); fromInput.type = 'date'; fromInput.className = 'input-text sp-from'; fromInput.value = promo.validFrom || '';
+      const toLabel = document.createElement('span'); toLabel.style.fontSize = '12px'; toLabel.textContent = 'Do:';
+      const toInput = document.createElement('input'); toInput.type = 'date'; toInput.className = 'input-text sp-to'; toInput.value = promo.validTo || '';
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'btn-remove'; remove.textContent = '×'; remove.setAttribute('aria-label', 'Odebrat položku výprodeje');
+      remove.addEventListener('click', () => row.remove());
+      row.append(codeInput, pctInput, pctLabel, fromLabel, fromInput, toLabel, toInput, remove);
+      $('scheduled-promotions-container').append(row);
+      resize();
+      return row;
+    }
+
+    function addBrandPromoRow(promo = {}) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;background:#f9f9f9;border:1px solid #e5e5e5;border-radius:4px;';
+      const brandInput = document.createElement('input');
+      brandInput.type = 'text'; brandInput.className = 'input-text bp-brand'; brandInput.style.width = '160px'; brandInput.placeholder = 'Název značky'; brandInput.value = promo.brand || '';
+      const pctInput = document.createElement('input');
+      pctInput.type = 'number'; pctInput.min = '0.01'; pctInput.max = '99.99'; pctInput.step = '0.01'; pctInput.className = 'input-text bp-pct w-small'; pctInput.value = promo.discountPercent !== undefined ? promo.discountPercent : 15;
+      const pctLabel = document.createElement('span'); pctLabel.textContent = '%';
+      const fromLabel = document.createElement('span'); fromLabel.style.fontSize = '12px'; fromLabel.textContent = 'Od:';
+      const fromInput = document.createElement('input'); fromInput.type = 'date'; fromInput.className = 'input-text bp-from'; fromInput.value = promo.validFrom || '';
+      const toLabel = document.createElement('span'); toLabel.style.fontSize = '12px'; toLabel.textContent = 'Do:';
+      const toInput = document.createElement('input'); toInput.type = 'date'; toInput.className = 'input-text bp-to'; toInput.value = promo.validTo || '';
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'btn-remove'; remove.textContent = '×'; remove.setAttribute('aria-label', 'Odebrat akci na značku');
+      remove.addEventListener('click', () => row.remove());
+      row.append(brandInput, pctInput, pctLabel, fromLabel, fromInput, toLabel, toInput, remove);
+      $('brand-promotions-container').append(row);
+      resize();
+      return row;
+    }
     $('product-picker-search').addEventListener('input',()=>{clearTimeout(window.productSearchTimer);window.productSearchTimer=setTimeout(()=>{productPage=1;loadProductPicker();},250);});
     $('product-picker-next').addEventListener('click',()=>{productPage++;loadProductPicker();});$('product-picker-prev').addEventListener('click',()=>{productPage=Math.max(1,productPage-1);loadProductPicker();});
     $('product-picker-use').addEventListener('click',()=>{const id=$('product-picker-results').value;if(!id||!productTarget)return;if([...document.querySelectorAll('.pl-name')].some(input=>input!==productTarget.querySelector('.pl-name')&&input.value===id)){flash('Tento produkt už je vybraný.',true);return;}productTarget.querySelector('.pl-name').value=id;productTarget.querySelector('.pl-label').textContent=productNames.get(id)||id;productTarget.dataset.invalid='false';$('product-picker').hidden=true;});
@@ -1455,6 +2355,10 @@ export function renderAdminHtml(eshopId, auth) {
       $('rule-coupon-min-percent').value = (r.couponLockMinPercent !== undefined && r.couponLockMinPercent !== null) ? r.couponLockMinPercent : '';
       $('rule-coupon-min-percent').disabled = !$('rule-coupon-lock-top').checked;
       $('rule-coupon-min-price-ratio').checked = r.couponLockMaxRemaining !== false;
+      if ($('rule-coupon-mode')) $('rule-coupon-mode').value = r.couponMode || 'fixed-amount';
+      if ($('rule-coupon-ceiling-percent')) $('rule-coupon-ceiling-percent').value = (r.couponCeilingPercent !== undefined && r.couponCeilingPercent !== null) ? r.couponCeilingPercent : '';
+      if ($('rule-cap-priority')) $('rule-cap-priority').value = r.capPriority || 'hierarchy';
+      if ($('rule-min-margin')) $('rule-min-margin').value = (r.minMarginPercent !== undefined && r.minMarginPercent !== null) ? r.minMarginPercent : '';
       $('rule-post-write-verify').checked = r.postWriteVerify !== false;
 
       const c = $('brand-limits-container');
@@ -1472,6 +2376,16 @@ export function renderAdminHtml(eshopId, auth) {
       const pLimits = r.productLimits || {};
       Object.entries(pLimits).forEach(([k, v]) => addProductLimitRow(k, v));
 
+      const spc = $('scheduled-promotions-container');
+      spc.textContent = '';
+      const sPromos = r.scheduledPromotions || [];
+      sPromos.forEach(p => addScheduledPromoRow(p));
+
+      const bpc = $('brand-promotions-container');
+      bpc.textContent = '';
+      const bPromos = r.brandPromotions || [];
+      bPromos.forEach(p => addBrandPromoRow(p));
+
       $('rules-version').textContent = state.version ? 'Uloženo (verze: ' + state.version + ')' : '';
     }
 
@@ -1482,6 +2396,8 @@ export function renderAdminHtml(eshopId, auth) {
     $('btn-add-brand-limit').addEventListener('click', () => showBrandPicker(addBrandLimitRow()));
     $('btn-add-category-limit').addEventListener('click', () => showCategoryPicker(addCategoryLimitRow()));
     $('btn-add-product-limit').addEventListener('click', () => showProductPicker(addProductLimitRow()));
+    $('btn-add-scheduled-promo').addEventListener('click', () => addScheduledPromoRow());
+    $('btn-add-brand-promo').addEventListener('click', () => addBrandPromoRow());
 
     async function saveRules() {
       if(document.querySelector('#brand-limits-container [data-invalid="true"]')){flash('Nejdřív opravte nedostupné odkazy značek.',true);return;}
@@ -1506,16 +2422,52 @@ export function renderAdminHtml(eshopId, auth) {
         if (name && Number.isFinite(val)) productLimits[name] = val;
       });
 
+      const scheduledPromotions = [];
+      document.querySelectorAll('#scheduled-promotions-container > div').forEach(row => {
+        const code = row.querySelector('.sp-code').value.trim();
+        const pct = Number(row.querySelector('.sp-pct').value);
+        const validFrom = row.querySelector('.sp-from').value.trim() || undefined;
+        const validTo = row.querySelector('.sp-to').value.trim() || undefined;
+        if (code && Number.isFinite(pct)) {
+          const item = { code, discountPercent: pct };
+          if (validFrom) item.validFrom = validFrom;
+          if (validTo) item.validTo = validTo;
+          scheduledPromotions.push(item);
+        }
+      });
+
+      const brandPromotions = [];
+      document.querySelectorAll('#brand-promotions-container > div').forEach(row => {
+        const brand = row.querySelector('.bp-brand').value.trim();
+        const pct = Number(row.querySelector('.bp-pct').value);
+        const validFrom = row.querySelector('.bp-from').value.trim() || undefined;
+        const validTo = row.querySelector('.bp-to').value.trim() || undefined;
+        if (brand && Number.isFinite(pct)) {
+          const item = { brand, discountPercent: pct };
+          if (validFrom) item.validFrom = validFrom;
+          if (validTo) item.validTo = validTo;
+          brandPromotions.push(item);
+        }
+      });
+
       const minP = $('rule-coupon-min-percent').value.trim();
+      const couponCeilingRaw = $('rule-coupon-ceiling-percent') ? $('rule-coupon-ceiling-percent').value.trim() : '';
+      const minMarginRaw = $('rule-min-margin') ? $('rule-min-margin').value.trim() : '';
       const rules = {
         highestDiscountWins: $('rule-highest-discount').checked,
         couponLockTopTiers: $('rule-coupon-lock-top').checked,
         couponLockMinPercent: $('rule-coupon-lock-top').checked && minP !== '' ? Number(minP) : null,
         couponLockMaxRemaining: $('rule-coupon-min-price-ratio').checked,
+        couponMode: $('rule-coupon-mode') ? $('rule-coupon-mode').value : 'fixed-amount',
+        couponCeilingPercent: couponCeilingRaw !== '' ? Number(couponCeilingRaw) : null,
+        capPriority: $('rule-cap-priority') ? $('rule-cap-priority').value : 'hierarchy',
+        minMarginPercent: minMarginRaw !== '' ? Number(minMarginRaw) : null,
         postWriteVerify: $('rule-post-write-verify').checked,
         brandLimits,
         categoryLimits,
-        productLimits
+        productLimits,
+        scheduledPromotions,
+        brandPromotions
       };
       const btn = $('btn-top-save');
       btn.disabled = true;
@@ -1534,8 +2486,10 @@ export function renderAdminHtml(eshopId, auth) {
     $('btn-top-save').addEventListener('click', () => {
       if (activeTab === 'rules') {
         saveRules();
-      } else {
+      } else if (activeTab === 'tiers') {
         saveTiers();
+      } else if (sectionKeys.includes(activeTab)) {
+        saveSection(activeTab);
       }
     });
 
@@ -1594,6 +2548,87 @@ export function renderAdminHtml(eshopId, auth) {
       } catch (e) { flash(e.message, true); }
       finally { btn.disabled = false; resize(); }
     });
+
+    /* Validated configuration sections: edit in existing Shoptet iframe, save to D1. */
+    const sectionKeys = ['settings', 'pricelists', 'categories', 'products', 'brandSales', 'coupons', 'sync'];
+    const sectionRows = { pricelists: ['id','name','tierName'], categories: ['id','name','limit'], products: ['id','name','limit'], brandSales: ['id','name','limit'] };
+    const el = (tag, attrs = {}, value = '') => {
+      const n = document.createElement(tag);
+      for (const [key, val] of Object.entries(attrs)) n.setAttribute(key, val);
+      if (tag === 'input' && attrs.type !== 'checkbox') n.value = String(value ?? '');
+      if (tag === 'input' && attrs.type === 'checkbox') n.checked = !!value;
+      return n;
+    };
+    function sectionInput(parent, key, value, type = 'text') {
+      const row = el('div', { class: 'form-row' });
+      const label = el('label', { class: 'form-label' }); label.textContent = key;
+      const field = el('div', { class: 'form-field' });
+      const input = el('input', { class: 'input-text', type, 'data-field': key }, value);
+      if (type === 'number') { input.step = '0.01'; input.min = '0'; }
+      field.append(input); row.append(label, field); parent.append(row);
+      return input;
+    }
+    function renderSection(key) {
+      const root = $('section-' + key); if (!root || !state || !state.ui) return;
+      root.textContent = '';
+      const value = state.ui[key] || {};
+      if (sectionRows[key]) {
+        const table = el('table', { class: 'shoptet-table' });
+        const head = el('thead'); const header = el('tr');
+        for (const col of sectionRows[key]) { const th = el('th'); th.textContent = col === 'limit' ? 'Max. sleva %' : col === 'tierName' ? 'Věrnostní úroveň' : col === 'id' ? 'ID' : 'Název'; header.append(th); }
+        head.append(header); table.append(head);
+        const body = el('tbody');
+        function addRow(data = {}) {
+          const tr = el('tr');
+          for (const col of sectionRows[key]) {
+            const td = el('td'); const input = el('input', { class: 'input-text w-full', 'data-col': col, type: col === 'limit' ? 'number' : 'text' }, data[col] ?? (col === 'limit' ? 0 : ''));
+            if (col === 'limit') { input.min = '0'; input.max = '100'; input.step = '0.01'; }
+            td.append(input); tr.append(td);
+          }
+          const td = el('td'); const remove = el('button', { type: 'button', class: 'btn-remove' }); remove.textContent = '×'; remove.addEventListener('click', () => { tr.remove(); resize(); }); td.append(remove); tr.append(td); body.append(tr);
+        }
+        (Array.isArray(value) ? value : []).forEach(addRow); table.append(body); root.append(table);
+        const add = el('button', { type: 'button', class: 'btn-secondary', style: 'margin-top: 8px;' }); add.textContent = '+ Přidat'; add.addEventListener('click', () => { addRow(); resize(); }); root.append(add);
+      } else if (key === 'settings') {
+        sectionInput(root, 'enabled', value.enabled, 'checkbox');
+        sectionInput(root, 'currency', value.currency);
+        sectionInput(root, 'verifyWrites', value.verifyWrites, 'checkbox');
+        sectionInput(root, 'rounding', value.rounding, 'number');
+      } else if (key === 'coupons') {
+        sectionInput(root, 'enabled', value.enabled, 'checkbox');
+        sectionInput(root, 'mode', value.mode);
+        sectionInput(root, 'maxPercent', value.maxPercent, 'number');
+        for (const field of ['lockedTiers','disabledBrands','disabledProducts']) sectionInput(root, field, (value[field] || []).join(', '));
+      } else if (key === 'sync') {
+        sectionInput(root, 'incremental', value.incremental, 'checkbox');
+        sectionInput(root, 'intervalMinutes', value.intervalMinutes, 'number');
+        sectionInput(root, 'dryRun', value.dryRun, 'checkbox');
+        const note = el('p', { class: 'tab-intro' }); note.textContent = 'Synchronizace se spustí až po dokončení a schválení Shoptet API adaptéru.'; root.append(note);
+      }
+      const saveDiv = el('div', { style: 'margin-top: 16px;' });
+      const save = el('button', { type: 'button', class: 'btn-shoptet-green' }); save.textContent = 'Uložit nastavení';
+      save.addEventListener('click', () => saveSection(key)); saveDiv.append(save); root.append(saveDiv);
+    }
+    function sectionValue(key) {
+      const root = $('section-' + key);
+      if (sectionRows[key]) return [...root.querySelectorAll('tbody tr')].map(tr => Object.fromEntries([...tr.querySelectorAll('[data-col]')].map(input => [input.dataset.col, input.type === 'number' ? Number(input.value) : input.value])));
+      const next = {};
+      for (const input of root.querySelectorAll('[data-field]')) {
+        const field = input.dataset.field;
+        next[field] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : ['lockedTiers','disabledBrands','disabledProducts'].includes(field) ? input.value.split(',').map(x => x.trim()).filter(Boolean) : input.value;
+      }
+      return next;
+    }
+    async function saveSection(key) {
+      const btn = $('section-' + key).querySelector('.btn-shoptet-green');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await api('/section', { method: 'PUT', body: JSON.stringify({ section: key, value: sectionValue(key), version: state.version }) });
+        state.ui[key] = res.value; state.version = res.version;
+        renderSection(key);
+        flash('Nastavení sekce ' + key + ' uloženo (verze ' + state.version + ').');
+      } catch (e) { flash(e.message, true); } finally { if (btn) btn.disabled = false; resize(); }
+    }
 
     async function renderConfigurationApprovals() {
       const root = $('approvals-container');
@@ -1828,27 +2863,27 @@ export function renderAdminHtml(eshopId, auth) {
         actionsDiv.style.cssText = 'display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap;';
 
         if (status.engineMode === 'installation') {
-          desc.textContent = 'Věrnostní engine je v bezpečném instalačním režimu. Žádné automatické změny zákaznických ceníků se neprovádějí. Spusťte hromadnou analýzu obratu vašich zákazníků (Dry Run) pro výpočet navrhovaných VIP hladin bez jakýchkoliv zápisů do e-shopu.';
+          desc.textContent = 'Věrnostní systém je v bezpečném instalačním režimu. Žádné automatické změny zákaznických ceníků se neprovádějí. Spusťte kontrolní náhled změn pro výpočet navrhovaných VIP hladin bez jakýchkoliv zápisů do e-shopu.';
           const btnDryRun = document.createElement('button');
           btnDryRun.type = 'button';
           btnDryRun.className = 'btn-shoptet-green';
-          btnDryRun.textContent = 'Spustit hromadnou analýzu (Dry Run)';
+          btnDryRun.textContent = 'Spustit kontrolní náhled změn';
           btnDryRun.addEventListener('click', async () => {
             btnDryRun.disabled = true;
-            btnDryRun.textContent = 'Analyzuji zákazníky…';
+            btnDryRun.textContent = 'Přepočítávám náhled…';
             try {
               await api('/loyalty/dry-run', { method: 'POST', body: '{}' });
-              flash('Hromadná analýza (Dry Run) byla úspěšně dokončena.');
+              flash('Kontrolní náhled změn byl úspěšně vygenerován bez zápisů do e-shopu.');
               await renderLoyaltyOnboarding();
             } catch (err) {
               btnDryRun.disabled = false;
-              btnDryRun.textContent = 'Spustit hromadnou analýzu (Dry Run)';
+              btnDryRun.textContent = 'Spustit kontrolní náhled změn';
               flash(err.message, true);
             }
           });
           actionsDiv.append(btnDryRun);
         } else if (status.engineMode === 'dry_run_ready' || status.engineMode === 'approved') {
-          desc.textContent = 'Hromadná analýza byla dokončena. Níže naleznete přesný přehled všech navrhovaných změn zákaznických ceníků k vašemu schválení.';
+          desc.textContent = 'Kontrolní analýza byla dokončena. Níže naleznete přesný přehled všech navrhovaných změn zákaznických ceníků k vašemu schválení.';
 
           const planData = await api('/loyalty/plan');
           const plan = planData.plan;
@@ -1952,17 +2987,17 @@ export function renderAdminHtml(eshopId, auth) {
             const btnReDryRun = document.createElement('button');
             btnReDryRun.type = 'button';
             btnReDryRun.className = 'btn-secondary';
-            btnReDryRun.textContent = 'Analyzovat znovu (Nový Dry Run)';
+            btnReDryRun.textContent = 'Přepočítat znovu (Aktualizovat náhled)';
             btnReDryRun.addEventListener('click', async () => {
               btnReDryRun.disabled = true;
-              btnReDryRun.textContent = 'Počítám…';
+              btnReDryRun.textContent = 'Přepočítávám…';
               try {
                 await api('/loyalty/dry-run', { method: 'POST', body: '{}' });
-                flash('Nový Dry Run byl vygenerován.');
+                flash('Nový kontrolní náhled byl úspěšně vygenerován.');
                 await renderLoyaltyOnboarding();
               } catch (err) {
                 btnReDryRun.disabled = false;
-                btnReDryRun.textContent = 'Analyzovat znovu (Nový Dry Run)';
+                btnReDryRun.textContent = 'Přepočítat znovu (Aktualizovat náhled)';
                 flash(err.message, true);
               }
             });
@@ -1975,17 +3010,17 @@ export function renderAdminHtml(eshopId, auth) {
           const btnNewAudit = document.createElement('button');
           btnNewAudit.type = 'button';
           btnNewAudit.className = 'btn-secondary';
-          btnNewAudit.textContent = 'Spustit novou hromadnou kontrolu (Dry Run)';
+          btnNewAudit.textContent = 'Spustit kontrolní přepočet bez zápisu';
           btnNewAudit.addEventListener('click', async () => {
             btnNewAudit.disabled = true;
-            btnNewAudit.textContent = 'Počítám…';
+            btnNewAudit.textContent = 'Přepočítávám…';
             try {
               await api('/loyalty/dry-run', { method: 'POST', body: '{}' });
-              flash('Kontrolní Dry Run byl vygenerován.');
+              flash('Kontrolní náhled byl vygenerován.');
               await renderLoyaltyOnboarding();
             } catch (err) {
               btnNewAudit.disabled = false;
-              btnNewAudit.textContent = 'Spustit novou hromadnou kontrolu (Dry Run)';
+              btnNewAudit.textContent = 'Spustit kontrolní přepočet bez zápisu';
               flash(err.message, true);
             }
           });
@@ -2001,6 +3036,104 @@ export function renderAdminHtml(eshopId, auth) {
       resize();
     }
 
+    async function renderReconciliation() {
+      const root = $('reconciliation-container');
+      if (!root) return;
+      root.textContent = '';
+      try {
+        const res = await api('/reconciliation/status');
+        const card = document.createElement('div');
+        card.style.cssText = 'background: #ffffff; border: 1px solid #d9d9d9; border-radius: 4px; padding: 18px 20px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);';
+
+        const heading = document.createElement('div');
+        heading.className = 'section-heading';
+        heading.style.marginTop = '0';
+        heading.textContent = 'Kontrola souladu cen a slevových kupónů';
+        card.append(heading);
+
+        const autoNotice = document.createElement('div');
+        autoNotice.style.cssText = 'font-size: 12px; color: #555555; margin-bottom: 12px; background: #f8f9fa; border: 1px solid #e2e5e8; border-radius: 3px; padding: 6px 10px;';
+        autoNotice.textContent = 'Automatická oprava cen: VYPNUTO (veškeré změny cen v e-shopu vždy vyžadují schválení obchodníka).';
+        card.append(autoNotice);
+
+        const rec = res.lastReconciliation;
+        if (rec && rec.priceReport && rec.couponReport) {
+          const p = rec.priceReport.counts || { total: 0, match: 0, drift: 0, missing: 0, skipped: 0, unknown: 0 };
+          const c = rec.couponReport.counts || { total: 0, match: 0, drift: 0, missing: 0, skipped: 0, unknown: 0 };
+          const grid = document.createElement('div');
+          grid.style.cssText = 'display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px;';
+          grid.innerHTML =
+            '<div style="background:#f7f9fa;border:1px solid #e2e5e8;border-radius:3px;padding:8px 12px;text-align:center;"><div style="font-size:11px;color:#777;">Ceny v pořádku</div><div style="font-size:16px;font-weight:bold;color:#3c763d;">' + p.match + ' / ' + p.total + '</div></div>' +
+            '<div style="background:#f7f9fa;border:1px solid #e2e5e8;border-radius:3px;padding:8px 12px;text-align:center;"><div style="font-size:11px;color:#777;">Rozdíly v cenách</div><div style="font-size:16px;font-weight:bold;color:' + (p.drift > 0 ? '#a94442' : '#333') + ';">' + p.drift + '</div></div>' +
+            '<div style="background:#f7f9fa;border:1px solid #e2e5e8;border-radius:3px;padding:8px 12px;text-align:center;"><div style="font-size:11px;color:#777;">Kupóny v pořádku</div><div style="font-size:16px;font-weight:bold;color:#3c763d;">' + c.match + ' / ' + c.total + '</div></div>' +
+            '<div style="background:#f7f9fa;border:1px solid #e2e5e8;border-radius:3px;padding:8px 12px;text-align:center;"><div style="font-size:11px;color:#777;">Rozdíly u kupónů</div><div style="font-size:16px;font-weight:bold;color:' + (c.drift > 0 ? '#a94442' : '#333') + ';">' + c.drift + '</div></div>';
+          card.append(grid);
+        } else {
+          const empty = document.createElement('p');
+          empty.style.cssText = 'font-size: 13px; color: #777777; margin-bottom: 12px;';
+          empty.textContent = 'Dosud nebyla spuštěna žádná kontrola souladu cen a slevových kupónů.';
+          card.append(empty);
+        }
+
+        const btnRun = document.createElement('button');
+        btnRun.type = 'button';
+        btnRun.className = 'btn-secondary';
+        btnRun.id = 'btn-run-reconciliation';
+        btnRun.textContent = 'Spustit kontrolu cen a kupónů';
+        btnRun.addEventListener('click', async () => {
+          btnRun.disabled = true;
+          btnRun.textContent = 'Kontroluji ceny a kupóny…';
+          try {
+            await api('/reconciliation/run', { method: 'POST', body: '{}' });
+            flash('Kontrola souladu cen a kupónů byla dokončena.');
+            await renderReconciliation();
+          } catch (err) {
+            btnRun.disabled = false;
+            btnRun.textContent = 'Spustit kontrolu cen a kupónů';
+            flash(err.message, true);
+          }
+        });
+        card.append(btnRun);
+        root.append(card);
+      } catch {
+        // Fallback gracefully
+      }
+      resize();
+    }
+
+    async function renderConfigurationHistory() {
+      const root = $('history-container');
+      if (!root) return;
+      root.textContent = '';
+      try {
+        const data = await api('/configuration/history');
+        const heading = document.createElement('div');
+        heading.className = 'section-heading';
+        heading.textContent = 'Historie schválených změn nastavení';
+        root.append(heading);
+        if (!data.history || !data.history.length) {
+          const empty = document.createElement('p');
+          empty.style.cssText = 'color: #777777; font-size: 13px; margin: 10px 0 18px;';
+          empty.textContent = 'Zatím nebyly zaznamenány žádné historické verze nastavení.';
+          root.append(empty);
+          return;
+        }
+        const list = document.createElement('div');
+        list.style.cssText = 'display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px;';
+        for (const item of data.history) {
+          const row = document.createElement('div');
+          row.style.cssText = 'font-size: 12px; color: #555555; background: #fafbfc; border: 1px solid #e2e5e8; border-radius: 3px; padding: 8px 12px; display: flex; justify-content: space-between;';
+          const dt = item.applied_at ? new Date(item.applied_at * 1000).toLocaleString('cs-CZ') : '—';
+          row.innerHTML = '<span><strong>Verze #' + escapeHtml(item.version) + '</strong> (revize ' + escapeHtml(String(item.revision_id || '').slice(0, 8)) + ')</span><span>' + escapeHtml(dt) + '</span>';
+          list.append(row);
+        }
+        root.append(list);
+      } catch {
+        // Fallback gracefully
+      }
+      resize();
+    }
+
     $('onboarding-retry').addEventListener('click',async()=>{try{await api('/installation/retry',{method:'POST',body:'{}'});state=await api('/state');renderOverview();}catch(e){flash(e.message,true);}});
 
     async function renderWebhookStatus(){try{const result=await api('/webhooks/status');$('webhook-status').textContent=result.ready?'Podpisový klíč je nastaven. Doručení oznámení je třeba ověřit.':'Bezpečná oznámení nejsou nastavená.';$('webhook-enable').disabled=result.ready||state.installation?.state!=='active';if(!result.ready)$('token-new').disabled=true;}catch{$('webhook-status').textContent='Stav bezpečných oznámení nelze načíst.';}}
@@ -2011,8 +3144,17 @@ export function renderAdminHtml(eshopId, auth) {
       try {
         state = await api('/state');
         try { const plData = await api('/catalog/pricelists'); state.pricelists = plData.items || []; } catch { state.pricelists = []; }
+        try {
+          const ov = await api('/onboarding/overview');
+          state.overview = ov;
+          state.customerGroups = ov.customerGroups || [];
+          renderStoreSummary(ov);
+        } catch {
+          state.overview = null;
+          state.customerGroups = [];
+        }
         $('loading').remove();
-        renderOverview(); renderTiers(); renderRules(); renderTokens(); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals(); renderWebhookStatus(); renderLoyaltyOnboarding();
+        renderOverview(); renderTiers(); renderRules(); renderTokens(); sectionKeys.forEach(renderSection); renderConfigurationApprovals(); renderOAuthConnections(); renderSyncApprovals(); renderWebhookStatus(); renderLoyaltyOnboarding(); renderReconciliation(); renderConfigurationHistory();
       } catch (e) {
         $('loading').textContent = '';
         flash(e.message, true);

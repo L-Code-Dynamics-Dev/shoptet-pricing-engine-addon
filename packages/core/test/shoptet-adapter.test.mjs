@@ -90,3 +90,95 @@ test('updateCustomerPricelist validates customer state, permissions, destination
   assert.equal(timeoutRes.outcome, 'unknown');
   assert.equal(timeoutRes.requiresReadback, true);
 });
+
+test('K4: iteratePrices streams paginated prices with fence check and fails closed on incomplete scan', async () => {
+  const pages = {
+    1: {
+      prices: [
+        { code: 'SKU-001', currencyCode: 'CZK', includingVat: true, vatRate: '21.00', price: { price: '100.00', priceRatio: '1.000', actionPrice: null }, sales: { discountCoupon: true } }
+      ],
+      paginator: { page: 1, pageCount: 2, totalCount: 2 }
+    },
+    2: {
+      prices: [
+        { code: 'SKU-002', currencyCode: 'CZK', includingVat: true, vatRate: '21.00', price: { price: '200.00', priceRatio: '1.000', actionPrice: null }, sales: { discountCoupon: false } }
+      ],
+      paginator: { page: 2, pageCount: 2, totalCount: 2 }
+    }
+  };
+
+  let fenceCheckCalls = 0;
+  const adapter = createShoptetAdapter({
+    getToken: async () => 'token',
+    fetchImpl: async (url) => {
+      const u = new URL(url);
+      const page = Number(u.searchParams.get('page') || 1);
+      return response(pages[page]);
+    }
+  });
+
+  // 1. Successful stream across both pages
+  const items = [];
+  for await (const row of adapter.iteratePrices(2, { limit: 1, checkFence: async () => { fenceCheckCalls++; } })) {
+    items.push(row.code);
+  }
+  assert.deepEqual(items, ['SKU-001', 'SKU-002']);
+  assert.equal(fenceCheckCalls, 2);
+
+  // 2. Fails closed if maxPages limits the scan before all pages are read
+  await assert.rejects(
+    async () => {
+      for await (const _ of adapter.iteratePrices(2, { limit: 1, maxPages: 1 })) {}
+    },
+    /max_pages_exceeded_incomplete_scan/
+  );
+
+  // 3. Fails closed if an intermediate/second page returns empty prices array
+  const emptySecondPageAdapter = createShoptetAdapter({
+    getToken: async () => 'token',
+    fetchImpl: async (url) => {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      if (page === 1) return response(pages[1]);
+      return response({ prices: [], paginator: { page: 2, pageCount: 2, totalCount: 2 } });
+    }
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _ of emptySecondPageAdapter.iteratePrices(2, { limit: 1 })) {}
+    },
+    /incomplete_price_pagination_scan/
+  );
+
+  // 4. Fails closed if total yielded rows across pages is fewer than paginator.totalCount
+  const fewerRowsAdapter = createShoptetAdapter({
+    getToken: async () => 'token',
+    fetchImpl: async (url) => {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      return response({
+        prices: pages[page].prices,
+        paginator: { page, pageCount: 2, totalCount: 3 }
+      });
+    }
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _ of fewerRowsAdapter.iteratePrices(2, { limit: 1 })) {}
+    },
+    /incomplete_price_pagination_scan/
+  );
+
+  // 5. Fails closed if paginator.totalCount is missing or invalid
+  const invalidTotalCountAdapter = createShoptetAdapter({
+    getToken: async () => 'token',
+    fetchImpl: async () => response({
+      prices: pages[1].prices,
+      paginator: { page: 1, pageCount: 1, totalCount: null }
+    })
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _ of invalidTotalCountAdapter.iteratePrices(2, { limit: 1 })) {}
+    },
+    /incomplete_price_pagination_scan/
+  );
+});

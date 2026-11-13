@@ -1,10 +1,8 @@
 // Pure pricing primitives. Monetary inputs are integer minor units (cents/halere).
 // Aligned with OKfish decision logic supporting both okfish_compatible and lowest_price modes.
-const percentBps = (value, label) => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100 ||
-      Number(value.toFixed(2)) !== value) throw new TypeError('Invalid ' + label);
-  return BigInt(value.toFixed(2).replace('.', ''));
-};
+import { parsePercentBps } from './coupon-engine.mjs';
+
+const percentBps = (value, label) => parsePercentBps(value, label);
 const checkedMinor = (value, label) => {
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError('Invalid ' + label);
   return BigInt(value);
@@ -13,52 +11,201 @@ const safeResult = value => {
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new TypeError('Price overflow');
   return Number(value);
 };
-const roundedRatio = (numerator, denominator) => (numerator + denominator / 2n) / denominator;
+const divideWithRounding = (n, d, mode = 'math') => {
+  const q = n / d;
+  const r = n % d;
+  if (mode === 'up') return q + (r > 0n ? 1n : 0n);
+  if (mode === 'down') return q;
+  if (mode === 'none') return q;
+  // 'math' (round half up)
+  return q + (r * 2n >= d ? 1n : 0n);
+};
 
-export function calculateTierPrice({ baseMinor, actionMinor = null, tierPercent = 0, fixedDiscountMinor = null, capPercent = null, salePolicy = 'okfish_compatible', allowLoyaltyDiscount = true }) {
+export function resolveCurrencyRoundingRules(currencyCode, options = {}) {
+  const code = typeof currencyCode === 'string' ? currencyCode.trim().toUpperCase() : null;
+  if (!code || !/^[A-Z]{3}$/.test(code)) {
+    throw new TypeError('Invalid currencyCode: expected 3-letter currency code');
+  }
+  const defaults = {
+    CZK: { decimals: 2, rounding: 'math', incrementMinor: 100 },
+    EUR: { decimals: 2, rounding: 'math', incrementMinor: 1 },
+    HUF: { decimals: 0, rounding: 'math', incrementMinor: 100 },
+    PLN: { decimals: 2, rounding: 'math', incrementMinor: 1 }
+  };
+  const standard = defaults[code];
+  if (!standard && options.priceDecimalPlaces === undefined) {
+    throw new TypeError(`Unsupported currencyCode ${code}: explicit priceDecimalPlaces required`);
+  }
+  const baseStandard = standard || { decimals: 2, rounding: 'math', incrementMinor: 1 };
+
+  const decimals = options.priceDecimalPlaces ?? baseStandard.decimals;
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 4) {
+    throw new TypeError('Invalid priceDecimalPlaces: expected integer between 0 and 4');
+  }
+
+  const rounding = options.rounding ?? baseStandard.rounding;
+  if (!['math', 'up', 'down', 'none'].includes(rounding)) {
+    throw new TypeError(`Invalid rounding: ${rounding}`);
+  }
+
+  let incrementMinor = options.incrementMinor;
+  if (incrementMinor === undefined) {
+    if (decimals === 0) incrementMinor = 100;
+    else if (options.priceDecimalPlaces !== undefined) incrementMinor = Math.max(1, 10 ** (2 - decimals));
+    else incrementMinor = baseStandard.incrementMinor;
+  }
+  if (!Number.isSafeInteger(incrementMinor) || incrementMinor < 1) {
+    throw new TypeError('Invalid incrementMinor: must be positive integer');
+  }
+
+  return { currencyCode, decimals, rounding, incrementMinor };
+}
+
+export function resolveDiscountCap({ productCap = null, brandCap = null, categoryCap = null, categoryCaps = [], priority = 'most_restrictive' }) {
+  if (!Array.isArray(categoryCaps) && categoryCaps !== null && categoryCaps !== undefined) {
+    throw new TypeError('categoryCaps must be an array');
+  }
+  const cleanCatPercents = [];
+  const allRawCats = (categoryCap !== null && categoryCap !== undefined ? [categoryCap] : []).concat(Array.isArray(categoryCaps) ? categoryCaps : []);
+  for (const c of allRawCats) {
+    if (c === null || c === undefined) continue;
+    const bps = percentBps(c, 'categoryCap');
+    cleanCatPercents.push(Number(bps) / 100);
+  }
+
+  const resolvedCategoryCap = cleanCatPercents.length > 0 ? Math.min(...cleanCatPercents) : null;
+
+  const normProduct = productCap !== null && productCap !== undefined ? Number(percentBps(productCap, 'productCap')) / 100 : null;
+  const normBrand = brandCap !== null && brandCap !== undefined ? Number(percentBps(brandCap, 'brandCap')) / 100 : null;
+  const normCategory = resolvedCategoryCap;
+
+  if (priority === 'hierarchy') {
+    if (normProduct !== null) return normProduct;
+    if (normBrand !== null) return normBrand;
+    if (normCategory !== null) return normCategory;
+    return null;
+  }
+  const caps = [normProduct, normCategory, normBrand].filter(value => value !== null);
+  return caps.length ? caps.reduce((min, cur) => cur < min ? cur : min, caps[0]) : null;
+}
+
+export function calculateTierPrice({
+  baseMinor,
+  actionMinor = null,
+  tierPercent = 0,
+  fixedDiscountMinor = null,
+  capPercent = null,
+  productCap = null,
+  brandCap = null,
+  categoryCap = null,
+  categoryCaps = [],
+  capPriority = 'most_restrictive',
+  salePolicy = 'okfish_compatible',
+  allowLoyaltyDiscount = true,
+  rounding = 'math',
+  incrementMinor = 1,
+  minimumMinor = null
+}) {
   const base = checkedMinor(baseMinor, 'baseMinor');
   const action = actionMinor === null ? null : checkedMinor(actionMinor, 'actionMinor');
   const fixed = fixedDiscountMinor === null ? null : checkedMinor(fixedDiscountMinor, 'fixedDiscountMinor');
   const tier = percentBps(tierPercent, 'tierPercent');
-  const cap = capPercent === null ? null : percentBps(capPercent, 'capPercent');
+
+  let resolvedCap = capPercent;
+  if (resolvedCap === null && (productCap !== null || brandCap !== null || categoryCap !== null || (Array.isArray(categoryCaps) && categoryCaps.length > 0))) {
+    resolvedCap = resolveDiscountCap({ productCap, brandCap, categoryCap, categoryCaps, priority: capPriority });
+  }
+  const cap = resolvedCap === null ? null : percentBps(resolvedCap, 'capPercent');
+
   if (!['okfish_compatible', 'lowest_price'].includes(salePolicy)) throw new TypeError('Invalid salePolicy');
+  if (!['math', 'up', 'down', 'none'].includes(rounding)) throw new TypeError('Invalid rounding');
+  const requestedStep = checkedMinor(incrementMinor, 'incrementMinor');
+  const step = rounding === 'none' ? 1n : requestedStep;
+  if (requestedStep < 1n) throw new TypeError('Invalid incrementMinor');
+
   const effectiveTier = allowLoyaltyDiscount ? (cap !== null && cap < tier ? cap : tier) : 0n;
-  let loyalty = roundedRatio(base * (10000n - effectiveTier), 10000n);
+  let loyalty = divideWithRounding(base * (10000n - effectiveTier), 10000n * step, rounding === 'none' ? 'math' : rounding) * step;
+
   if (fixed !== null && allowLoyaltyDiscount) {
-    const fixedPrice = base > fixed ? base - fixed : 0n;
+    let fixedPrice = base > fixed ? base - fixed : 0n;
+    fixedPrice = divideWithRounding(fixedPrice, step, rounding === 'none' ? 'math' : rounding) * step;
     loyalty = tier > 0n ? (loyalty < fixedPrice ? loyalty : fixedPrice) : fixedPrice;
-    // Fixed discounts are subject to the same maximum discount as tier percentages.
+    // Fixed discounts are subject to the same maximum discount cap as tier percentages.
     if (cap !== null) {
-      const minimumFromCap = (base * (10000n - cap) + 9999n) / 10000n;
+      const minimumFromCap = divideWithRounding(base * (10000n - cap), 10000n * step, 'up') * step;
       if (loyalty < minimumFromCap) loyalty = minimumFromCap;
     }
   }
+  if (loyalty > base) loyalty = base;
+
   const validAction = action !== null && action < base ? action : null;
-  if (salePolicy === 'okfish_compatible' && cap !== null && validAction !== null) {
-    return safeResult(validAction);
+
+  // Protect loyalty discounting against going below minimum margin floor.
+  // Manual merchant action price (validAction) is NEVER raised by minimumMinor.
+  if (minimumMinor !== null) {
+    const minFloor = checkedMinor(minimumMinor, 'minimumMinor');
+    // Ensure minimum price floor is representable on the shop currency step using ceiling-to-step
+    const steppedFloor = step > 1n ? ((minFloor + step - 1n) / step) * step : minFloor;
+    if (loyalty < steppedFloor) loyalty = steppedFloor;
   }
-  return safeResult(validAction !== null && validAction < loyalty ? validAction : loyalty);
+
+  let chosen = loyalty;
+
+  if (salePolicy === 'okfish_compatible') {
+    if (cap !== null && validAction !== null) {
+      chosen = validAction;
+    } else if (validAction !== null) {
+      chosen = validAction < loyalty ? validAction : loyalty;
+    }
+  } else {
+    chosen = (validAction !== null && validAction < loyalty) ? validAction : loyalty;
+  }
+
+  return safeResult(chosen);
 }
 
-export function resolveDiscountCap({ productCap = null, brandCap = null, categoryCap = null, priority = 'most_restrictive' }) {
-  for (const [key, value] of Object.entries({productCap, brandCap, categoryCap})) {
-    if (value !== null && (!Number.isFinite(value) || value < 0 || value > 100)) throw new TypeError(`Invalid ${key}`);
+export function evaluatePriceDecision(options = {}) {
+  const { minimumMinor = null } = options;
+  const priceMinor = calculateTierPrice(options);
+  if (minimumMinor !== null && priceMinor < minimumMinor) {
+    return {
+      status: 'BLOCKED_NO_WRITE',
+      reason: 'manual_action_below_margin_floor',
+      priceMinor,
+      minimumMinor,
+      canWrite: false
+    };
   }
-  if (priority === 'hierarchy') {
-    if (productCap !== null) return productCap;
-    if (brandCap !== null) return brandCap;
-    if (categoryCap !== null) return categoryCap;
-    return null;
-  }
-  const caps = [productCap, categoryCap, brandCap].filter(value => value !== null);
-  return caps.length ? Math.min(...caps) : null;
+  return {
+    status: 'CAN_WRITE',
+    reason: 'authorized',
+    priceMinor,
+    minimumMinor,
+    canWrite: true
+  };
 }
 
-export function createPricelistPricePatch({ code, priceMinor, vatRate, includingVat = true }) {
+export function createPricelistPricePatch({
+  code,
+  priceMinor,
+  vatRate,
+  minimumMinor = null,
+  includingVat = true,
+  allowZeroPrice = false
+}) {
   if (typeof code !== 'string' || !code.trim()) throw new TypeError('Missing product code');
   if (!Number.isSafeInteger(priceMinor) || priceMinor < 0) throw new TypeError('Invalid price');
+  if (priceMinor === 0 && !allowZeroPrice) throw new TypeError('Zero price requires explicit approval');
   if (typeof vatRate !== 'string' || !/^\d{1,2}\.\d{2}$/.test(vatRate)) throw new TypeError('Explicit VAT rate required');
   if (includingVat !== true) throw new TypeError('VAT-inclusive price required');
+
+  if (minimumMinor !== null) {
+    if (!Number.isSafeInteger(minimumMinor) || minimumMinor < 0) throw new TypeError('Invalid minimumMinor');
+    if (priceMinor < minimumMinor) {
+      throw new RangeError(`BLOCKED_NO_WRITE: priceMinor ${priceMinor} breaches minimumMinor ${minimumMinor}`);
+    }
+  }
+
   const minor = BigInt(priceMinor);
   return { code, price: (minor / 100n).toString() + '.' + (minor % 100n).toString().padStart(2, '0'), includingVat: true, vatRate };
 }

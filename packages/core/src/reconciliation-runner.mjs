@@ -1,0 +1,617 @@
+// Independent Read-Only Price and Coupon Reconciliation Runner for Shoptet Marketplace B2C.
+// Adheres strictly to TRANSFER_RULES.md, INC-010, INC-011, and INC-012:
+// - Separate price and coupon reconciliation jobs
+// - Full-coverage self-check (zero drift on incomplete coverage != success)
+// - Distinguishes MATCH, DRIFT, MISSING, SKIPPED, UNKNOWN
+// - Auto-remediation strictly OFF by default
+
+import { calculateTierPrice, evaluatePriceDecision } from './pricing.mjs';
+import { evaluateCouponSettings, normalizeCouponPolicy } from './coupon-engine.mjs';
+import { resolveScheduledPromotionActionMinor } from './promotions.mjs';
+
+/**
+ * Validates self-check coverage against minimum expected cardinality.
+ * Fails closed if unknown/duplicate data is encountered or valid coverage is insufficient.
+ */
+function evaluateSelfCheck({ totalChecked, validlyEvaluated, unknownCount = 0, minExpectedCombinations }) {
+  if (unknownCount > 0) {
+    return {
+      passed: false,
+      reason: `corrupt_or_duplicate_data_detected: ${unknownCount} unknown combinations encountered`
+    };
+  }
+  if (minExpectedCombinations > 0 && validlyEvaluated < minExpectedCombinations) {
+    return {
+      passed: false,
+      reason: `insufficient_coverage: evaluated ${validlyEvaluated} valid combinations, expected minimum ${minExpectedCombinations}`
+    };
+  }
+  if (validlyEvaluated === 0 && minExpectedCombinations > 0) {
+    return {
+      passed: false,
+      reason: 'zero_items_checked_when_cardinality_required'
+    };
+  }
+  return { passed: true, reason: null };
+}
+
+/**
+ * Read-only Price Reconciliation.
+ * Reads actual stored prices, computes expected prices, and audits drift without writing.
+ */
+export async function reconcilePrices({
+  adapter,
+  shopId,
+  policy,
+  tiers = [],
+  catalogProducts = [],
+  pagination = null,
+  fullCatalogVerified = false,
+  minExpectedCombinations = 1
+}) {
+  const numShopId = Number(shopId);
+  if (!Number.isSafeInteger(numShopId) || numShopId <= 0 || (typeof shopId !== 'number' && typeof shopId !== 'string') || (typeof shopId === 'string' && !/^\d+$/.test(shopId.trim()))) {
+    throw new TypeError('Invalid shopId: must be positive numeric tenant ID');
+  }
+  if (!Array.isArray(tiers) || tiers.length === 0) throw new TypeError('Tiers must be non-empty array');
+
+  const isAdapterVerified = Boolean(
+    (typeof adapter?.isFullCatalogVerified === 'function' && adapter.isFullCatalogVerified() === true) ||
+    adapter?.fullCatalogVerified === true ||
+    fullCatalogVerified === true
+  );
+
+  // Verify pagination completeness (INC-012)
+  const isTruncated = Boolean(
+    pagination && (
+      pagination.isComplete === false ||
+      (pagination.pageCount > 1 && pagination.page !== undefined && pagination.page < pagination.pageCount)
+    )
+  );
+
+  const counts = { total: 0, match: 0, drift: 0, missing: 0, skipped: 0, unknown: 0 };
+  const drifts = [];
+  const checkedProducts = new Set();
+  const checkedPricelists = new Set();
+  const seenVariantCodes = new Set();
+
+  for (const product of catalogProducts) {
+    checkedProducts.add(product.guid);
+
+    if (product.visibility !== 'normal' && product.visibility !== undefined) {
+      counts.skipped += (product.variants?.length || 1) * tiers.length;
+      continue;
+    }
+
+    const brandCap = product.brandCap ?? policy?.brandCaps?.find(b => b.id === product.brandId)?.percent ?? null;
+    const categoryCaps = product.categoryCaps ?? (policy?.categoryCaps?.filter(c => (product.categoryIds || []).includes(c.id)).map(c => c.percent) || []);
+    const productCap = product.productCap ?? policy?.productCaps?.find(p => p.id === product.guid)?.percent ?? null;
+
+    if (!Array.isArray(product.variants) || product.variants.length === 0) {
+      for (const tier of tiers) {
+        counts.total++;
+        counts.unknown++;
+        drifts.push({
+          code: `missing-variants-${product.guid}`,
+          targetPricelistId: tier.pricelistId,
+          status: 'UNKNOWN',
+          reason: 'missing_product_variants',
+          expected: null,
+          actual: null
+        });
+      }
+      continue;
+    }
+
+    for (const variant of product.variants) {
+      const code = variant.code;
+      if (!variant.visible && variant.visible !== undefined) {
+        counts.skipped += tiers.length;
+        continue;
+      }
+
+      if (!code || typeof code !== 'string' || !code.trim()) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code: code || `unknown-${product.guid}`,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_variant_code',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+
+      // Duplicate variant detection (INC-010)
+      if (seenVariantCodes.has(code)) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'duplicate_variant_code',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+      seenVariantCodes.add(code);
+
+      // Read base price from default pricelist
+      const baseMinor = variant.basePriceMinor;
+      if (!Number.isSafeInteger(baseMinor) || baseMinor <= 0) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_or_invalid_base_price',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+
+      if (variant.missingMarginCost === true) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_purchase_price_for_margin_floor',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+
+      const explicitActionMinor = variant.actionPriceMinor ?? null;
+      const scheduledActionMinor = resolveScheduledPromotionActionMinor({
+        baseMinor,
+        code,
+        brand: [product.brand, product.brandName, product.brandId],
+        productPromotions: policy?.scheduledPromotions,
+        brandPromotions: policy?.brandPromotions,
+        now: policy?.now
+      });
+      let actionMinor = null;
+      if (explicitActionMinor !== null && scheduledActionMinor !== null) {
+        actionMinor = Math.min(explicitActionMinor, scheduledActionMinor);
+      } else {
+        actionMinor = explicitActionMinor ?? scheduledActionMinor;
+      }
+
+      for (const tier of tiers) {
+        counts.total++;
+        checkedPricelists.add(tier.pricelistId);
+
+        const minimumMinor = variant.minimumMinor ?? product.minimumMinor ?? policy?.minimumMinor ?? null;
+        const decision = evaluatePriceDecision({
+          baseMinor,
+          actionMinor,
+          tierPercent: tier.percent,
+          productCap,
+          brandCap,
+          categoryCaps,
+          categoryCap: categoryCaps.length ? Math.min(...categoryCaps) : null,
+          capPriority: policy?.capPriority ?? 'most_restrictive',
+          salePolicy: policy?.salePolicy ?? 'okfish_compatible',
+          minimumMinor
+        });
+
+        const expectedMinor = decision.priceMinor;
+
+        // Actual price in target pricelist
+        const actualEntry = variant.perPricelistPrices?.[tier.pricelistId];
+        if (actualEntry === undefined || actualEntry === null) {
+          counts.missing++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'MISSING',
+            reason: 'tier_price_missing_in_shoptet',
+            expected: expectedMinor,
+            actual: null
+          });
+          continue;
+        }
+
+        const actualMinor = actualEntry.priceMinor;
+
+        // Safety gate check (Task 1): If manual action price breaches margin floor,
+        // it cannot be classified as MATCH. Surfacing safety conflict fails closed.
+        if (decision.status === 'BLOCKED_NO_WRITE') {
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'UNKNOWN',
+            reason: decision.reason || 'manual_action_below_margin_floor',
+            expected: expectedMinor,
+            actual: actualMinor
+          });
+          continue;
+        }
+
+        if (actualMinor === expectedMinor) {
+          counts.match++;
+        } else {
+          counts.drift++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'DRIFT',
+            reason: 'price_mismatch',
+            expected: expectedMinor,
+            actual: actualMinor,
+            deltaMinor: actualMinor - expectedMinor
+          });
+        }
+      }
+    }
+  }
+
+  let selfCheck = evaluateSelfCheck({
+    totalChecked: counts.total,
+    validlyEvaluated: counts.match + counts.drift + counts.missing,
+    unknownCount: counts.unknown,
+    minExpectedCombinations
+  });
+
+  if (isTruncated) {
+    selfCheck = {
+      passed: false,
+      reason: 'incomplete_pagination_truncated_run'
+    };
+  } else if (!pagination && !isAdapterVerified) {
+    selfCheck = {
+      passed: false,
+      reason: 'unverified_coverage_pagination_metadata_missing'
+    };
+  }
+
+  return {
+    shopId,
+    type: 'price',
+    timestamp: new Date().toISOString(),
+    policyVersion: policy?.version ?? 1,
+    counts,
+    selfCheckPassed: selfCheck.passed,
+    selfCheckReason: selfCheck.reason,
+    cardinality: {
+      productsChecked: checkedProducts.size,
+      pricelistsChecked: checkedPricelists.size,
+      combinationsChecked: counts.total,
+      combinationsValid: counts.match + counts.drift + counts.missing,
+      minExpected: minExpectedCombinations
+    },
+    remediationMode: 'OFF',
+    drifts
+  };
+}
+
+/**
+ * Read-only Coupon Reconciliation.
+ * Reads actual discountCoupon and minPriceRatio, computes expected values, and audits drift without writing.
+ */
+export async function reconcileCoupons({
+  adapter,
+  shopId,
+  couponConfig = {},
+  tiers = [],
+  catalogProducts = [],
+  pagination = null,
+  fullCatalogVerified = false,
+  minExpectedCombinations = 1
+}) {
+  const numShopId = Number(shopId);
+  if (!Number.isSafeInteger(numShopId) || numShopId <= 0 || (typeof shopId !== 'number' && typeof shopId !== 'string') || (typeof shopId === 'string' && !/^\d+$/.test(shopId.trim()))) {
+    throw new TypeError('Invalid shopId: must be positive numeric tenant ID');
+  }
+  if (!Array.isArray(tiers) || tiers.length === 0) throw new TypeError('Tiers must be non-empty array');
+
+  const isAdapterVerified = Boolean(
+    (typeof adapter?.isFullCatalogVerified === 'function' && adapter.isFullCatalogVerified() === true) ||
+    adapter?.fullCatalogVerified === true ||
+    fullCatalogVerified === true
+  );
+
+  // Verify pagination completeness (INC-012)
+  const isTruncated = Boolean(
+    pagination && (
+      pagination.isComplete === false ||
+      (pagination.pageCount > 1 && pagination.page !== undefined && pagination.page < pagination.pageCount)
+    )
+  );
+
+  const resolvedMainId = couponConfig.defaultPricelistId ?? couponConfig.mainPricelistId ?? adapter?.defaultPricelistId ?? adapter?.mainPricelistId;
+  const couponPolicy = normalizeCouponPolicy({
+    ...couponConfig,
+    defaultPricelistId: resolvedMainId
+  });
+  const counts = { total: 0, match: 0, drift: 0, missing: 0, skipped: 0, unknown: 0 };
+  const drifts = [];
+  const checkedProducts = new Set();
+  const checkedPricelists = new Set();
+  const seenVariantCodes = new Set();
+
+  for (const product of catalogProducts) {
+    checkedProducts.add(product.guid);
+
+    if (product.visibility !== 'normal' && product.visibility !== undefined) {
+      counts.skipped += (product.variants?.length || 1) * tiers.length;
+      continue;
+    }
+
+    const productCap = product.productCap ?? couponConfig?.productCaps?.find(p => p.id === product.guid)?.percent ?? null;
+    const brandCap = product.brandCap ?? couponConfig?.brandCaps?.find(b => b.id === product.brandId)?.percent ?? null;
+    const categoryCaps = product.categoryCaps ?? (couponConfig?.categoryCaps?.filter(c => (product.categoryIds || []).includes(c.id)).map(c => c.percent) || []);
+    const manualCouponDisabled = product.manualCouponDisabled === true;
+
+    if (!Array.isArray(product.variants) || product.variants.length === 0) {
+      for (const tier of tiers) {
+        counts.total++;
+        counts.unknown++;
+        drifts.push({
+          code: `missing-variants-${product.guid}`,
+          targetPricelistId: tier.pricelistId,
+          status: 'UNKNOWN',
+          reason: 'missing_product_variants',
+          expected: null,
+          actual: null
+        });
+      }
+      continue;
+    }
+
+    for (const variant of product.variants) {
+      const code = variant.code;
+      if (!variant.visible && variant.visible !== undefined) {
+        counts.skipped += tiers.length;
+        continue;
+      }
+
+      if (!code || typeof code !== 'string' || !code.trim()) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code: code || `unknown-${product.guid}`,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_variant_code',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+
+      // Duplicate variant detection (INC-010)
+      if (seenVariantCodes.has(code)) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'duplicate_variant_code',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+      seenVariantCodes.add(code);
+
+      const baseMinor = variant.basePriceMinor;
+      if (!Number.isSafeInteger(baseMinor) || baseMinor <= 0) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_base_price',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+
+      if (variant.missingMarginCost === true) {
+        for (const tier of tiers) {
+          counts.total++;
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            status: 'UNKNOWN',
+            reason: 'missing_purchase_price_for_margin_floor',
+            expected: null,
+            actual: null
+          });
+        }
+        continue;
+      }
+
+      const explicitActionMinor = variant.actionPriceMinor ?? null;
+      const scheduledActionMinor = resolveScheduledPromotionActionMinor({
+        baseMinor,
+        code,
+        brand: [product.brand, product.brandName, product.brandId],
+        productPromotions: couponConfig?.scheduledPromotions,
+        brandPromotions: couponConfig?.brandPromotions,
+        now: couponConfig?.now
+      });
+      const effectiveActionMinor = explicitActionMinor !== null && scheduledActionMinor !== null
+        ? Math.min(explicitActionMinor, scheduledActionMinor)
+        : (explicitActionMinor ?? scheduledActionMinor);
+      const hasActiveSale = effectiveActionMinor !== null && effectiveActionMinor < baseMinor;
+
+      for (const tier of tiers) {
+        counts.total++;
+        checkedPricelists.add(tier.pricelistId);
+
+        const isLocked = couponPolicy.lockedPricelistIds.has(tier.pricelistId) ||
+                         couponPolicy.lockedTierNames.has(tier.name);
+
+        const actualEntry = variant.perPricelistPrices?.[tier.pricelistId];
+        if (!actualEntry) {
+          counts.missing++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'MISSING',
+            reason: 'tier_entry_missing',
+            expected: null,
+            actual: null
+          });
+          continue;
+        }
+
+        const tierPriceMinor = actualEntry.priceMinor;
+        const expected = evaluateCouponSettings({
+          mode: couponPolicy.mode,
+          ceilingPercent: couponPolicy.ceilingPercent,
+          isLocked,
+          baseMinor,
+          tierPriceMinor,
+          actionPriceMinor: effectiveActionMinor,
+          productCap,
+          brandCap,
+          categoryCaps,
+          capPriority: couponPolicy.capPriority,
+          hasActiveSale,
+          manualCouponDisabled,
+          minimumMinor: variant.minimumMinor ?? product.minimumMinor ?? couponPolicy.minimumMinor ?? null
+        });
+
+        // Task 5: Absent sales field or discountCoupon must not silently default to true (fail closed)
+        if (!actualEntry.sales || actualEntry.sales.discountCoupon === undefined || actualEntry.sales.discountCoupon === null) {
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'UNKNOWN',
+            reason: 'missing_sales_coupon_observation',
+            expected: {
+              discountCoupon: expected.applyDiscountCoupon,
+              minPriceRatio: expected.minPriceRatio
+            },
+            actual: null
+          });
+          continue;
+        }
+
+        // Task C: Present sales with missing minPriceRatio must be classified as UNKNOWN (not silently treated as null)
+        if (!('minPriceRatio' in actualEntry.sales) || actualEntry.sales.minPriceRatio === undefined) {
+          counts.unknown++;
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'UNKNOWN',
+            reason: 'missing_min_price_ratio_observation',
+            expected: {
+              discountCoupon: expected.applyDiscountCoupon,
+              minPriceRatio: expected.minPriceRatio
+            },
+            actual: actualEntry.sales
+          });
+          continue;
+        }
+
+        const actualCoupon = actualEntry.sales.discountCoupon;
+        const actualRatio = actualEntry.sales.minPriceRatio;
+
+        const couponMatches = actualCoupon === expected.applyDiscountCoupon;
+        const ratioMatches = actualRatio === expected.minPriceRatio;
+
+        if (couponMatches && ratioMatches) {
+          counts.match++;
+        } else {
+          counts.drift++;
+          let driftType = 'coupon_config_drift';
+          if (isLocked && actualCoupon === true) {
+            driftType = 'INC-011_lock_violation';
+          }
+          drifts.push({
+            code,
+            targetPricelistId: tier.pricelistId,
+            tierName: tier.name,
+            status: 'DRIFT',
+            reason: driftType,
+            expected: {
+              discountCoupon: expected.applyDiscountCoupon,
+              minPriceRatio: expected.minPriceRatio
+            },
+            actual: {
+              discountCoupon: actualCoupon,
+              minPriceRatio: actualRatio
+            }
+          });
+        }
+      }
+    }
+  }
+
+  let selfCheck = evaluateSelfCheck({
+    totalChecked: counts.total,
+    validlyEvaluated: counts.match + counts.drift + counts.missing,
+    unknownCount: counts.unknown,
+    minExpectedCombinations
+  });
+
+  if (isTruncated) {
+    selfCheck = {
+      passed: false,
+      reason: 'incomplete_pagination_truncated_run'
+    };
+  } else if (!pagination && !isAdapterVerified) {
+    selfCheck = {
+      passed: false,
+      reason: 'unverified_coverage_pagination_metadata_missing'
+    };
+  }
+
+  return {
+    shopId,
+    type: 'coupon',
+    timestamp: new Date().toISOString(),
+    policyMode: couponPolicy.mode,
+    counts,
+    selfCheckPassed: selfCheck.passed,
+    selfCheckReason: selfCheck.reason,
+    cardinality: {
+      productsChecked: checkedProducts.size,
+      pricelistsChecked: checkedPricelists.size,
+      combinationsChecked: counts.total,
+      combinationsValid: counts.match + counts.drift + counts.missing,
+      minExpected: minExpectedCombinations
+    },
+    remediationMode: 'OFF',
+    drifts
+  };
+}
